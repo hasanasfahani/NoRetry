@@ -144,6 +144,7 @@ export type DetectOutcomeRequest = z.infer<typeof DetectOutcomeRequestSchema>
 export type DetectOutcomeResponse = z.infer<typeof DetectOutcomeResponseSchema>
 export type DiagnoseFailureRequest = z.infer<typeof DiagnoseFailureRequestSchema>
 export type DiagnoseFailureResponse = z.infer<typeof DiagnoseFailureResponseSchema>
+export type FeedbackRequest = z.infer<typeof FeedbackRequestSchema>
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 export type PromptIntent = z.infer<typeof PromptIntentSchema>
 export type PromptSurface = z.infer<typeof PromptSurfaceSchema>

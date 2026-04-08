@@ -123,7 +123,17 @@ function normalizeQuestions(value: unknown) {
         options
       }
     })
-    .filter(Boolean)
+    .filter(
+      (
+        question
+      ): question is {
+        id: string
+        label: string
+        helper: string
+        mode: "single" | "multi"
+        options: string[]
+      } => Boolean(question)
+    )
     .slice(0, 10)
 }
 
@@ -413,7 +423,7 @@ export async function runFailureDiagnosis(input: DiagnoseFailureRequest): Promis
   const result = llmResult
     ? {
         ...llmResult,
-        source_type: "LLM",
+        source_type: "LLM" as const,
         token_estimate: 1200
       }
     : fallback
