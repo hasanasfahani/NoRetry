@@ -90,6 +90,8 @@ Each question must be an object with:
 Do not include an "Other" option. The client adds that automatically.
 Return exactly 3 questions when possible. If only 1 or 2 useful new questions exist, return only those.
 If you cannot produce prompt-specific useful questions, return an empty array instead of generic filler.
+Example valid response:
+{"clarification_questions":[{"id":"popup_trigger_state","label":"What happens when you click the badge?","helper":"Choose the closest visible outcome.","mode":"single","options":["Nothing opens","Popup opens off-screen","Popup opens blank","Popup opens but breaks"]}]}
 `
 
 export function buildExtendQuestionsUserPrompt(input: ExtendQuestionsRequest) {

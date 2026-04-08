@@ -244,6 +244,46 @@ function buildPopupFollowUpQuestions(
       mode: "single" as const,
       options: ["After clicking the badge", "After typing in Replit", "After answering questions", "After clicking Generate"],
       skip: () => hasAnswered("popup_trigger", [/clicking the badge|typing|clicking generate/])
+    },
+    {
+      id: "popup_position_expectation",
+      label: "Where should the popup appear on screen?",
+      helper: "Choose the placement that should feel correct.",
+      mode: "single" as const,
+      options: ["Centered modal", "Near the badge", "Docked to the prompt area", "As a side panel"],
+      skip: () => false
+    },
+    {
+      id: "popup_visibility_layer",
+      label: "What layering problem seems closest?",
+      helper: "Choose the issue that best matches the UI stack problem.",
+      mode: "single" as const,
+      options: ["Behind the page UI", "Behind the prompt area", "Cut off by the viewport", "Not rendered at all"],
+      skip: () => false
+    },
+    {
+      id: "popup_content_missing",
+      label: "Which popup content is missing right now?",
+      helper: "Choose the part of the flow that never becomes visible.",
+      mode: "single" as const,
+      options: ["Questions", "Generated prompt", "Action buttons", "The entire popup"],
+      skip: () => false
+    },
+    {
+      id: "popup_scope_limit",
+      label: "What should the fix stay focused on?",
+      helper: "Choose the tightest scope for the next prompt.",
+      mode: "single" as const,
+      options: ["Popup visibility only", "Popup flow only", "Prompt replacement only", "End-to-end popup UX"],
+      skip: () => false
+    },
+    {
+      id: "popup_reliability_goal",
+      label: "What reliability issue should be fixed first?",
+      helper: "Choose the behavior that must stop breaking.",
+      mode: "single" as const,
+      options: ["Questions changing unexpectedly", "Answers disappearing", "Prompt section resetting", "Buttons not responding"],
+      skip: () => false
     }
   ]
 
@@ -386,9 +426,12 @@ export async function runPromptRefinement(input: RefinePromptRequest): Promise<R
 }
 
 export async function runExtendQuestions(input: ExtendQuestionsRequest): Promise<ExtendQuestionsResponse> {
+  const popupLike = /\bpopup\b|\bmodal\b|\bbadge\b|\bicon\b|\bprompt area\b|\bscreen\b/i.test(input.prompt)
+  const popupFallbackQuestions = buildPopupFollowUpQuestions(input.prompt, input.existing_questions, input.answers)
+
   if (runtimeFlags.useMocks) {
     return ExtendQuestionsResponseSchema.parse({
-      clarification_questions: [],
+      clarification_questions: popupLike ? popupFallbackQuestions : [],
       ai_available: false
     })
   }
@@ -399,13 +442,12 @@ export async function runExtendQuestions(input: ExtendQuestionsRequest): Promise
 
   if (!llmRaw) {
     return ExtendQuestionsResponseSchema.parse({
-      clarification_questions: [],
+      clarification_questions: popupLike ? popupFallbackQuestions : [],
       ai_available: false
     })
   }
 
   const record = llmRaw && typeof llmRaw === "object" ? (llmRaw as Record<string, unknown>) : {}
-  const popupLike = /\bpopup\b|\bmodal\b|\bbadge\b|\bicon\b|\bprompt area\b|\bscreen\b/i.test(input.prompt)
   const llmQuestions = dedupeQuestions(normalizeQuestions(record.clarification_questions), input.existing_questions)
   const strongQuestions = llmQuestions.filter(
     (question) => !/technology|framework|react|vue|jquery|vanilla|experience level|experience|general/i.test(
@@ -413,10 +455,9 @@ export async function runExtendQuestions(input: ExtendQuestionsRequest): Promise
     )
   )
 
-  const clarificationQuestions =
-    popupLike && strongQuestions.length < 3
-      ? buildPopupFollowUpQuestions(input.prompt, input.existing_questions, input.answers)
-      : strongQuestions.slice(0, 3)
+  const clarificationQuestions = popupLike
+    ? dedupeQuestions([...strongQuestions, ...popupFallbackQuestions], input.existing_questions).slice(0, 3)
+    : strongQuestions.slice(0, 3)
 
   return ExtendQuestionsResponseSchema.parse({
     clarification_questions: clarificationQuestions,

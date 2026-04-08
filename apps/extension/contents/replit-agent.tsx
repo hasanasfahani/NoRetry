@@ -453,6 +453,7 @@ export default function PromptOptimizerApp() {
   async function handleAddQuestions() {
     if (!beforeResult) return
     setIsAddingQuestions(true)
+    setQuestionLoadError(null)
 
     try {
       const sourcePrompt = promptRef.current ? readPromptValue(promptRef.current).trim() : promptPreview.trim()
@@ -472,7 +473,11 @@ export default function PromptOptimizerApp() {
           question_source: "AI",
           ai_available: result.ai_available
         })
+      } else {
+        setQuestionLoadError("No more strong follow-up questions were available for this prompt yet.")
       }
+    } catch (error) {
+      setQuestionLoadError(error instanceof Error ? error.message : "Could not load more questions.")
     } finally {
       setIsAddingQuestions(false)
     }
