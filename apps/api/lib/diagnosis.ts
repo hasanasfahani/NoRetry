@@ -38,7 +38,11 @@ async function callStructuredJson<T>(
 ): Promise<T | null> {
   const raw = await callDeepSeekJson(systemPrompt, trimForBudget(userPrompt, 5000), maxTokens)
   if (!raw) return null
-  return schema.parse(parseLooseJson(raw))
+  try {
+    return schema.parse(parseLooseJson(raw))
+  } catch {
+    return null
+  }
 }
 
 function parseLooseJson(raw: string): unknown {

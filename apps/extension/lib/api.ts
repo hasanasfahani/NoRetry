@@ -16,8 +16,9 @@ import type {
 const analyzePromptFallback = analyzePromptLocally
 const detectOutcomeFallback = detectOutcomeLocallyFromRules
 
-const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "http://localhost:3000"
-const REQUEST_TIMEOUT_MS = 8000
+const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
+const USE_DIRECT_HOSTED_FETCH = API_BASE.startsWith("https://")
+const REQUEST_TIMEOUT_MS = USE_DIRECT_HOSTED_FETCH ? 20000 : 8000
 
 function getApiBases() {
   const bases = [API_BASE]
@@ -59,9 +60,23 @@ function encodeBase64Utf8(value: string) {
 
 function serializeBody(input: unknown) {
   const json = JSON.stringify(sanitizeForJson(input))
+  if (USE_DIRECT_HOSTED_FETCH) {
+    return json
+  }
   return JSON.stringify({
     __po_encoded_body: encodeBase64Utf8(json)
   })
+}
+
+function normalizeFetchError(error: unknown) {
+  if (error instanceof Error) {
+    if (error.name === "AbortError") {
+      return new Error("The AI request timed out before the server responded.")
+    }
+    return error
+  }
+
+  return new Error("Request failed")
 }
 
 async function postViaBackground<TInput, TOutput>(
@@ -106,8 +121,34 @@ async function post<TInput, TOutput>(
   input: TInput,
   parseOutput: (value: unknown) => TOutput
 ) {
-  let proxyFailure = ""
   const serializedBody = serializeBody(input)
+
+  if (USE_DIRECT_HOSTED_FETCH) {
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+
+    try {
+      const response = await fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: serializedBody,
+        signal: controller.signal
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "")
+        throw new Error(`Request failed with ${response.status}${errorText ? `: ${errorText}` : ""}`)
+      }
+
+      return parseOutput(await response.json())
+    } catch (error) {
+      throw normalizeFetchError(error)
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  }
+
+  let proxyFailure = ""
   try {
     return await postViaBackground(path, input, parseOutput)
   } catch (proxyError) {
@@ -134,7 +175,7 @@ async function post<TInput, TOutput>(
 
         return parseOutput(await response.json())
       } catch (error) {
-        lastError = error
+        lastError = normalizeFetchError(error)
       }
     }
 

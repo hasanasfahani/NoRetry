@@ -4,7 +4,7 @@ type ProxyRequestMessage = {
   body: string
 }
 
-const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "http://localhost:3000"
+const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
 const REQUEST_TIMEOUT_MS = 8000
 
 function getApiBases() {

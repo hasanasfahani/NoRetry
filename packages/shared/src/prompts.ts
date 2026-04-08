@@ -62,6 +62,9 @@ export const EXTEND_QUESTIONS_SYSTEM_PROMPT = `
 You generate exactly 3 additional clarification questions for browser AI prompt optimization.
 Return compact JSON only with:
 clarification_questions.
+Return a single valid JSON object only. Do not include markdown, code fences, commentary, trailing commas, or explanatory text.
+The top-level response must be:
+{"clarification_questions":[...]}
 Use the original prompt, current answers, and existing questions.
 Your questions must add new missing detail and must not repeat existing questions.
 Questions must be specific to the user's prompt, not generic coaching.
