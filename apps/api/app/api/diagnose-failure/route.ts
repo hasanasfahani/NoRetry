@@ -1,4 +1,4 @@
-import { DiagnoseFailureRequestSchema } from "@prompt-optimizer/shared"
+import { DiagnoseFailureRequestSchema, type DiagnoseFailureRequest } from "@prompt-optimizer/shared"
 import { parseJson, ok, badRequest, options } from "../../../lib/http"
 import { runFailureDiagnosis } from "../../../lib/diagnosis"
 import { saveDiagnosis } from "../../../lib/repository"
@@ -10,7 +10,7 @@ export function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const input = await parseJson(request, DiagnoseFailureRequestSchema)
+    const input = await parseJson<DiagnoseFailureRequest>(request, DiagnoseFailureRequestSchema)
     if (!canRunDiagnosis(input.session_id)) {
       return badRequest("Diagnosis rate limit reached for this session.", 429)
     }

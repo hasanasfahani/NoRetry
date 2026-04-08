@@ -1,4 +1,4 @@
-import { FeedbackRequestSchema } from "@prompt-optimizer/shared"
+import { FeedbackRequestSchema, type FeedbackRequest } from "@prompt-optimizer/shared"
 import { parseJson, ok, badRequest, options } from "../../../lib/http"
 import { saveFeedback } from "../../../lib/repository"
 
@@ -8,7 +8,7 @@ export function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const input = await parseJson(request, FeedbackRequestSchema)
+    const input = await parseJson<FeedbackRequest>(request, FeedbackRequestSchema)
     await saveFeedback(input.outcome_event_id, input.feedback_type)
     return ok({ success: true })
   } catch (error) {

@@ -1,4 +1,4 @@
-import { DetectOutcomeRequestSchema, detectOutcomeLocally } from "@prompt-optimizer/shared"
+import { DetectOutcomeRequestSchema, detectOutcomeLocally, type DetectOutcomeRequest } from "@prompt-optimizer/shared"
 import { parseJson, ok, badRequest, options } from "../../../lib/http"
 import { saveOutcomeEvent, savePromptEvent } from "../../../lib/repository"
 
@@ -8,7 +8,7 @@ export function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const input = await parseJson(request, DetectOutcomeRequestSchema)
+    const input = await parseJson<DetectOutcomeRequest>(request, DetectOutcomeRequestSchema)
     const result = detectOutcomeLocally(input)
     const outcomeEventId = crypto.randomUUID()
 

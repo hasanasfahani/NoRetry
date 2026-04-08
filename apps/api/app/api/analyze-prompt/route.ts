@@ -1,4 +1,4 @@
-import { AnalyzePromptRequestSchema } from "@prompt-optimizer/shared"
+import { AnalyzePromptRequestSchema, type AnalyzePromptRequest } from "@prompt-optimizer/shared"
 import { parseJson, ok, badRequest, options } from "../../../lib/http"
 import { runBeforeAnalysis } from "../../../lib/diagnosis"
 
@@ -8,7 +8,7 @@ export function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const input = await parseJson(request, AnalyzePromptRequestSchema)
+    const input = await parseJson<AnalyzePromptRequest>(request, AnalyzePromptRequestSchema)
     const result = await runBeforeAnalysis(input)
     return ok(result)
   } catch (error) {

@@ -1,4 +1,4 @@
-import { ExtendQuestionsRequestSchema } from "@prompt-optimizer/shared"
+import { ExtendQuestionsRequestSchema, type ExtendQuestionsRequest } from "@prompt-optimizer/shared"
 import { parseJson, ok, badRequest, options } from "../../../lib/http"
 import { runExtendQuestions } from "../../../lib/diagnosis"
 
@@ -8,7 +8,7 @@ export function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const input = await parseJson(request, ExtendQuestionsRequestSchema)
+    const input = await parseJson<ExtendQuestionsRequest>(request, ExtendQuestionsRequestSchema)
     const result = await runExtendQuestions(input)
     return ok(result)
   } catch (error) {

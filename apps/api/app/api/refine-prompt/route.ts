@@ -1,4 +1,4 @@
-import { RefinePromptRequestSchema } from "@prompt-optimizer/shared"
+import { RefinePromptRequestSchema, type RefinePromptRequest } from "@prompt-optimizer/shared"
 import { runPromptRefinement } from "../../../lib/diagnosis"
 import { badRequest, ok, options, parseJson } from "../../../lib/http"
 
@@ -8,7 +8,7 @@ export function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const input = await parseJson(request, RefinePromptRequestSchema)
+    const input = await parseJson<RefinePromptRequest>(request, RefinePromptRequestSchema)
     const result = await runPromptRefinement(input)
     return ok(result)
   } catch (error) {
