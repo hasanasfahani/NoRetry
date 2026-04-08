@@ -38,7 +38,34 @@ async function callStructuredJson<T>(
 ): Promise<T | null> {
   const raw = await callDeepSeekJson(systemPrompt, trimForBudget(userPrompt, 5000), maxTokens)
   if (!raw) return null
-  return schema.parse(JSON.parse(raw))
+  return schema.parse(parseLooseJson(raw))
+}
+
+function parseLooseJson(raw: string): unknown {
+  const cleaned = raw.trim()
+
+  try {
+    return JSON.parse(cleaned)
+  } catch {
+    const startCandidates = [cleaned.indexOf("{"), cleaned.indexOf("[")].filter((index) => index >= 0)
+    const start = startCandidates.length ? Math.min(...startCandidates) : -1
+    if (start === -1) {
+      throw new Error("Model response did not contain JSON")
+    }
+
+    for (let end = cleaned.length; end > start; end -= 1) {
+      const slice = cleaned.slice(start, end).trim()
+      if (!slice) continue
+
+      try {
+        return JSON.parse(slice)
+      } catch {
+        continue
+      }
+    }
+
+    throw new Error("Model response contained malformed JSON")
+  }
 }
 
 function normalizeScore(value: unknown): "LOW" | "MID" | "HIGH" {
