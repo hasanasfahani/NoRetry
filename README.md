@@ -37,7 +37,7 @@ The MVP is split into six lean layers:
 - Backend API: Next.js App Router route handlers
 - Shared contracts: Zod + shared TypeScript package
 - Database: PostgreSQL via Prisma, with in-memory fallback for MVP/local mode
-- LLM provider: DeepSeek, defaulting to mock mode when no key is configured
+- LLM providers: DeepSeek with Kimi fallback, defaulting to mock mode when no key is configured
 
 Why this stack:
 
@@ -221,7 +221,7 @@ npm run dev:extension
 
 ### Local-only and mock mode
 
-If `DEEPSEEK_API_KEY` is missing or `PROMPT_OPTIMIZER_USE_MOCKS=true`, the app still works:
+If both `DEEPSEEK_API_KEY` and `KIMI_API_KEY` are missing, or `PROMPT_OPTIMIZER_USE_MOCKS=true`, the app still works:
 
 - prompt analysis uses local heuristics
 - guided questions use local heuristics

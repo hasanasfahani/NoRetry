@@ -607,14 +607,18 @@ export default function PromptOptimizerApp() {
         })
 
         nextQuestions = extendResult.clarification_questions.slice(0, 2)
-        nextQuestionSource = extendResult.clarification_questions.length ? "AI" : "NONE"
+        nextQuestionSource = extendResult.clarification_questions.length
+          ? extendResult.ai_available
+            ? "AI"
+            : "FALLBACK"
+          : "NONE"
         nextAiAvailable = extendResult.ai_available
       } catch (error) {
         nextAiAvailable = false
         setQuestionLoadError(error instanceof Error ? error.message : "AI question loading failed")
       }
 
-      if (!nextQuestions.length) {
+      if (!nextAiAvailable) {
         try {
           const analyzeResult = await analyzePromptRemote({
             prompt: sourcePrompt,
@@ -630,7 +634,7 @@ export default function PromptOptimizerApp() {
 
           if (analyzeResult.clarification_questions.length) {
             nextQuestions = analyzeResult.clarification_questions.slice(0, 2)
-            nextQuestionSource = "AI"
+            nextQuestionSource = analyzeResult.ai_available ? "AI" : "FALLBACK"
             nextAiAvailable = analyzeResult.ai_available
             setQuestionLoadError(null)
           }

@@ -33,6 +33,8 @@ loadLocalEnvFile()
 const EnvSchema = z.object({
   DEEPSEEK_API_KEY: z.string().optional(),
   DEEPSEEK_MODEL: z.string().default("deepseek-chat"),
+  KIMI_API_KEY: z.string().optional(),
+  KIMI_MODEL: z.string().default("kimi-k2-turbo-preview"),
   DATABASE_URL: z.string().optional(),
   PROMPT_OPTIMIZER_USE_MOCKS: z.string().default("true"),
   PROMPT_OPTIMIZER_ENABLE_DB: z.string().default("false")
@@ -41,12 +43,14 @@ const EnvSchema = z.object({
 export const env = EnvSchema.parse({
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL,
+  KIMI_API_KEY: process.env.KIMI_API_KEY,
+  KIMI_MODEL: process.env.KIMI_MODEL,
   DATABASE_URL: process.env.DATABASE_URL,
   PROMPT_OPTIMIZER_USE_MOCKS: process.env.PROMPT_OPTIMIZER_USE_MOCKS,
   PROMPT_OPTIMIZER_ENABLE_DB: process.env.PROMPT_OPTIMIZER_ENABLE_DB
 })
 
 export const runtimeFlags = {
-  useMocks: env.PROMPT_OPTIMIZER_USE_MOCKS === "true" || !env.DEEPSEEK_API_KEY,
+  useMocks: env.PROMPT_OPTIMIZER_USE_MOCKS === "true" || (!env.DEEPSEEK_API_KEY && !env.KIMI_API_KEY),
   enableDb: env.PROMPT_OPTIMIZER_ENABLE_DB === "true" && Boolean(env.DATABASE_URL)
 }

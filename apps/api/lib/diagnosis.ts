@@ -26,6 +26,7 @@ import type {
 } from "@prompt-optimizer/shared"
 import { BEFORE_SYSTEM_PROMPT, EXTEND_QUESTIONS_SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT } from "@prompt-optimizer/shared"
 import { callDeepSeekJson } from "./deepseek"
+import { callKimiJson } from "./kimi"
 import { runtimeFlags } from "./env"
 import { getPatternCache, setPatternCache } from "./repository"
 import { trimForBudget } from "./cost-control"
@@ -36,13 +37,23 @@ async function callStructuredJson<T>(
   schema: { parse: (data: unknown) => T },
   maxTokens = 700
 ): Promise<T | null> {
-  const raw = await callDeepSeekJson(systemPrompt, trimForBudget(userPrompt, 5000), maxTokens)
-  if (!raw) return null
-  try {
-    return schema.parse(parseLooseJson(raw))
-  } catch {
-    return null
+  const trimmedPrompt = trimForBudget(userPrompt, 5000)
+  const providers = [
+    () => callDeepSeekJson(systemPrompt, trimmedPrompt, maxTokens),
+    () => callKimiJson(systemPrompt, trimmedPrompt, maxTokens)
+  ]
+
+  for (const callProvider of providers) {
+    try {
+      const raw = await callProvider()
+      if (!raw) continue
+      return schema.parse(parseLooseJson(raw))
+    } catch {
+      continue
+    }
   }
+
+  return null
 }
 
 function parseLooseJson(raw: string): unknown {
