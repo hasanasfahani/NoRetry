@@ -39,8 +39,8 @@ async function callStructuredJson<T>(
 ): Promise<T | null> {
   const trimmedPrompt = trimForBudget(userPrompt, 5000)
   const providers = [
-    () => callDeepSeekJson(systemPrompt, trimmedPrompt, maxTokens),
-    () => callKimiJson(systemPrompt, trimmedPrompt, maxTokens)
+    () => callKimiJson(systemPrompt, trimmedPrompt, maxTokens),
+    () => callDeepSeekJson(systemPrompt, trimmedPrompt, maxTokens)
   ]
 
   for (const callProvider of providers) {

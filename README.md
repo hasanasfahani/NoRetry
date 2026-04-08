@@ -37,7 +37,7 @@ The MVP is split into six lean layers:
 - Backend API: Next.js App Router route handlers
 - Shared contracts: Zod + shared TypeScript package
 - Database: PostgreSQL via Prisma, with in-memory fallback for MVP/local mode
-- LLM providers: DeepSeek with Kimi fallback, defaulting to mock mode when no key is configured
+- LLM providers: Kimi with DeepSeek fallback, defaulting to mock mode when no key is configured
 
 Why this stack:
 
