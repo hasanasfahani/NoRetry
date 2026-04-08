@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id             String        @id
+  source         String
+  startedAt      DateTime      @default(now())
+  endedAt        DateTime?
+  probableStatus String?
+  prompts        PromptEvent[]
+}
+
+model PromptEvent {
+  id             String         @id
+  sessionId      String
+  session        Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  originalPrompt String
+  optimizedPrompt String?
+  finalSentPrompt String
+  promptIntent   String
+  strengthScore  String
+  createdAt      DateTime       @default(now())
+  outcomes       OutcomeEvent[]
+}
+
+model OutcomeEvent {
+  id                     String       @id
+  promptEventId          String
+  promptEvent            PromptEvent  @relation(fields: [promptEventId], references: [id], onDelete: Cascade)
+  outputSnippet          String
+  errorSummary           String?
+  retryCount             Int
+  changedFilesCount      Int
+  changedFilePathsSummary Json
+  detectionFlags         Json
+  probableStatus         String?
+  createdAt              DateTime     @default(now())
+  diagnosis              Diagnosis?
+  feedback               UserFeedback[]
+}
+
+model Diagnosis {
+  id                    String      @id @default(cuid())
+  outcomeEventId        String      @unique
+  outcomeEvent          OutcomeEvent @relation(fields: [outcomeEventId], references: [id], onDelete: Cascade)
+  whyItLikelyFailed     Json
+  whatAiMisunderstood   String
+  whatToFixNextTime     Json
+  improvedRetryPrompt   String?
+  sourceType            String
+  tokenEstimate         Int
+  createdAt             DateTime    @default(now())
+}
+
+model PatternCache {
+  id                String   @id @default(cuid())
+  patternKey        String   @unique
+  diagnosisTemplate Json
+  usageCount        Int      @default(1)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model UserFeedback {
+  id             String      @id @default(cuid())
+  outcomeEventId String
+  outcomeEvent   OutcomeEvent @relation(fields: [outcomeEventId], references: [id], onDelete: Cascade)
+  feedbackType   String
+  createdAt      DateTime    @default(now())
+}

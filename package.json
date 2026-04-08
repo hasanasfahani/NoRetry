@@ -1,0 +1,16 @@
+{
+  "name": "prompt-optimizer",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @prompt-optimizer/api",
+    "dev:extension": "npm run dev --workspace @prompt-optimizer/extension",
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  }
+}

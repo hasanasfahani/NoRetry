@@ -1,0 +1,9 @@
+node_modules
+.next
+.plasmo
+build
+dist
+.env
+.env.local
+*.log
+coverage
