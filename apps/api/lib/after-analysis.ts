@@ -570,11 +570,19 @@ function fallbackStage2(
     .slice(0, 3)
     .map((constraint) => `The answer did not explicitly address this constraint: ${constraint}`)
 
+  const problemFit = !goalMatched
+    ? "wrong_direction"
+    : !codeHeavyTask && detail.inspection_depth !== "summary_only"
+      ? "correct"
+      : stage1.scope_assessment === "broad"
+        ? "partial"
+        : "correct"
+
   return Stage2OutputSchema.parse({
     addressed_criteria: addressed,
     missing_criteria: missing,
     constraint_risks: risks,
-    problem_fit: goalMatched ? (stage1.scope_assessment === "broad" ? "partial" : "correct") : "wrong_direction",
+    problem_fit: problemFit,
     analysis_notes: dedupe(
       [
         stage1.response_mode === "uncertain" ? "The assistant sounded uncertain." : "",
@@ -798,7 +806,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   const rawResponse = parsed.response_text_fallback || parsed.response_summary.response_text
   const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary)
-  const shouldZoomIn = (deepAnalysisRequested || shouldInspectDetails(intent, parsed.response_summary, safeStage1)) && evidenceCandidates.length > 0
+  const shouldZoomIn = deepAnalysisRequested && evidenceCandidates.length > 0
 
   let targetedEvidence = EvidenceTargetingSchema.parse({
     selected_candidate_ids: [],
