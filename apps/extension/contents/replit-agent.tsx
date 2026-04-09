@@ -30,8 +30,10 @@ import {
   attachAnalysisResult,
   createAttempt,
   getActiveAttempt,
+  getCodeAnalysisMode,
   getLatestSubmittedAttempt,
-  markAttemptSubmitted
+  markAttemptSubmitted,
+  setCodeAnalysisMode
 } from "../lib/attempt-session-manager"
 import {
   collectChangedFilesSummary,
@@ -95,6 +97,8 @@ export default function PromptOptimizerApp() {
   const [questionLoadError, setQuestionLoadError] = useState<string | null>(null)
   const [afterVerdict, setAfterVerdict] = useState<AfterAnalysisResult | null>(null)
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
+  const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
+  const [codeAnalysisMode, setCodeAnalysisModeState] = useState<"quick" | "deep">("quick")
   const promptRef = useRef<HTMLElement | null>(null)
   const submitRef = useRef<HTMLButtonElement | null>(null)
   const pendingPromptRef = useRef<PendingPrompt | null>(null)
@@ -107,6 +111,10 @@ export default function PromptOptimizerApp() {
   const lastPromptValueRef = useRef("")
   const latestAssistantNodeRef = useRef<HTMLElement | null>(null)
   const lastEvaluatedAssistantTextRef = useRef("")
+
+  useEffect(() => {
+    void getCodeAnalysisMode().then((mode) => setCodeAnalysisModeState(mode))
+  }, [])
 
   function buildAfterPlaceholder(
     finding: string,
@@ -353,6 +361,9 @@ export default function PromptOptimizerApp() {
       setPromptPreview(prompt.slice(0, 220))
       setIssueVisible(false)
       setDiagnosis(null)
+      if (prompt.trim() && afterVerdict) {
+        setAfterVerdict(null)
+      }
       if (!prompt.trim()) {
         setIsAnalyzingPrompt(false)
       }
@@ -449,26 +460,24 @@ export default function PromptOptimizerApp() {
   useEffect(() => {
     if (getPromptSurface() !== "CHATGPT") return
 
-    let stableTimer: number | null = null
+    let lastHref = window.location.href
+    const intervalId = window.setInterval(() => {
+      if (window.location.href === lastHref) return
 
-    const observer = new MutationObserver(() => {
-      if (stableTimer) window.clearTimeout(stableTimer)
-      stableTimer = window.setTimeout(() => {
-        void runAfterEvaluation()
-      }, 800)
-    })
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      characterData: true
-    })
+      lastHref = window.location.href
+      setAfterVerdict(null)
+      setIsEvaluatingAfterResponse(false)
+      setIsDeepAnalyzingAfterResponse(false)
+      setHasSubmittedPrompt(false)
+      latestAssistantNodeRef.current = null
+      lastEvaluatedAssistantTextRef.current = ""
+      pendingPromptRef.current = null
+    }, 500)
 
     return () => {
-      observer.disconnect()
-      if (stableTimer) window.clearTimeout(stableTimer)
+      window.clearInterval(intervalId)
     }
-  }, [answerState, beforeResult, otherAnswerState])
+  }, [])
 
   async function handleOpenAfterPanel() {
     if (afterVerdict) {
@@ -481,7 +490,7 @@ export default function PromptOptimizerApp() {
     setIsEvaluatingAfterResponse(true)
 
     try {
-      const opened = await runAfterEvaluation(true)
+      const opened = await runAfterEvaluation(true, codeAnalysisMode === "deep")
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
@@ -505,9 +514,9 @@ export default function PromptOptimizerApp() {
   }
 
   async function handleRunDeepAnalysis() {
-    if (!afterVerdict || isEvaluatingAfterResponse) return
+    if (!afterVerdict || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
 
-    setIsEvaluatingAfterResponse(true)
+    setIsDeepAnalyzingAfterResponse(true)
 
     try {
       const opened = await runAfterEvaluation(true, true)
@@ -525,6 +534,44 @@ export default function PromptOptimizerApp() {
         buildAfterPlaceholder(
           error instanceof Error ? error.message : "NoRetry could not complete a deeper review.",
           ["Try Deep Analyze again after the response fully settles."],
+          afterVerdict.next_prompt
+        )
+      )
+    } finally {
+      setIsDeepAnalyzingAfterResponse(false)
+    }
+  }
+
+  async function handleSelectCodeAnalysisMode(mode: "quick" | "deep") {
+    if (mode === codeAnalysisMode || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
+
+    setCodeAnalysisModeState(mode)
+    await setCodeAnalysisMode(mode)
+
+    if (!afterVerdict) return
+
+    if (mode === "deep") {
+      await handleRunDeepAnalysis()
+      return
+    }
+
+    setIsEvaluatingAfterResponse(true)
+    try {
+      const opened = await runAfterEvaluation(true, false)
+      if (!opened) {
+        setAfterVerdict(
+          buildAfterPlaceholder(
+            "NoRetry could not reopen the latest AI answer for a quick review.",
+            ["Try switching analysis mode again after the answer fully settles."],
+            afterVerdict.next_prompt
+          )
+        )
+      }
+    } catch (error) {
+      setAfterVerdict(
+        buildAfterPlaceholder(
+          error instanceof Error ? error.message : "NoRetry could not switch back to quick review.",
+          ["Try switching analysis mode again after the answer fully settles."],
           afterVerdict.next_prompt
         )
       )
@@ -1108,8 +1155,11 @@ export default function PromptOptimizerApp() {
         <AfterVerdictPanel
           verdict={afterVerdict}
           isEvaluating={isEvaluatingAfterResponse}
+          isDeepAnalyzing={isDeepAnalyzingAfterResponse}
+          codeAnalysisMode={codeAnalysisMode}
           onCopyNextPrompt={() => void navigator.clipboard.writeText(afterVerdict.next_prompt)}
           onRunDeepAnalysis={() => void handleRunDeepAnalysis()}
+          onSelectCodeAnalysisMode={(mode) => void handleSelectCodeAnalysisMode(mode)}
           onClose={() => setAfterVerdict(null)}
         />
       ) : null}

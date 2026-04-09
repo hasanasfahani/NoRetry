@@ -10,7 +10,7 @@ const FILE_REGEX = /\b[\w./-]+\.(?:js|ts|tsx|jsx|css|scss|json|md|py|rb|java|go|
 const CERTAINTY_REGEX = /\b(done|implemented|fixed|resolved|validated|confirmed|working|completed)\b/gi
 const UNCERTAINTY_REGEX = /\b(maybe|might|should|could|try|possibly|perhaps|likely)\b/gi
 const SUCCESS_REGEX = /\b(fixed|resolved|done|implemented|working|completed|validated)\b/gi
-const FAILURE_REGEX = /\b(error|failed|failure|broken|issue|bug|exception|traceback)\b/gi
+const FAILURE_REGEX = /\b(error|failed|failure|broken|exception|traceback|unable|cannot|can't|doesn't work)\b/gi
 
 function dedupe(items: string[], limit = 6) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)

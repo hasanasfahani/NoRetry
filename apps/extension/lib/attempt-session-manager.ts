@@ -5,7 +5,10 @@ const storage = new Storage({ area: "local" })
 
 const ATTEMPTS_KEY = "noretry:attempts"
 const ACTIVE_ATTEMPT_KEY = "noretry:active-attempt-id"
+const CODE_ANALYSIS_MODE_KEY = "noretry:code-analysis-mode"
 const MAX_ATTEMPTS = 12
+
+export type CodeAnalysisMode = "quick" | "deep"
 
 async function getAttempts() {
   return ((await storage.get<Attempt[]>(ATTEMPTS_KEY)) ?? []) as Attempt[]
@@ -91,4 +94,12 @@ export async function attachAnalysisResult(
     analysis_result: analysis,
     token_usage_total: analysis.token_usage_total
   })
+}
+
+export async function getCodeAnalysisMode(): Promise<CodeAnalysisMode> {
+  return ((await storage.get<CodeAnalysisMode>(CODE_ANALYSIS_MODE_KEY)) ?? "quick") as CodeAnalysisMode
+}
+
+export async function setCodeAnalysisMode(mode: CodeAnalysisMode) {
+  await storage.set(CODE_ANALYSIS_MODE_KEY, mode)
 }

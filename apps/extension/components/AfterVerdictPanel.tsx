@@ -4,8 +4,11 @@ import type { AfterAnalysisResult } from "@prompt-optimizer/shared"
 type AfterVerdictPanelProps = {
   verdict: AfterAnalysisResult
   isEvaluating: boolean
+  isDeepAnalyzing: boolean
+  codeAnalysisMode: "quick" | "deep"
   onCopyNextPrompt: () => void
   onRunDeepAnalysis: () => void
+  onSelectCodeAnalysisMode: (mode: "quick" | "deep") => void
   onClose: () => void
 }
 
@@ -89,8 +92,10 @@ function extractCheckedDetails(notes: string[]) {
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const tone = toneForStatus(props.verdict.status)
   const canCopyNextPrompt = props.verdict.next_prompt.trim().length > 0
-  const canDeepAnalyze =
-    !props.isEvaluating &&
+  const isCodeAnswer =
+    props.verdict.response_summary.has_code_blocks || props.verdict.response_summary.mentioned_files.length > 0
+  const showDeepAnalyze =
+    !isCodeAnswer &&
     props.verdict.confidence !== "high" &&
     props.verdict.inspection_depth === "summary_only"
   const summarySentence =
@@ -155,20 +160,41 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
         <div style={styles.footer}>
           <div style={styles.confidenceBlock}>
-            <p style={styles.confidence}>Confidence: {props.verdict.confidence}</p>
-            <p style={styles.reviewDepth}>{depthLabel(props.verdict.inspection_depth)}</p>
-            {props.verdict.confidence_reason ? (
-              <p style={styles.confidenceReason}>{props.verdict.confidence_reason}</p>
-            ) : null}
+            <p style={styles.blockTitle}>Analysis Status</p>
+            <p style={styles.statusMeta}>
+              <span>Confidence: {props.verdict.confidence}</span>
+              <span>Review: {props.verdict.inspection_depth === "summary_only" ? "quick" : "deep"}</span>
+            </p>
           </div>
           <div style={styles.actions}>
-            {canDeepAnalyze ? (
+            {isCodeAnswer ? (
+              <div style={styles.modeToggle}>
+                <button
+                  type="button"
+                  style={styles.modeButton(props.codeAnalysisMode === "quick")}
+                  onClick={() => props.onSelectCodeAnalysisMode("quick")}
+                  disabled={props.isEvaluating || props.isDeepAnalyzing}
+                >
+                  Quick
+                </button>
+                <button
+                  type="button"
+                  style={styles.modeButton(props.codeAnalysisMode === "deep")}
+                  onClick={() => props.onSelectCodeAnalysisMode("deep")}
+                  disabled={props.isEvaluating || props.isDeepAnalyzing}
+                >
+                  {props.isDeepAnalyzing && props.codeAnalysisMode === "deep" ? "Digging deeper..." : "Deep"}
+                </button>
+              </div>
+            ) : null}
+            {showDeepAnalyze ? (
               <button
                 type="button"
                 style={styles.deepButton}
                 onClick={props.onRunDeepAnalysis}
+                disabled={props.isDeepAnalyzing}
               >
-                Deep Analyze
+                {props.isDeepAnalyzing ? "Digging deeper..." : "Deep Analyze"}
               </button>
             ) : null}
             <button
@@ -177,7 +203,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               onClick={props.onCopyNextPrompt}
               disabled={props.isEvaluating || !canCopyNextPrompt}
             >
-              {props.isEvaluating ? "Checking..." : canCopyNextPrompt ? "Copy Next Prompt" : "No Prompt Yet"}
+              {canCopyNextPrompt ? "Copy Next Prompt" : "No Prompt Yet"}
             </button>
           </div>
         </div>
@@ -309,20 +335,12 @@ const styles = {
     gap: 4,
     maxWidth: "65%"
   } as CSSProperties,
-  confidence: {
+  statusMeta: {
     margin: 0,
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 12,
     fontSize: 12,
-    color: "#64748b"
-  } as CSSProperties,
-  reviewDepth: {
-    margin: 0,
-    fontSize: 11,
-    fontWeight: 700,
-    color: "#334155"
-  } as CSSProperties,
-  confidenceReason: {
-    margin: 0,
-    fontSize: 11,
     lineHeight: 1.45,
     color: "#475569"
   } as CSSProperties,
@@ -333,6 +351,23 @@ const styles = {
     flexWrap: "wrap",
     justifyContent: "flex-end"
   } as CSSProperties,
+  modeToggle: {
+    display: "inline-flex",
+    alignItems: "center",
+    borderRadius: 999,
+    padding: 4,
+    background: "#eef2ff",
+    gap: 4
+  } as CSSProperties,
+  modeButton: (active: boolean): CSSProperties => ({
+    border: "none",
+    borderRadius: 999,
+    background: active ? "#4338ca" : "transparent",
+    color: active ? "#ffffff" : "#4338ca",
+    padding: "8px 12px",
+    fontWeight: 700,
+    cursor: "pointer"
+  }),
   deepButton: {
     border: "1px solid rgba(99,102,241,0.25)",
     borderRadius: 999,

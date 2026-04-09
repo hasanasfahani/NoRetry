@@ -717,8 +717,11 @@ function fallbackVerdict(
 ) {
   let status: "SUCCESS" | "LIKELY_SUCCESS" | "PARTIAL" | "FAILED" | "WRONG_DIRECTION" | "UNVERIFIED" = "UNVERIFIED"
   const codeHeavyTask = isCodeHeavyTask(intent)
+  const strongFailureSignals = responseSummary.failure_signals.filter((signal) =>
+    /\b(error|failed|failure|broken|exception|traceback|unable|cannot|can't|doesn't work)\b/i.test(signal)
+  )
 
-  if (responseSummary.failure_signals.length) status = "FAILED"
+  if (strongFailureSignals.length && stage2.problem_fit !== "correct") status = "FAILED"
   else if (stage2.problem_fit === "wrong_direction") status = "WRONG_DIRECTION"
   else if (
     !codeHeavyTask &&
@@ -733,8 +736,16 @@ function fallbackVerdict(
 
   const hasConcreteEvidence = responseSummary.mentioned_files.length > 0 || responseSummary.has_code_blocks
   const confidence =
-    status === "FAILED" || status === "WRONG_DIRECTION"
-      ? "high"
+    status === "FAILED"
+      ? detail.inspection_depth === "summary_only"
+        ? "medium"
+        : strongFailureSignals.length
+          ? "high"
+          : "medium"
+      : status === "WRONG_DIRECTION"
+        ? detail.inspection_depth === "summary_only"
+          ? "medium"
+          : "high"
       : usedFallbackIntent
         ? "low"
         : detail.inspection_depth === "summary_only"
