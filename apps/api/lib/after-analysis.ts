@@ -9,11 +9,34 @@ import {
   type AttemptIntent
 } from "@prompt-optimizer/shared"
 import { buildResponseExcerpts, compressGoal } from "@prompt-optimizer/shared"
+import * as z from "zod"
 import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
 
 const AFTER_STAGE_SOFT_DEADLINE_MS = 8000
+const EVIDENCE_EXCERPT_LIMIT = 320
+
+const EvidenceTargetingSchema = z.object({
+  selected_candidate_ids: z.array(z.string()).max(4).default([]),
+  risk_flags: z.array(z.string()).max(4).default([]),
+  inspection_goal: z.string().max(180).default("")
+})
+
+const DetailInspectionSchema = z.object({
+  supported_claims: z.array(z.string()).max(4).default([]),
+  contradictions: z.array(z.string()).max(4).default([]),
+  unresolved_risks: z.array(z.string()).max(4).default([]),
+  evidence_strength: z.enum(["weak", "moderate", "strong"]).default("weak"),
+  inspection_depth: z.enum(["summary_only", "targeted_text", "targeted_code"]).default("summary_only")
+})
+
+type EvidenceCandidate = {
+  id: string
+  type: "code" | "claim" | "file" | "constraint" | "paragraph"
+  label: string
+  excerpt: string
+}
 
 function dedupe(items: string[], limit = 6) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
@@ -23,6 +46,11 @@ function conciseGoal(goal: string, limit = 140) {
   const trimmed = goal.trim()
   if (trimmed.length <= limit) return trimmed
   return `${trimmed.slice(0, limit - 1).trimEnd()}…`
+}
+
+function limitText(value: string, limit: number) {
+  if (value.length <= limit) return value
+  return `${value.slice(0, limit - 1).trimEnd()}…`
 }
 
 const STOP_WORDS = new Set([
@@ -101,6 +129,132 @@ function summarizeVisibleAnswer(responseSummary: AfterPipelineRequest["response_
   if (sentenceLike || compact.length > 90) return compact
 
   return `The answer appears focused on: ${compact}`
+}
+
+function normalizeWhitespace(value: string) {
+  return value.replace(/\s+/g, " ").trim()
+}
+
+function extractCodeBlocks(rawResponse: string) {
+  const matches = [...rawResponse.matchAll(/```[\s\S]*?```/g)]
+  return matches
+    .map((match) => normalizeWhitespace(match[0]))
+    .filter(Boolean)
+    .map((block) => limitText(block, EVIDENCE_EXCERPT_LIMIT))
+}
+
+function extractParagraphs(rawResponse: string) {
+  return rawResponse
+    .split(/\n{2,}/)
+    .map((part) => normalizeWhitespace(part))
+    .filter(Boolean)
+}
+
+function extractClaimSentences(rawResponse: string) {
+  return rawResponse
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => normalizeWhitespace(sentence))
+    .filter((sentence) => /\b(i fixed|i updated|i changed|this should|this now|i implemented|the issue was|i added|i removed)\b/i.test(sentence))
+}
+
+function candidateMatchesIntent(candidate: string, intent: AttemptIntent) {
+  const haystack = candidate.toLowerCase()
+  const goalTokens = extractMeaningfulTokens(intent.goal).slice(0, 6)
+  const constraintTokens = intent.constraints.flatMap((item) => extractMeaningfulTokens(item)).slice(0, 6)
+  const criteriaTokens = intent.acceptance_criteria.flatMap((item) => extractMeaningfulTokens(item)).slice(0, 8)
+  return [...goalTokens, ...constraintTokens, ...criteriaTokens].some((token) => haystack.includes(token))
+}
+
+function buildEvidenceCandidates(
+  rawResponse: string,
+  intent: AttemptIntent,
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  const candidates: EvidenceCandidate[] = []
+  const seen = new Set<string>()
+
+  const addCandidate = (candidate: EvidenceCandidate) => {
+    const key = `${candidate.type}:${candidate.excerpt}`
+    if (!candidate.excerpt || seen.has(key)) return
+    seen.add(key)
+    candidates.push(candidate)
+  }
+
+  extractClaimSentences(rawResponse)
+    .slice(0, 4)
+    .forEach((sentence, index) =>
+      addCandidate({
+        id: `claim-${index + 1}`,
+        type: "claim",
+        label: `Claim sentence ${index + 1}`,
+        excerpt: limitText(sentence, EVIDENCE_EXCERPT_LIMIT)
+      })
+    )
+
+  extractCodeBlocks(rawResponse)
+    .slice(0, 3)
+    .forEach((block, index) =>
+      addCandidate({
+        id: `code-${index + 1}`,
+        type: "code",
+        label: `Code block ${index + 1}`,
+        excerpt: block
+      })
+    )
+
+  const paragraphs = extractParagraphs(rawResponse)
+  const paragraphsBySignal = paragraphs.filter(
+    (paragraph) =>
+      candidateMatchesIntent(paragraph, intent) ||
+      /\b(file|component|function|handler|render|style|popup|button|error|fix|updated|changed)\b/i.test(paragraph)
+  )
+
+  paragraphsBySignal.slice(0, 4).forEach((paragraph, index) =>
+    addCandidate({
+      id: `paragraph-${index + 1}`,
+      type: "paragraph",
+      label: `Relevant paragraph ${index + 1}`,
+      excerpt: limitText(paragraph, EVIDENCE_EXCERPT_LIMIT)
+    })
+  )
+
+  responseSummary.mentioned_files.slice(0, 4).forEach((file, index) =>
+    addCandidate({
+      id: `file-${index + 1}`,
+      type: "file",
+      label: `Mentioned file ${index + 1}`,
+      excerpt: file
+    })
+  )
+
+  intent.constraints
+    .filter((constraint) => constraintMentioned(constraint, responseSummary) || candidateMatchesIntent(constraint, intent))
+    .slice(0, 2)
+    .forEach((constraint, index) =>
+      addCandidate({
+        id: `constraint-${index + 1}`,
+        type: "constraint",
+        label: `Constraint reference ${index + 1}`,
+        excerpt: limitText(constraint, EVIDENCE_EXCERPT_LIMIT)
+      })
+    )
+
+  return candidates.slice(0, 8)
+}
+
+function shouldInspectDetails(intent: AttemptIntent, responseSummary: AfterPipelineRequest["response_summary"], stage1: ReturnType<typeof Stage1OutputSchema.parse>) {
+  const hasStrictIntent = intent.constraints.length > 0 || intent.acceptance_criteria.length > 1
+  const codeHeavyTask =
+    intent.task_type === "debug" || intent.task_type === "build" || intent.task_type === "refactor" || intent.task_type === "create_ui"
+
+  return (
+    codeHeavyTask ||
+    responseSummary.has_code_blocks ||
+    responseSummary.mentioned_files.length > 0 ||
+    responseSummary.success_signals.length > 0 ||
+    hasStrictIntent ||
+    stage1.response_mode === "uncertain"
+  )
 }
 
 function constraintMentioned(constraint: string, responseSummary: AfterPipelineRequest["response_summary"]) {
@@ -211,15 +365,24 @@ function buildStage1Prompts(payload: AfterPipelineRequest["response_summary"], i
 function buildStage2Prompts(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
-  responseSummary: AfterPipelineRequest["response_summary"]
+  candidates: EvidenceCandidate[]
 ) {
   return {
     system:
-      "Compare the assistant response to the intended goal. Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.",
+      "Choose which raw answer excerpts deserve closer inspection. Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.",
     user: JSON.stringify({
-      intent,
+      intent: {
+        goal: compressGoal(intent.goal),
+        constraints: intent.constraints.slice(0, 4),
+        acceptance_criteria: intent.acceptance_criteria.slice(0, 4)
+      },
       stage_1: stage1,
-      response_excerpts: buildResponseExcerpts(responseSummary)
+      candidates: candidates.map((candidate) => ({
+        id: candidate.id,
+        type: candidate.type,
+        label: candidate.label,
+        excerpt: candidate.excerpt
+      }))
     })
   }
 }
@@ -227,7 +390,34 @@ function buildStage2Prompts(
 function buildStage3Prompts(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
+  stage2: ReturnType<typeof EvidenceTargetingSchema.parse>,
+  selectedEvidence: EvidenceCandidate[]
+) {
+  return {
+    system:
+      "Inspect the selected raw answer excerpts and decide whether they support the assistant's claims. Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.",
+    user: JSON.stringify({
+      intent: {
+        goal: compressGoal(intent.goal),
+        constraints: intent.constraints.slice(0, 4),
+        acceptance_criteria: intent.acceptance_criteria.slice(0, 4)
+      },
+      stage_1: stage1,
+      stage_2: stage2,
+      selected_evidence: selectedEvidence.map((candidate) => ({
+        type: candidate.type,
+        label: candidate.label,
+        excerpt: candidate.excerpt
+      }))
+    })
+  }
+}
+
+function buildStage4Prompts(
+  intent: AttemptIntent,
+  stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"]
 ) {
   return {
@@ -237,6 +427,7 @@ function buildStage3Prompts(
       intent,
       stage_1: stage1,
       stage_2: stage2,
+      detail_inspection: detail,
       response_summary: {
         response_length: responseSummary.response_length,
         has_code_blocks: responseSummary.has_code_blocks,
@@ -250,7 +441,7 @@ function buildStage3Prompts(
   }
 }
 
-function buildStage4Prompts(
+function buildStage5Prompts(
   optimizedPrompt: string,
   intent: AttemptIntent,
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
@@ -306,6 +497,7 @@ function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"
 function fallbackStage2(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
+  detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"]
 ) {
   const goalMatched = hasGoalEvidence(intent.goal, responseSummary)
@@ -320,7 +512,7 @@ function fallbackStage2(
       responseSummary.response_length > 220)
 
   const addressed =
-    stage1.response_mode === "implemented" && goalMatched
+    (stage1.response_mode === "implemented" || detail.evidence_strength === "strong") && goalMatched
       ? intent.acceptance_criteria.slice(0, 2)
       : usesDefaultGoalCriterion && hasOnTopicSignals
         ? intent.acceptance_criteria.slice(0, 1)
@@ -348,6 +540,8 @@ function fallbackStage2(
       [
         stage1.response_mode === "uncertain" ? "The assistant sounded uncertain." : "",
         !goalMatched ? "The visible answer does not share enough signal with the intended goal." : "",
+        detail.contradictions.length ? `Possible contradiction: ${detail.contradictions[0]}` : "",
+        detail.unresolved_risks.length ? `Unresolved detail risk: ${detail.unresolved_risks[0]}` : "",
         goalMatched && usesDefaultGoalCriterion && !missing.length
           ? "The answer looks on-topic, but NoRetry is relying on inferred validation rather than explicit proof."
           : "",
@@ -358,11 +552,40 @@ function fallbackStage2(
   })
 }
 
+function fallbackDetailInspection(
+  selectedEvidence: EvidenceCandidate[],
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  const hasCode = selectedEvidence.some((candidate) => candidate.type === "code")
+  const hasClaims = selectedEvidence.some((candidate) => candidate.type === "claim")
+  const evidenceStrength =
+    hasCode || responseSummary.mentioned_files.length > 0
+      ? "strong"
+      : hasClaims || selectedEvidence.length >= 2
+        ? "moderate"
+        : "weak"
+
+  return DetailInspectionSchema.parse({
+    supported_claims: selectedEvidence
+      .filter((candidate) => candidate.type === "claim" || candidate.type === "file")
+      .slice(0, 2)
+      .map((candidate) => candidate.excerpt),
+    contradictions: [],
+    unresolved_risks:
+      evidenceStrength === "weak" && responseSummary.success_signals.length > 0
+        ? ["The answer claims success, but the inspected evidence is still limited."]
+        : [],
+    evidence_strength: evidenceStrength,
+    inspection_depth: hasCode ? "targeted_code" : selectedEvidence.length ? "targeted_text" : "summary_only"
+  })
+}
+
 function fallbackVerdict(
   intent: AttemptIntent,
   responseSummary: AfterPipelineRequest["response_summary"],
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  detail: ReturnType<typeof DetailInspectionSchema.parse>,
   usedFallbackIntent: boolean
 ) {
   let status: "SUCCESS" | "LIKELY_SUCCESS" | "PARTIAL" | "FAILED" | "WRONG_DIRECTION" | "UNVERIFIED" = "UNVERIFIED"
@@ -380,12 +603,18 @@ function fallbackVerdict(
       ? "high"
       : usedFallbackIntent
         ? "low"
-        : isCodeHeavyTask
+        : detail.inspection_depth === "summary_only"
+          ? "low"
+          : isCodeHeavyTask
           ? hasConcreteEvidence
-            ? "medium"
+            ? detail.evidence_strength === "strong"
+              ? "high"
+              : "medium"
             : "low"
           : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
-            ? "medium"
+            ? detail.evidence_strength === "strong"
+              ? "high"
+              : "medium"
             : "low"
 
   const confidenceReason =
@@ -393,12 +622,18 @@ function fallbackVerdict(
       ? "NoRetry had to infer the goal from the prompt, so this review is more cautious."
       : status === "WRONG_DIRECTION"
         ? "The answer appears to be about a different problem than the saved goal."
+        : detail.inspection_depth === "summary_only"
+          ? "NoRetry only reviewed the response summary, not targeted raw evidence."
         : isCodeHeavyTask
           ? hasConcreteEvidence
-            ? "The answer included concrete implementation evidence."
+            ? detail.evidence_strength === "strong"
+              ? "NoRetry reviewed targeted raw evidence, including implementation details."
+              : "The answer included some implementation evidence, but important details remain limited."
             : "The answer stayed on-topic, but it did not include enough concrete implementation evidence."
           : stage2.problem_fit === "correct"
-            ? "The answer appears aligned with the goal, but NoRetry cannot fully verify the outcome from text alone."
+            ? detail.evidence_strength === "strong"
+              ? "NoRetry reviewed targeted raw evidence and found good alignment with the goal."
+              : "The answer appears aligned with the goal, but NoRetry cannot fully verify the outcome from text alone."
             : "The answer gave limited concrete evidence, so this review is cautious."
 
   const primaryFinding =
@@ -416,6 +651,7 @@ function fallbackVerdict(
       [
         primaryFinding,
         stage2.analysis_notes[0] || "",
+        detail.supported_claims.length ? `Inspected evidence: ${detail.supported_claims[0]}` : "",
         stage2.missing_criteria.length && !usedFallbackIntent ? stage2.missing_criteria[0] : "",
         responseSummary.failure_signals.length ? `Failure signal: ${responseSummary.failure_signals[0]}` : "",
         hasConcreteEvidence ? `Evidence referenced: ${[...responseSummary.mentioned_files, ...(responseSummary.has_code_blocks ? ["code blocks"] : [])].slice(0, 2).join(", ")}` : ""
@@ -426,6 +662,8 @@ function fallbackVerdict(
       [
         ...stage2.missing_criteria,
         ...stage2.constraint_risks,
+        ...detail.contradictions,
+        ...detail.unresolved_risks,
         ...(responseSummary.uncertainty_signals.length ? ["The response sounds uncertain."] : []),
         ...(usedFallbackIntent && status !== "WRONG_DIRECTION"
           ? ["NoRetry inferred the goal from the prompt, so this review may be less precise."]
@@ -497,40 +735,98 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   tokenUsageTotal += estimateTokensFromText(stage1Prompts.system, stage1Prompts.user)
   const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary)
 
-  const stage2Prompts = buildStage2Prompts(intent, safeStage1, parsed.response_summary)
-  const stage2 = await callStructuredJson(
-    stage2Prompts.system,
-    stage2Prompts.user,
+  const rawResponse = parsed.response_text_fallback || parsed.response_summary.response_text
+  const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary)
+  const shouldZoomIn = shouldInspectDetails(intent, parsed.response_summary, safeStage1) && evidenceCandidates.length > 0
+
+  let targetedEvidence = EvidenceTargetingSchema.parse({
+    selected_candidate_ids: [],
+    risk_flags: [],
+    inspection_goal: ""
+  })
+
+  if (shouldZoomIn) {
+    const stage2Prompts = buildStage2Prompts(intent, safeStage1, evidenceCandidates)
+    const stage2Targeting = await callStructuredJson(
+      stage2Prompts.system,
+      stage2Prompts.user,
+      (value) => EvidenceTargetingSchema.parse(value),
+      tokenUsageTotal >= budgetSoftLimit ? 90 : 140
+    )
+    tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
+    targetedEvidence =
+      stage2Targeting ??
+      EvidenceTargetingSchema.parse({
+        selected_candidate_ids: evidenceCandidates.slice(0, 3).map((candidate) => candidate.id),
+        risk_flags: parsed.response_summary.success_signals.length ? ["success_claim_needs_evidence"] : [],
+        inspection_goal: `Verify whether the visible answer truly supports: ${compressGoal(intent.goal)}`
+      })
+  }
+
+  const selectedEvidence = (
+    targetedEvidence.selected_candidate_ids.length
+      ? evidenceCandidates.filter((candidate) => targetedEvidence.selected_candidate_ids.includes(candidate.id))
+      : shouldZoomIn
+        ? evidenceCandidates.slice(0, 3)
+        : []
+  ).slice(0, 4)
+
+  let detailInspection = fallbackDetailInspection(selectedEvidence, parsed.response_summary)
+  if (selectedEvidence.length && elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
+    const stage3Prompts = buildStage3Prompts(intent, safeStage1, targetedEvidence, selectedEvidence)
+    const detail = await callStructuredJson(
+      stage3Prompts.system,
+      stage3Prompts.user,
+      (value) => DetailInspectionSchema.parse(value),
+      tokenUsageTotal >= budgetSoftLimit ? 110 : 170
+    )
+    tokenUsageTotal += estimateTokensFromText(stage3Prompts.system, stage3Prompts.user)
+    detailInspection = detail ?? detailInspection
+  }
+
+  const alignmentPrompts = {
+    system:
+      "Compare the assistant response to the intended goal. Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.",
+    user: JSON.stringify({
+      intent,
+      stage_1: safeStage1,
+      detail_inspection: detailInspection,
+      response_excerpts: buildResponseExcerpts(parsed.response_summary)
+    })
+  }
+  const stage4Alignment = await callStructuredJson(
+    alignmentPrompts.system,
+    alignmentPrompts.user,
     (value) => Stage2OutputSchema.parse(value),
     tokenUsageTotal >= budgetSoftLimit ? 120 : 180
   )
-  tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
-  const safeStage2 = stage2 ?? fallbackStage2(intent, safeStage1, parsed.response_summary)
+  tokenUsageTotal += estimateTokensFromText(alignmentPrompts.system, alignmentPrompts.user)
+  const safeStage2 = stage4Alignment ?? fallbackStage2(intent, safeStage1, detailInspection, parsed.response_summary)
 
-  let safeVerdict = fallbackVerdict(intent, parsed.response_summary, safeStage1, safeStage2, usedFallbackIntent)
+  let safeVerdict = fallbackVerdict(intent, parsed.response_summary, safeStage1, safeStage2, detailInspection, usedFallbackIntent)
   let safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
   if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
-    const stage3Prompts = buildStage3Prompts(intent, safeStage1, safeStage2, parsed.response_summary)
+    const stage4Prompts = buildStage4Prompts(intent, safeStage1, safeStage2, detailInspection, parsed.response_summary)
     const verdict = await callStructuredJson(
-      stage3Prompts.system,
-      stage3Prompts.user,
+      stage4Prompts.system,
+      stage4Prompts.user,
       (value) => VerdictOutputSchema.parse(value),
       tokenUsageTotal >= budgetSoftLimit ? 110 : 160
     )
-    tokenUsageTotal += estimateTokensFromText(stage3Prompts.system, stage3Prompts.user)
+    tokenUsageTotal += estimateTokensFromText(stage4Prompts.system, stage4Prompts.user)
     safeVerdict = verdict ?? safeVerdict
   }
 
   if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
-    const stage4Prompts = buildStage4Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
+    const stage5Prompts = buildStage5Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
     const nextPromptOutput = await callStructuredJson(
-      stage4Prompts.system,
-      stage4Prompts.user,
+      stage5Prompts.system,
+      stage5Prompts.user,
       (value) => NextPromptOutputSchema.parse(value),
       tokenUsageTotal >= budgetSoftLimit ? 130 : 180
     )
-    tokenUsageTotal += estimateTokensFromText(stage4Prompts.system, stage4Prompts.user)
+    tokenUsageTotal += estimateTokensFromText(stage5Prompts.system, stage5Prompts.user)
     safeNextPrompt = nextPromptOutput ?? safeNextPrompt
   }
 
