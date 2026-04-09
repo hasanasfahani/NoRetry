@@ -117,6 +117,7 @@ export default function PromptOptimizerApp() {
       status: "UNVERIFIED",
       confidence: "low",
       confidence_reason: issues[0] || "",
+      inspection_depth: "summary_only",
       findings: [finding],
       issues,
       next_prompt: nextPrompt,

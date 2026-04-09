@@ -852,6 +852,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
     confidence_reason: safeVerdict.confidence_reason,
+    inspection_depth: detailInspection.inspection_depth,
     findings: safeVerdict.findings,
     issues: safeVerdict.issues,
     next_prompt: safeNextPrompt.next_prompt,

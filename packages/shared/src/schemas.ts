@@ -174,6 +174,7 @@ export const AfterAnalysisResultSchema = z.object({
   status: VerdictStatusSchema,
   confidence: AfterConfidenceSchema,
   confidence_reason: z.string().max(180).default(""),
+  inspection_depth: z.enum(["summary_only", "targeted_text", "targeted_code"]).default("summary_only"),
   findings: z.array(z.string()).max(3).default([]),
   issues: z.array(z.string()).max(6).default([]),
   next_prompt: z.string(),

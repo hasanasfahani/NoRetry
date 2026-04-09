@@ -24,10 +24,24 @@ function toneForStatus(status: AfterAnalysisResult["status"]) {
   }
 }
 
+function depthLabel(depth: AfterAnalysisResult["inspection_depth"]) {
+  switch (depth) {
+    case "targeted_code":
+      return "Deep code review"
+    case "targeted_text":
+      return "Deep answer review"
+    default:
+      return "Quick summary review"
+  }
+}
+
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const tone = toneForStatus(props.verdict.status)
   const canCopyNextPrompt = props.verdict.next_prompt.trim().length > 0
-  const canDeepAnalyze = !props.isEvaluating && props.verdict.confidence !== "high"
+  const canDeepAnalyze =
+    !props.isEvaluating &&
+    props.verdict.confidence !== "high" &&
+    props.verdict.inspection_depth === "summary_only"
 
   return (
     <>
@@ -66,12 +80,13 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
         <div style={styles.footer}>
           <div style={styles.confidenceBlock}>
             <p style={styles.confidence}>Confidence: {props.verdict.confidence}</p>
+            <p style={styles.reviewDepth}>{depthLabel(props.verdict.inspection_depth)}</p>
             {props.verdict.confidence_reason ? (
               <p style={styles.confidenceReason}>{props.verdict.confidence_reason}</p>
             ) : null}
           </div>
           <div style={styles.actions}>
-            {props.verdict.confidence !== "high" ? (
+            {props.verdict.confidence !== "high" && props.verdict.inspection_depth === "summary_only" ? (
               <button
                 type="button"
                 style={styles.deepButton}
@@ -188,6 +203,12 @@ const styles = {
     margin: 0,
     fontSize: 12,
     color: "#64748b"
+  } as CSSProperties,
+  reviewDepth: {
+    margin: 0,
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#334155"
   } as CSSProperties,
   confidenceReason: {
     margin: 0,
