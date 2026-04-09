@@ -782,9 +782,9 @@ function fallbackVerdict(
 
   const primaryFinding =
     status === "WRONG_DIRECTION"
-      ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${conciseGoal(intent.goal)}.`
+      ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${intent.goal.trim()}.`
       : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
-        ? `The answer appears aligned with the goal: ${conciseGoal(intent.goal)}.`
+        ? `The answer appears aligned with the goal: ${intent.goal.trim()}.`
         : stage1.assistant_action_summary
 
   return VerdictOutputSchema.parse({

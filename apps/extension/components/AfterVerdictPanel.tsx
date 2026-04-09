@@ -48,10 +48,30 @@ const FRIENDLY_CHECK_LABELS: Record<string, string> = {
 function humanizeChecklistLabel(value: string) {
   const normalized = value.trim().toLowerCase()
   if (FRIENDLY_CHECK_LABELS[normalized]) return FRIENDLY_CHECK_LABELS[normalized]
-  if (/^the answer did not clearly/i.test(value)) return value.trim()
+  if (/^the answer did not clearly/i.test(value)) {
+    return value
+      .replace(/^the answer did not clearly\s+/i, "")
+      .replace(/\.$/, "")
+      .replace(/\bshow that the recipe stays\b/i, "")
+      .replace(/\bshow the recipe can be made in about\b/i, "")
+      .replace(/\binclude an?\b/i, "")
+      .replace(/\binclude\b/i, "")
+      .replace(/\bexplain why the recipe fits a\b/i, "")
+      .replace(/\bgoal\b/i, "goal")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^./, (char) => char.toUpperCase())
+  }
   return value
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function canonicalChecklistKey(value: string) {
+  return humanizeChecklistLabel(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
 }
 
 function extractCheckedDetails(notes: string[]) {
@@ -73,15 +93,20 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     !props.isEvaluating &&
     props.verdict.confidence !== "high" &&
     props.verdict.inspection_depth === "summary_only"
+  const summarySentence =
+    props.verdict.findings.find((item) => item.trim().length > 0) ||
+    "NoRetry reviewed the answer against your request."
   const coveredItems = Array.from(
     new Set([
       ...extractCheckedDetails(props.verdict.stage_2.analysis_notes),
       ...props.verdict.stage_2.addressed_criteria.map((item) => humanizeChecklistLabel(item))
     ])
   )
+  const coveredKeys = new Set(coveredItems.map((item) => canonicalChecklistKey(item)))
   const unresolvedItems = props.verdict.issues
     .slice(0, 4)
     .map((item) => humanizeChecklistLabel(item))
+    .filter((item) => !coveredKeys.has(canonicalChecklistKey(item)))
   const unresolvedPrefix = props.verdict.inspection_depth === "summary_only" ? "(not sure)" : "🚫"
 
   return (
@@ -99,31 +124,29 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
         </div>
 
         <div style={styles.block}>
-          <p style={styles.blockTitle}>What happened</p>
-          <ul style={styles.list}>
-            {props.verdict.findings.slice(0, 3).map((item) => (
-              <li key={item} style={styles.listItem}>
-                <span style={styles.bullet}>•</span>
-                <span style={styles.listText}>{item}</span>
-              </li>
-            ))}
-            {coveredItems.map((item) => (
-              <li key={`covered-${item}`} style={styles.listItem}>
-                <span style={styles.statusIcon}>✅</span>
-                <span style={styles.listText}>{item}</span>
-              </li>
-            ))}
-          </ul>
+          <p style={styles.blockTitle}>Analysis Summary</p>
+          <p style={styles.summarySentence}>{summarySentence}</p>
         </div>
 
-        {unresolvedItems.length ? (
+        {coveredItems.length || unresolvedItems.length ? (
           <div style={styles.block}>
-            <p style={styles.blockTitle}>What the AI still missed</p>
             <ul style={styles.list}>
+              {coveredItems.map((item) => (
+                <li key={`covered-${item}`} style={styles.listItem}>
+                  <span style={styles.leadingBullet}>•</span>
+                  <span style={styles.listText}>
+                    {item}
+                    <span style={styles.inlineMarker}> ✅</span>
+                  </span>
+                </li>
+              ))}
               {unresolvedItems.map((item) => (
                 <li key={`unresolved-${item}`} style={styles.listItem}>
-                  <span style={styles.statusIcon}>{unresolvedPrefix}</span>
-                  <span style={styles.listText}>{item}</span>
+                  <span style={styles.leadingBullet}>•</span>
+                  <span style={styles.listText}>
+                    {item}
+                    <span style={styles.inlineMarker}> {unresolvedPrefix}</span>
+                  </span>
                 </li>
               ))}
             </ul>
@@ -232,6 +255,12 @@ const styles = {
     fontWeight: 800,
     color: "#0f172a"
   } as CSSProperties,
+  summarySentence: {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: "#334155"
+  } as CSSProperties,
   lineItem: {
     margin: "0 0 6px",
     fontSize: 12,
@@ -254,17 +283,18 @@ const styles = {
     lineHeight: 1.45,
     color: "#334155"
   } as CSSProperties,
-  bullet: {
+  leadingBullet: {
     color: "#64748b",
     lineHeight: 1.45
   } as CSSProperties,
-  statusIcon: {
-    minWidth: 24,
-    color: "#334155",
-    fontWeight: 700
-  } as CSSProperties,
   listText: {
-    flex: 1
+    flex: 1,
+    minWidth: 0
+  } as CSSProperties,
+  inlineMarker: {
+    color: "#334155",
+    fontWeight: 700,
+    whiteSpace: "nowrap"
   } as CSSProperties,
   footer: {
     display: "flex",
