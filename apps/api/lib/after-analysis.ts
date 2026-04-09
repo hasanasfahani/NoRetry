@@ -258,6 +258,29 @@ function shouldInspectDetails(intent: AttemptIntent, responseSummary: AfterPipel
   )
 }
 
+function sanitizeEvidenceTargeting(value: unknown) {
+  const parsed = EvidenceTargetingSchema.safeParse(value)
+  if (parsed.success) return parsed.data
+
+  const candidate = value && typeof value === "object" ? (value as Record<string, unknown>) : {}
+  const selectedIds = Array.isArray(candidate.selected_candidate_ids)
+    ? candidate.selected_candidate_ids.filter((item): item is string => typeof item === "string").slice(0, 4)
+    : []
+  const riskFlags = Array.isArray(candidate.risk_flags)
+    ? candidate.risk_flags.filter((item): item is string => typeof item === "string").slice(0, 4)
+    : []
+  const inspectionGoal =
+    typeof candidate.inspection_goal === "string"
+      ? limitText(candidate.inspection_goal.trim(), 180)
+      : ""
+
+  return EvidenceTargetingSchema.parse({
+    selected_candidate_ids: selectedIds,
+    risk_flags: riskFlags,
+    inspection_goal: inspectionGoal
+  })
+}
+
 function constraintMentioned(constraint: string, responseSummary: AfterPipelineRequest["response_summary"]) {
   const normalizedConstraint = constraint.toLowerCase()
   const haystack = [
@@ -760,7 +783,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     const stage2Targeting = await callStructuredJson(
       stage2Prompts.system,
       stage2Prompts.user,
-      (value) => EvidenceTargetingSchema.parse(value),
+      (value) => sanitizeEvidenceTargeting(value),
       tokenUsageTotal >= budgetSoftLimit ? 90 : 140
     )
     tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
