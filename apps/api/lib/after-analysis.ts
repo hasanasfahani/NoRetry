@@ -245,8 +245,7 @@ function buildEvidenceCandidates(
 
 function shouldInspectDetails(intent: AttemptIntent, responseSummary: AfterPipelineRequest["response_summary"], stage1: ReturnType<typeof Stage1OutputSchema.parse>) {
   const hasStrictIntent = intent.constraints.length > 0 || intent.acceptance_criteria.length > 1
-  const codeHeavyTask =
-    intent.task_type === "debug" || intent.task_type === "build" || intent.task_type === "refactor" || intent.task_type === "create_ui"
+  const codeHeavyTask = isCodeHeavyTask(intent)
 
   return (
     codeHeavyTask ||
@@ -255,6 +254,15 @@ function shouldInspectDetails(intent: AttemptIntent, responseSummary: AfterPipel
     responseSummary.success_signals.length > 0 ||
     hasStrictIntent ||
     stage1.response_mode === "uncertain"
+  )
+}
+
+function isCodeHeavyTask(intent: AttemptIntent) {
+  return (
+    intent.task_type === "debug" ||
+    intent.task_type === "build" ||
+    intent.task_type === "refactor" ||
+    intent.task_type === "create_ui"
   )
 }
 
@@ -524,6 +532,7 @@ function fallbackStage2(
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"]
 ) {
+  const codeHeavyTask = isCodeHeavyTask(intent)
   const goalMatched = hasGoalEvidence(intent.goal, responseSummary)
   const usesDefaultGoalCriterion = intent.acceptance_criteria.some((criterion) =>
     /prove the answer solved this goal:/i.test(criterion)
@@ -538,12 +547,18 @@ function fallbackStage2(
   const addressed =
     (stage1.response_mode === "implemented" || detail.evidence_strength === "strong") && goalMatched
       ? intent.acceptance_criteria.slice(0, 2)
-      : usesDefaultGoalCriterion && hasOnTopicSignals
+      : !codeHeavyTask && usesDefaultGoalCriterion && goalMatched && detail.inspection_depth !== "summary_only"
+        ? intent.acceptance_criteria.slice(0, 1)
+        : usesDefaultGoalCriterion && hasOnTopicSignals
         ? intent.acceptance_criteria.slice(0, 1)
         : []
   const rawMissing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
   const missing = rawMissing.map((criterion) => {
     if (/prove the answer solved this goal:/i.test(criterion)) {
+      if (!codeHeavyTask && goalMatched && detail.inspection_depth !== "summary_only") {
+        return ""
+      }
+
       return goalMatched
         ? ""
         : `The answer appears focused on ${responseFocusSnippet(responseSummary)} instead of ${conciseGoal(intent.goal)}.`
@@ -566,7 +581,9 @@ function fallbackStage2(
         !goalMatched ? "The visible answer does not share enough signal with the intended goal." : "",
         detail.contradictions.length ? `Possible contradiction: ${detail.contradictions[0]}` : "",
         detail.unresolved_risks.length ? `Unresolved detail risk: ${detail.unresolved_risks[0]}` : "",
-        goalMatched && usesDefaultGoalCriterion && !missing.length
+        !codeHeavyTask && goalMatched && detail.inspection_depth !== "summary_only" && !missing.length
+          ? "The answer appears to directly deliver the requested content."
+          : goalMatched && usesDefaultGoalCriterion && !missing.length
           ? "The answer looks on-topic, but NoRetry is relying on inferred validation rather than explicit proof."
           : "",
         missing.length ? "Some acceptance criteria remain unverified." : ""
@@ -614,14 +631,21 @@ function fallbackVerdict(
   deepAnalysisRequested: boolean
 ) {
   let status: "SUCCESS" | "LIKELY_SUCCESS" | "PARTIAL" | "FAILED" | "WRONG_DIRECTION" | "UNVERIFIED" = "UNVERIFIED"
+  const codeHeavyTask = isCodeHeavyTask(intent)
 
   if (responseSummary.failure_signals.length) status = "FAILED"
   else if (stage2.problem_fit === "wrong_direction") status = "WRONG_DIRECTION"
-  else if (!stage2.missing_criteria.length && responseSummary.success_signals.length) status = "LIKELY_SUCCESS"
+  else if (
+    !codeHeavyTask &&
+    stage2.problem_fit === "correct" &&
+    !stage2.missing_criteria.length &&
+    !stage2.constraint_risks.length &&
+    detail.inspection_depth !== "summary_only"
+  ) {
+    status = detail.evidence_strength === "strong" ? "SUCCESS" : "LIKELY_SUCCESS"
+  } else if (!stage2.missing_criteria.length && responseSummary.success_signals.length) status = "LIKELY_SUCCESS"
   else if (stage2.missing_criteria.length || responseSummary.uncertainty_signals.length) status = "PARTIAL"
 
-  const isCodeHeavyTask =
-    intent.task_type === "debug" || intent.task_type === "build" || intent.task_type === "refactor" || intent.task_type === "create_ui"
   const hasConcreteEvidence = responseSummary.mentioned_files.length > 0 || responseSummary.has_code_blocks
   const confidence =
     status === "FAILED" || status === "WRONG_DIRECTION"
@@ -629,17 +653,19 @@ function fallbackVerdict(
       : usedFallbackIntent
         ? "low"
         : detail.inspection_depth === "summary_only"
-          ? "low"
-          : isCodeHeavyTask
+          ? codeHeavyTask
+            ? "low"
+            : stage2.problem_fit === "correct"
+              ? "medium"
+              : "low"
+          : codeHeavyTask
           ? hasConcreteEvidence
             ? detail.evidence_strength === "strong"
               ? "high"
               : "medium"
             : "low"
-          : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
-            ? detail.evidence_strength === "strong"
-              ? "high"
-              : "medium"
+          : stage2.problem_fit === "correct" && !stage2.missing_criteria.length && !stage2.constraint_risks.length
+            ? "high"
             : "low"
 
   const confidenceReason =
@@ -650,8 +676,10 @@ function fallbackVerdict(
         : detail.inspection_depth === "summary_only"
           ? deepAnalysisRequested
             ? "NoRetry attempted a deeper review, but could not inspect enough raw evidence to raise confidence."
-            : "NoRetry only reviewed the response summary, not targeted raw evidence."
-        : isCodeHeavyTask
+            : codeHeavyTask
+              ? "NoRetry only reviewed the response summary, not targeted raw evidence."
+              : "NoRetry only did a quick review of the answer, so this result is still cautious."
+        : codeHeavyTask
           ? hasConcreteEvidence
             ? detail.evidence_strength === "strong"
               ? deepAnalysisRequested
@@ -660,11 +688,11 @@ function fallbackVerdict(
               : "The answer included some implementation evidence, but important details remain limited."
             : "The answer stayed on-topic, but it did not include enough concrete implementation evidence."
           : stage2.problem_fit === "correct"
-            ? detail.evidence_strength === "strong"
+            ? !stage2.missing_criteria.length && !stage2.constraint_risks.length
               ? deepAnalysisRequested
-                ? "NoRetry deeply reviewed targeted raw evidence and found good alignment with the goal."
-                : "NoRetry reviewed targeted raw evidence and found good alignment with the goal."
-              : "The answer appears aligned with the goal, but NoRetry cannot fully verify the outcome from text alone."
+                ? "NoRetry deeply reviewed the answer and found strong alignment with the requested outcome."
+                : "NoRetry found the answer aligned with the requested outcome."
+              : "The answer appears aligned with the goal, but some requested details still look unconfirmed."
             : "The answer gave limited concrete evidence, so this review is cautious."
 
   const primaryFinding =
