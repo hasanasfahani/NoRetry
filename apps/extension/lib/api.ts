@@ -20,7 +20,7 @@ const detectOutcomeFallback = detectOutcomeLocallyFromRules
 
 const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
 const USE_DIRECT_HOSTED_FETCH = API_BASE.startsWith("https://")
-const REQUEST_TIMEOUT_MS = USE_DIRECT_HOSTED_FETCH ? 20000 : 8000
+const REQUEST_TIMEOUT_MS = USE_DIRECT_HOSTED_FETCH ? 45000 : 8000
 
 function getApiBases() {
   const bases = [API_BASE]

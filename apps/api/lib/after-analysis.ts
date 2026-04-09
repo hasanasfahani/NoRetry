@@ -13,6 +13,8 @@ import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
 
+const AFTER_STAGE_SOFT_DEADLINE_MS = 8000
+
 function dedupe(items: string[], limit = 6) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
 }
@@ -293,9 +295,11 @@ function fallbackNextPrompt(
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const parsed = input
   const budgetSoftLimit = 1800
+  const startedAt = Date.now()
   let tokenUsageTotal = 0
   let intent = parsed.attempt.intent
   let usedFallbackIntent = false
+  const elapsed = () => Date.now() - startedAt
 
   if (needsFallbackIntent(intent)) {
     const prompts = buildIntentExtractionPrompts(parsed.attempt.raw_prompt)
@@ -318,7 +322,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     stage1Prompts.system,
     stage1Prompts.user,
     (value) => Stage1OutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 180 : 260
+    tokenUsageTotal >= budgetSoftLimit ? 120 : 180
   )
   tokenUsageTotal += estimateTokensFromText(stage1Prompts.system, stage1Prompts.user)
   const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary)
@@ -328,30 +332,37 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     stage2Prompts.system,
     stage2Prompts.user,
     (value) => Stage2OutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 180 : 260
+    tokenUsageTotal >= budgetSoftLimit ? 120 : 180
   )
   tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
   const safeStage2 = stage2 ?? fallbackStage2(intent, safeStage1)
 
-  const stage3Prompts = buildStage3Prompts(intent, safeStage1, safeStage2, parsed.response_summary)
-  const verdict = await callStructuredJson(
-    stage3Prompts.system,
-    stage3Prompts.user,
-    (value) => VerdictOutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 160 : 240
-  )
-  tokenUsageTotal += estimateTokensFromText(stage3Prompts.system, stage3Prompts.user)
-  const safeVerdict = verdict ?? fallbackVerdict(parsed.response_summary, safeStage1, safeStage2)
+  let safeVerdict = fallbackVerdict(parsed.response_summary, safeStage1, safeStage2)
+  let safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
-  const stage4Prompts = buildStage4Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
-  const nextPromptOutput = await callStructuredJson(
-    stage4Prompts.system,
-    stage4Prompts.user,
-    (value) => NextPromptOutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 180 : 280
-  )
-  tokenUsageTotal += estimateTokensFromText(stage4Prompts.system, stage4Prompts.user)
-  const safeNextPrompt = nextPromptOutput ?? fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
+  if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
+    const stage3Prompts = buildStage3Prompts(intent, safeStage1, safeStage2, parsed.response_summary)
+    const verdict = await callStructuredJson(
+      stage3Prompts.system,
+      stage3Prompts.user,
+      (value) => VerdictOutputSchema.parse(value),
+      tokenUsageTotal >= budgetSoftLimit ? 110 : 160
+    )
+    tokenUsageTotal += estimateTokensFromText(stage3Prompts.system, stage3Prompts.user)
+    safeVerdict = verdict ?? safeVerdict
+  }
+
+  if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
+    const stage4Prompts = buildStage4Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
+    const nextPromptOutput = await callStructuredJson(
+      stage4Prompts.system,
+      stage4Prompts.user,
+      (value) => NextPromptOutputSchema.parse(value),
+      tokenUsageTotal >= budgetSoftLimit ? 130 : 180
+    )
+    tokenUsageTotal += estimateTokensFromText(stage4Prompts.system, stage4Prompts.user)
+    safeNextPrompt = nextPromptOutput ?? safeNextPrompt
+  }
 
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
