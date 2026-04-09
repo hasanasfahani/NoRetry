@@ -54,6 +54,10 @@ function limitText(value: string, limit: number) {
   return `${value.slice(0, limit - 1).trimEnd()}…`
 }
 
+function normalizeForMatch(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9\s-]+/g, " ").replace(/\s+/g, " ").trim()
+}
+
 const STOP_WORDS = new Set([
   "the",
   "and",
@@ -290,16 +294,83 @@ function sanitizeEvidenceTargeting(value: unknown) {
 }
 
 function constraintMentioned(constraint: string, responseSummary: AfterPipelineRequest["response_summary"]) {
-  const normalizedConstraint = constraint.toLowerCase()
+  const normalizedConstraint = normalizeForMatch(constraint)
   const haystack = [
+    responseSummary.response_text,
     responseSummary.first_excerpt,
     responseSummary.last_excerpt,
     ...responseSummary.key_paragraphs
   ]
     .join(" ")
-    .toLowerCase()
+  const normalizedHaystack = normalizeForMatch(haystack)
 
-  return haystack.includes(normalizedConstraint)
+  if (normalizedHaystack.includes(normalizedConstraint)) return true
+
+  if (/weight loss|fat loss|fat-loss/.test(normalizedConstraint)) {
+    return /\b(weight loss|fat loss|fat-loss|fat loss friendly|fat-loss friendly|low calorie|calorie deficit|lean)\b/.test(
+      normalizedHaystack
+    )
+  }
+
+  if (/vegetarian/.test(normalizedConstraint)) {
+    return /\b(vegetarian|veggie|meatless|plant based|plant-based)\b/.test(normalizedHaystack)
+  }
+
+  return false
+}
+
+type NonCodeCriterionCheck = {
+  addressed: string[]
+  missing: string[]
+}
+
+function evaluateNonCodeCriteria(intent: AttemptIntent, responseSummary: AfterPipelineRequest["response_summary"]): NonCodeCriterionCheck {
+  const haystack = normalizeForMatch(responseSummary.response_text)
+  const requested = normalizeForMatch(`${intent.goal} ${intent.constraints.join(" ")} ${intent.acceptance_criteria.join(" ")}`)
+
+  const checks: Array<{ id: string; requested: boolean; met: boolean; message: string }> = [
+    {
+      id: "vegetarian",
+      requested: /\bvegetarian|veggie|meatless|plant based|plant-based\b/.test(requested),
+      met: /\bvegetarian|veggie|meatless|plant based|plant-based\b/.test(haystack),
+      message: "The answer did not clearly show that the recipe stays vegetarian."
+    },
+    {
+      id: "weight_loss",
+      requested: /\bweight loss|fat loss|fat-loss|low calorie|calorie deficit\b/.test(requested),
+      met: /\bweight loss|fat loss|fat-loss|fat loss friendly|fat-loss friendly|low calorie|calorie deficit|lean|high protein\b/.test(haystack),
+      message: "The answer did not clearly explain why the recipe fits a weight-loss goal."
+    },
+    {
+      id: "ingredients",
+      requested: /\bingredients?\b/.test(requested),
+      met: /\bingredients?\b/.test(haystack),
+      message: "The answer did not clearly include an ingredients list."
+    },
+    {
+      id: "steps",
+      requested: /\bsteps?|instructions?|directions?|prep\b/.test(requested),
+      met: /\bsteps?|instructions?|directions?|method|prep\b/.test(haystack),
+      message: "The answer did not clearly include quick prep steps."
+    },
+    {
+      id: "nutrition",
+      requested: /\bnutrition|protein|carbs|fat|fiber|calories|kcal\b/.test(requested),
+      met: /\bnutrition|protein|carbs|fat|fiber|calories|kcal\b/.test(haystack),
+      message: "The answer did not clearly include basic nutrition details."
+    },
+    {
+      id: "time_under_15",
+      requested: /\bunder 15|within 15|15 minutes|15 mins|15 min\b/.test(requested),
+      met: /\b(under|within|about|around)?\s*1[0-5]\s*(minutes|minute|mins|min)\b/.test(haystack),
+      message: "The answer did not clearly show the recipe can be made in about 15 minutes or less."
+    }
+  ]
+
+  return {
+    addressed: checks.filter((check) => check.requested && check.met).map((check) => check.id),
+    missing: checks.filter((check) => check.requested && !check.met).map((check) => check.message)
+  }
 }
 
 function parseLooseJson(raw: string): unknown {
@@ -533,6 +604,7 @@ function fallbackStage2(
   responseSummary: AfterPipelineRequest["response_summary"]
 ) {
   const codeHeavyTask = isCodeHeavyTask(intent)
+  const nonCodeChecks = codeHeavyTask ? { addressed: [], missing: [] } : evaluateNonCodeCriteria(intent, responseSummary)
   const goalMatched = hasGoalEvidence(intent.goal, responseSummary)
   const usesDefaultGoalCriterion = intent.acceptance_criteria.some((criterion) =>
     /prove the answer solved this goal:/i.test(criterion)
@@ -547,13 +619,15 @@ function fallbackStage2(
   const addressed =
     (stage1.response_mode === "implemented" || detail.evidence_strength === "strong") && goalMatched
       ? intent.acceptance_criteria.slice(0, 2)
+      : !codeHeavyTask && nonCodeChecks.addressed.length && goalMatched && detail.inspection_depth !== "summary_only"
+        ? intent.acceptance_criteria.slice(0, Math.min(2, Math.max(1, nonCodeChecks.addressed.length)))
       : !codeHeavyTask && usesDefaultGoalCriterion && goalMatched && detail.inspection_depth !== "summary_only"
         ? intent.acceptance_criteria.slice(0, 1)
         : usesDefaultGoalCriterion && hasOnTopicSignals
         ? intent.acceptance_criteria.slice(0, 1)
         : []
   const rawMissing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
-  const missing = rawMissing.map((criterion) => {
+  const missing = dedupe([...rawMissing.map((criterion) => {
     if (/prove the answer solved this goal:/i.test(criterion)) {
       if (!codeHeavyTask && goalMatched && detail.inspection_depth !== "summary_only") {
         return ""
@@ -564,7 +638,7 @@ function fallbackStage2(
         : `The answer appears focused on ${responseFocusSnippet(responseSummary)} instead of ${conciseGoal(intent.goal)}.`
     }
     return criterion
-  }).filter(Boolean)
+  }).filter(Boolean), ...nonCodeChecks.missing], 4)
   const risks = intent.constraints
     .filter((constraint) => !constraintMentioned(constraint, responseSummary))
     .slice(0, 3)
@@ -589,6 +663,9 @@ function fallbackStage2(
         !goalMatched ? "The visible answer does not share enough signal with the intended goal." : "",
         detail.contradictions.length ? `Possible contradiction: ${detail.contradictions[0]}` : "",
         detail.unresolved_risks.length ? `Unresolved detail risk: ${detail.unresolved_risks[0]}` : "",
+        !codeHeavyTask && nonCodeChecks.addressed.length
+          ? `Checked requested details: ${nonCodeChecks.addressed.join(", ")}.`
+          : "",
         !codeHeavyTask && goalMatched && detail.inspection_depth !== "summary_only" && !missing.length
           ? "The answer appears to directly deliver the requested content."
           : goalMatched && usesDefaultGoalCriterion && !missing.length
