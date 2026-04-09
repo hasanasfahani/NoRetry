@@ -25,6 +25,97 @@ function conciseGoal(goal: string, limit = 140) {
   return `${trimmed.slice(0, limit - 1).trimEnd()}…`
 }
 
+const STOP_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "that",
+  "this",
+  "from",
+  "your",
+  "have",
+  "will",
+  "into",
+  "about",
+  "after",
+  "before",
+  "then",
+  "when",
+  "what",
+  "where",
+  "which",
+  "they",
+  "them",
+  "their",
+  "because",
+  "should",
+  "could",
+  "would",
+  "there",
+  "please",
+  "just",
+  "only",
+  "keep",
+  "focus",
+  "tell",
+  "exactly"
+])
+
+function extractMeaningfulTokens(value: string) {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4 && !STOP_WORDS.has(token))
+}
+
+function hasGoalEvidence(goal: string, responseSummary: AfterPipelineRequest["response_summary"]) {
+  const goalTokens = extractMeaningfulTokens(goal)
+  if (!goalTokens.length) return true
+
+  const haystack = [
+    responseSummary.first_excerpt,
+    responseSummary.last_excerpt,
+    ...responseSummary.key_paragraphs,
+    ...responseSummary.mentioned_files
+  ]
+    .join(" ")
+    .toLowerCase()
+
+  const matched = goalTokens.filter((token) => haystack.includes(token))
+  return matched.length >= Math.min(2, goalTokens.length)
+}
+
+function responseFocusSnippet(responseSummary: AfterPipelineRequest["response_summary"]) {
+  const snippet = responseSummary.key_paragraphs[0] || responseSummary.first_excerpt || responseSummary.last_excerpt
+  return conciseGoal(snippet || "the visible answer")
+}
+
+function summarizeVisibleAnswer(responseSummary: AfterPipelineRequest["response_summary"]) {
+  const snippet = responseFocusSnippet(responseSummary)
+  const compact = snippet.replace(/\s+/g, " ").trim()
+  if (!compact) return "The answer stayed on the visible topic."
+
+  const sentenceLike = /[.!?]/.test(compact)
+  if (sentenceLike || compact.length > 90) return compact
+
+  return `The answer appears focused on: ${compact}`
+}
+
+function constraintMentioned(constraint: string, responseSummary: AfterPipelineRequest["response_summary"]) {
+  const normalizedConstraint = constraint.toLowerCase()
+  const haystack = [
+    responseSummary.first_excerpt,
+    responseSummary.last_excerpt,
+    ...responseSummary.key_paragraphs
+  ]
+    .join(" ")
+    .toLowerCase()
+
+  return haystack.includes(normalizedConstraint)
+}
+
 function parseLooseJson(raw: string): unknown {
   const cleaned = raw.trim()
 
@@ -195,8 +286,7 @@ function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"
         ? "moderate"
         : "narrow"
 
-  const summarySource =
-    responseSummary.key_paragraphs[0] || responseSummary.first_excerpt || responseSummary.last_excerpt || "The assistant produced a response."
+  const summarySource = summarizeVisibleAnswer(responseSummary)
 
   return Stage1OutputSchema.parse({
     assistant_action_summary: summarySource.slice(0, 220),
@@ -213,26 +303,54 @@ function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"
   })
 }
 
-function fallbackStage2(intent: AttemptIntent, stage1: ReturnType<typeof Stage1OutputSchema.parse>) {
-  const addressed = stage1.response_mode === "implemented" ? intent.acceptance_criteria.slice(0, 2) : []
-  const rawMissing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
-  const missing = rawMissing.map((criterion) =>
+function fallbackStage2(
+  intent: AttemptIntent,
+  stage1: ReturnType<typeof Stage1OutputSchema.parse>,
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  const goalMatched = hasGoalEvidence(intent.goal, responseSummary)
+  const usesDefaultGoalCriterion = intent.acceptance_criteria.some((criterion) =>
     /prove the answer solved this goal:/i.test(criterion)
-      ? `The answer did not prove it solved: ${conciseGoal(intent.goal)}`
-      : criterion
   )
-  const risks = intent.constraints.length
-    ? intent.constraints.slice(0, 3).map((constraint) => `Constraint risk: ${constraint}`)
-    : []
+  const hasOnTopicSignals =
+    goalMatched &&
+    (stage1.response_mode === "implemented" ||
+      stage1.response_mode === "explained" ||
+      responseSummary.success_signals.length > 0 ||
+      responseSummary.response_length > 220)
+
+  const addressed =
+    stage1.response_mode === "implemented" && goalMatched
+      ? intent.acceptance_criteria.slice(0, 2)
+      : usesDefaultGoalCriterion && hasOnTopicSignals
+        ? intent.acceptance_criteria.slice(0, 1)
+        : []
+  const rawMissing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
+  const missing = rawMissing.map((criterion) => {
+    if (/prove the answer solved this goal:/i.test(criterion)) {
+      return goalMatched
+        ? ""
+        : `The answer appears focused on ${responseFocusSnippet(responseSummary)} instead of ${conciseGoal(intent.goal)}.`
+    }
+    return criterion
+  }).filter(Boolean)
+  const risks = intent.constraints
+    .filter((constraint) => !constraintMentioned(constraint, responseSummary))
+    .slice(0, 3)
+    .map((constraint) => `The answer did not explicitly address this constraint: ${constraint}`)
 
   return Stage2OutputSchema.parse({
     addressed_criteria: addressed,
     missing_criteria: missing,
     constraint_risks: risks,
-    problem_fit: stage1.scope_assessment === "broad" ? "partial" : "correct",
+    problem_fit: goalMatched ? (stage1.scope_assessment === "broad" ? "partial" : "correct") : "wrong_direction",
     analysis_notes: dedupe(
       [
         stage1.response_mode === "uncertain" ? "The assistant sounded uncertain." : "",
+        !goalMatched ? "The visible answer does not share enough signal with the intended goal." : "",
+        goalMatched && usesDefaultGoalCriterion && !missing.length
+          ? "The answer looks on-topic, but NoRetry is relying on inferred validation rather than explicit proof."
+          : "",
         missing.length ? "Some acceptance criteria remain unverified." : ""
       ],
       4
@@ -241,9 +359,11 @@ function fallbackStage2(intent: AttemptIntent, stage1: ReturnType<typeof Stage1O
 }
 
 function fallbackVerdict(
+  intent: AttemptIntent,
   responseSummary: AfterPipelineRequest["response_summary"],
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
-  stage2: ReturnType<typeof Stage2OutputSchema.parse>
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  usedFallbackIntent: boolean
 ) {
   let status: "SUCCESS" | "LIKELY_SUCCESS" | "PARTIAL" | "FAILED" | "WRONG_DIRECTION" | "UNVERIFIED" = "UNVERIFIED"
 
@@ -252,19 +372,53 @@ function fallbackVerdict(
   else if (!stage2.missing_criteria.length && responseSummary.success_signals.length) status = "LIKELY_SUCCESS"
   else if (stage2.missing_criteria.length || responseSummary.uncertainty_signals.length) status = "PARTIAL"
 
+  const isCodeHeavyTask =
+    intent.task_type === "debug" || intent.task_type === "build" || intent.task_type === "refactor" || intent.task_type === "create_ui"
+  const hasConcreteEvidence = responseSummary.mentioned_files.length > 0 || responseSummary.has_code_blocks
+  const confidence =
+    status === "FAILED" || status === "WRONG_DIRECTION"
+      ? "high"
+      : usedFallbackIntent
+        ? "low"
+        : isCodeHeavyTask
+          ? hasConcreteEvidence
+            ? "medium"
+            : "low"
+          : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
+            ? "medium"
+            : "low"
+
+  const confidenceReason =
+    usedFallbackIntent
+      ? "NoRetry had to infer the goal from the prompt, so this review is more cautious."
+      : status === "WRONG_DIRECTION"
+        ? "The answer appears to be about a different problem than the saved goal."
+        : isCodeHeavyTask
+          ? hasConcreteEvidence
+            ? "The answer included concrete implementation evidence."
+            : "The answer stayed on-topic, but it did not include enough concrete implementation evidence."
+          : stage2.problem_fit === "correct"
+            ? "The answer appears aligned with the goal, but NoRetry cannot fully verify the outcome from text alone."
+            : "The answer gave limited concrete evidence, so this review is cautious."
+
+  const primaryFinding =
+    status === "WRONG_DIRECTION"
+      ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${conciseGoal(intent.goal)}.`
+      : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
+        ? `The answer appears aligned with the goal: ${conciseGoal(intent.goal)}.`
+        : stage1.assistant_action_summary
+
   return VerdictOutputSchema.parse({
     status,
-    confidence:
-      status === "FAILED" || status === "WRONG_DIRECTION"
-        ? "high"
-        : responseSummary.mentioned_files.length || responseSummary.has_code_blocks
-          ? "medium"
-          : "low",
+    confidence,
+    confidence_reason: confidenceReason,
     findings: dedupe(
       [
-        stage1.assistant_action_summary,
-        stage2.missing_criteria.length ? stage2.missing_criteria[0] : "",
-        responseSummary.failure_signals.length ? `Failure signal: ${responseSummary.failure_signals[0]}` : ""
+        primaryFinding,
+        stage2.analysis_notes[0] || "",
+        stage2.missing_criteria.length && !usedFallbackIntent ? stage2.missing_criteria[0] : "",
+        responseSummary.failure_signals.length ? `Failure signal: ${responseSummary.failure_signals[0]}` : "",
+        hasConcreteEvidence ? `Evidence referenced: ${[...responseSummary.mentioned_files, ...(responseSummary.has_code_blocks ? ["code blocks"] : [])].slice(0, 2).join(", ")}` : ""
       ],
       3
     ),
@@ -272,7 +426,10 @@ function fallbackVerdict(
       [
         ...stage2.missing_criteria,
         ...stage2.constraint_risks,
-        ...(responseSummary.uncertainty_signals.length ? ["The response sounds uncertain."] : [])
+        ...(responseSummary.uncertainty_signals.length ? ["The response sounds uncertain."] : []),
+        ...(usedFallbackIntent && status !== "WRONG_DIRECTION"
+          ? ["NoRetry inferred the goal from the prompt, so this review may be less precise."]
+          : [])
       ],
       6
     )
@@ -348,9 +505,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 120 : 180
   )
   tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
-  const safeStage2 = stage2 ?? fallbackStage2(intent, safeStage1)
+  const safeStage2 = stage2 ?? fallbackStage2(intent, safeStage1, parsed.response_summary)
 
-  let safeVerdict = fallbackVerdict(parsed.response_summary, safeStage1, safeStage2)
+  let safeVerdict = fallbackVerdict(intent, parsed.response_summary, safeStage1, safeStage2, usedFallbackIntent)
   let safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
   if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
@@ -380,6 +537,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
+    confidence_reason: safeVerdict.confidence_reason,
     findings: safeVerdict.findings,
     issues: safeVerdict.issues,
     next_prompt: safeNextPrompt.next_prompt,

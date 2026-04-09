@@ -116,6 +116,7 @@ export default function PromptOptimizerApp() {
     return {
       status: "UNVERIFIED",
       confidence: "low",
+      confidence_reason: issues[0] || "",
       findings: [finding],
       issues,
       next_prompt: nextPrompt,
@@ -136,6 +137,7 @@ export default function PromptOptimizerApp() {
       verdict: {
         status: "UNVERIFIED",
         confidence: "low",
+        confidence_reason: issues[0] || "",
         findings: [finding],
         issues
       },

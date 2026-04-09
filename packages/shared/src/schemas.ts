@@ -160,6 +160,7 @@ export const Stage2OutputSchema = z.object({
 export const VerdictOutputSchema = z.object({
   status: VerdictStatusSchema,
   confidence: AfterConfidenceSchema,
+  confidence_reason: z.string().max(180).default(""),
   findings: z.array(z.string()).max(3).default([]),
   issues: z.array(z.string()).max(6).default([])
 })
@@ -172,6 +173,7 @@ export const NextPromptOutputSchema = z.object({
 export const AfterAnalysisResultSchema = z.object({
   status: VerdictStatusSchema,
   confidence: AfterConfidenceSchema,
+  confidence_reason: z.string().max(180).default(""),
   findings: z.array(z.string()).max(3).default([]),
   issues: z.array(z.string()).max(6).default([]),
   next_prompt: z.string(),

@@ -62,7 +62,12 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
         ) : null}
 
         <div style={styles.footer}>
-          <p style={styles.confidence}>Confidence: {props.verdict.confidence}</p>
+          <div style={styles.confidenceBlock}>
+            <p style={styles.confidence}>Confidence: {props.verdict.confidence}</p>
+            {props.verdict.confidence_reason ? (
+              <p style={styles.confidenceReason}>{props.verdict.confidence_reason}</p>
+            ) : null}
+          </div>
           <button
             type="button"
             style={styles.copyButton}
@@ -154,15 +159,27 @@ const styles = {
   } as CSSProperties,
   footer: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-end",
     justifyContent: "space-between",
     gap: 12,
     marginTop: 10
+  } as CSSProperties,
+  confidenceBlock: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    maxWidth: "65%"
   } as CSSProperties,
   confidence: {
     margin: 0,
     fontSize: 12,
     color: "#64748b"
+  } as CSSProperties,
+  confidenceReason: {
+    margin: 0,
+    fontSize: 11,
+    lineHeight: 1.45,
+    color: "#475569"
   } as CSSProperties,
   copyButton: {
     border: "none",
