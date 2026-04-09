@@ -21,6 +21,10 @@ function limitText(value: string, limit: number) {
   return `${value.slice(0, limit - 1).trimEnd()}…`
 }
 
+function conciseGoal(value: string) {
+  return limitText(value.trim(), 140)
+}
+
 export function mapPromptIntentToTaskType(intent: PromptIntent | undefined): UnifiedTaskType {
   switch (intent) {
     case "DEBUG":
@@ -74,7 +78,9 @@ export function buildAttemptIntentFromBefore(
     goal: (optimizedPrompt || rawPrompt).trim(),
     constraints: dedupe(constraints, 6),
     acceptance_criteria: dedupe(
-      acceptance.length ? acceptance : ["Directly solve the requested goal and validate the result."],
+      acceptance.length
+        ? acceptance
+        : [`Prove the answer solved this goal: ${conciseGoal(optimizedPrompt || rawPrompt)}`],
       6
     )
   }

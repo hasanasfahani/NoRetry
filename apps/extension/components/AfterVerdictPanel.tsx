@@ -52,7 +52,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
         {props.verdict.issues.length ? (
           <div style={styles.block}>
-            <p style={styles.blockTitle}>What&apos;s missing</p>
+            <p style={styles.blockTitle}>What the AI still missed</p>
             {props.verdict.issues.slice(0, 3).map((item) => (
               <p key={item} style={styles.lineItem}>
                 {item}

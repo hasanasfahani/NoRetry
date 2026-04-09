@@ -19,6 +19,12 @@ function dedupe(items: string[], limit = 6) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
 }
 
+function conciseGoal(goal: string, limit = 140) {
+  const trimmed = goal.trim()
+  if (trimmed.length <= limit) return trimmed
+  return `${trimmed.slice(0, limit - 1).trimEnd()}…`
+}
+
 function parseLooseJson(raw: string): unknown {
   const cleaned = raw.trim()
 
@@ -209,8 +215,15 @@ function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"
 
 function fallbackStage2(intent: AttemptIntent, stage1: ReturnType<typeof Stage1OutputSchema.parse>) {
   const addressed = stage1.response_mode === "implemented" ? intent.acceptance_criteria.slice(0, 2) : []
-  const missing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
-  const risks = intent.constraints.length ? intent.constraints.slice(0, 3) : []
+  const rawMissing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
+  const missing = rawMissing.map((criterion) =>
+    /prove the answer solved this goal:/i.test(criterion)
+      ? `The answer did not prove it solved: ${conciseGoal(intent.goal)}`
+      : criterion
+  )
+  const risks = intent.constraints.length
+    ? intent.constraints.slice(0, 3).map((constraint) => `Constraint risk: ${constraint}`)
+    : []
 
   return Stage2OutputSchema.parse({
     addressed_criteria: addressed,
@@ -250,7 +263,7 @@ function fallbackVerdict(
     findings: dedupe(
       [
         stage1.assistant_action_summary,
-        stage2.missing_criteria.length ? `Missing: ${stage2.missing_criteria[0]}` : "",
+        stage2.missing_criteria.length ? stage2.missing_criteria[0] : "",
         responseSummary.failure_signals.length ? `Failure signal: ${responseSummary.failure_signals[0]}` : ""
       ],
       3
