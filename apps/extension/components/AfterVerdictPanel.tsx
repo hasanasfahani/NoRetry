@@ -35,6 +35,37 @@ function depthLabel(depth: AfterAnalysisResult["inspection_depth"]) {
   }
 }
 
+const FRIENDLY_CHECK_LABELS: Record<string, string> = {
+  weight_loss: "Weight loss goal",
+  steps: "Quick prep steps",
+  nutrition: "Basic nutrition details",
+  time_under_15: "Under 15 minutes",
+  ingredients: "Ingredients list",
+  vegetarian: "Vegetarian fit",
+  time_under_15_minutes: "Under 15 minutes"
+}
+
+function humanizeChecklistLabel(value: string) {
+  const normalized = value.trim().toLowerCase()
+  if (FRIENDLY_CHECK_LABELS[normalized]) return FRIENDLY_CHECK_LABELS[normalized]
+  if (/^the answer did not clearly/i.test(value)) return value.trim()
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function extractCheckedDetails(notes: string[]) {
+  const checkedNote = notes.find((note) => note.toLowerCase().startsWith("checked requested details:"))
+  if (!checkedNote) return []
+
+  const [, rawItems = ""] = checkedNote.split(":", 2)
+  return rawItems
+    .replace(/\.$/, "")
+    .split(",")
+    .map((item) => humanizeChecklistLabel(item))
+    .filter(Boolean)
+}
+
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const tone = toneForStatus(props.verdict.status)
   const canCopyNextPrompt = props.verdict.next_prompt.trim().length > 0
@@ -42,6 +73,16 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     !props.isEvaluating &&
     props.verdict.confidence !== "high" &&
     props.verdict.inspection_depth === "summary_only"
+  const coveredItems = Array.from(
+    new Set([
+      ...extractCheckedDetails(props.verdict.stage_2.analysis_notes),
+      ...props.verdict.stage_2.addressed_criteria.map((item) => humanizeChecklistLabel(item))
+    ])
+  )
+  const unresolvedItems = props.verdict.issues
+    .slice(0, 4)
+    .map((item) => humanizeChecklistLabel(item))
+  const unresolvedPrefix = props.verdict.inspection_depth === "summary_only" ? "(not sure)" : "🚫"
 
   return (
     <>
@@ -59,21 +100,33 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
         <div style={styles.block}>
           <p style={styles.blockTitle}>What happened</p>
-          {props.verdict.findings.slice(0, 3).map((item) => (
-            <p key={item} style={styles.lineItem}>
-              {item}
-            </p>
-          ))}
+          <ul style={styles.list}>
+            {props.verdict.findings.slice(0, 3).map((item) => (
+              <li key={item} style={styles.listItem}>
+                <span style={styles.bullet}>•</span>
+                <span style={styles.listText}>{item}</span>
+              </li>
+            ))}
+            {coveredItems.map((item) => (
+              <li key={`covered-${item}`} style={styles.listItem}>
+                <span style={styles.statusIcon}>✅</span>
+                <span style={styles.listText}>{item}</span>
+              </li>
+            ))}
+          </ul>
         </div>
 
-        {props.verdict.issues.length ? (
+        {unresolvedItems.length ? (
           <div style={styles.block}>
             <p style={styles.blockTitle}>What the AI still missed</p>
-            {props.verdict.issues.slice(0, 3).map((item) => (
-              <p key={item} style={styles.lineItem}>
-                {item}
-              </p>
-            ))}
+            <ul style={styles.list}>
+              {unresolvedItems.map((item) => (
+                <li key={`unresolved-${item}`} style={styles.listItem}>
+                  <span style={styles.statusIcon}>{unresolvedPrefix}</span>
+                  <span style={styles.listText}>{item}</span>
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
 
@@ -86,14 +139,13 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : null}
           </div>
           <div style={styles.actions}>
-            {props.verdict.confidence !== "high" && props.verdict.inspection_depth === "summary_only" ? (
+            {canDeepAnalyze ? (
               <button
                 type="button"
                 style={styles.deepButton}
                 onClick={props.onRunDeepAnalysis}
-                disabled={!canDeepAnalyze}
               >
-                {props.isEvaluating ? "Analyzing deeper..." : "Deep Analyze"}
+                Deep Analyze
               </button>
             ) : null}
             <button
@@ -185,6 +237,34 @@ const styles = {
     fontSize: 12,
     lineHeight: 1.45,
     color: "#334155"
+  } as CSSProperties,
+  list: {
+    margin: 0,
+    padding: 0,
+    listStyle: "none",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8
+  } as CSSProperties,
+  listItem: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: "#334155"
+  } as CSSProperties,
+  bullet: {
+    color: "#64748b",
+    lineHeight: 1.45
+  } as CSSProperties,
+  statusIcon: {
+    minWidth: 24,
+    color: "#334155",
+    fontWeight: 700
+  } as CSSProperties,
+  listText: {
+    flex: 1
   } as CSSProperties,
   footer: {
     display: "flex",
