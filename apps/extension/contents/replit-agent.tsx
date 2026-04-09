@@ -222,9 +222,8 @@ export default function PromptOptimizerApp() {
 
   async function runAfterEvaluation(force = false) {
     const latestMessage = findLatestChatGptAssistantMessage()
-    if (!latestMessage) return false
-
-    const text = readChatGptAssistantText(latestMessage)
+    const fallbackVisibleOutput = collectVisibleOutputSnippet().trim()
+    const text = readChatGptAssistantText(latestMessage) || fallbackVisibleOutput
     if (!text || (!force && text === lastEvaluatedAssistantTextRef.current)) {
       return false
     }
@@ -243,7 +242,7 @@ export default function PromptOptimizerApp() {
         response_text_fallback: text
       })
       setAfterVerdict(result)
-      await attachAnalysisResult(attempt.attempt_id, text, result, latestMessage.getAttribute("data-message-id"))
+      await attachAnalysisResult(attempt.attempt_id, text, result, latestMessage?.getAttribute("data-message-id"))
       lastEvaluatedAssistantTextRef.current = text
       return true
     } finally {
@@ -488,10 +487,10 @@ export default function PromptOptimizerApp() {
           )
         )
       }
-    } catch {
+    } catch (error) {
       setAfterVerdict(
         buildAfterPlaceholder(
-          "NoRetry hit a problem while analyzing the latest answer.",
+          error instanceof Error ? error.message : "NoRetry hit a problem while analyzing the latest answer.",
           ["Try clicking the thunder again after the response fully settles."],
           "Analyze your last answer again. Tell me exactly what you changed, what remains missing, and give me the next focused prompt to continue."
         )
