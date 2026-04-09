@@ -222,7 +222,7 @@ export default function PromptOptimizerApp() {
     return markAttemptSubmitted(fallbackAttempt.attempt_id)
   }
 
-  async function runAfterEvaluation(force = false) {
+  async function runAfterEvaluation(force = false, deepAnalysis = false) {
     const latestMessage = findLatestChatGptAssistantMessage()
     const fallbackVisibleOutput = collectVisibleOutputSnippet().trim()
     const text = readChatGptAssistantText(latestMessage) || fallbackVisibleOutput
@@ -241,7 +241,8 @@ export default function PromptOptimizerApp() {
       const result = await analyzeAfterAttempt({
         attempt,
         response_summary: responseSummary,
-        response_text_fallback: text
+        response_text_fallback: text,
+        deep_analysis: deepAnalysis
       })
       setAfterVerdict(result)
       await attachAnalysisResult(attempt.attempt_id, text, result, latestMessage?.getAttribute("data-message-id"))
@@ -495,6 +496,35 @@ export default function PromptOptimizerApp() {
           error instanceof Error ? error.message : "NoRetry hit a problem while analyzing the latest answer.",
           ["Try clicking the thunder again after the response fully settles."],
           "Analyze your last answer again. Tell me exactly what you changed, what remains missing, and give me the next focused prompt to continue."
+        )
+      )
+    } finally {
+      setIsEvaluatingAfterResponse(false)
+    }
+  }
+
+  async function handleRunDeepAnalysis() {
+    if (!afterVerdict || isEvaluatingAfterResponse) return
+
+    setIsEvaluatingAfterResponse(true)
+
+    try {
+      const opened = await runAfterEvaluation(true, true)
+      if (!opened) {
+        setAfterVerdict(
+          buildAfterPlaceholder(
+            "NoRetry could not re-open the latest AI answer for a deeper review.",
+            ["Wait for the answer to finish, then try Deep Analyze again."],
+            afterVerdict.next_prompt
+          )
+        )
+      }
+    } catch (error) {
+      setAfterVerdict(
+        buildAfterPlaceholder(
+          error instanceof Error ? error.message : "NoRetry could not complete a deeper review.",
+          ["Try Deep Analyze again after the response fully settles."],
+          afterVerdict.next_prompt
         )
       )
     } finally {
@@ -1078,6 +1108,7 @@ export default function PromptOptimizerApp() {
           verdict={afterVerdict}
           isEvaluating={isEvaluatingAfterResponse}
           onCopyNextPrompt={() => void navigator.clipboard.writeText(afterVerdict.next_prompt)}
+          onRunDeepAnalysis={() => void handleRunDeepAnalysis()}
           onClose={() => setAfterVerdict(null)}
         />
       ) : null}

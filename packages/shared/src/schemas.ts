@@ -253,7 +253,8 @@ export const AfterStage4RequestSchema = z.object({
 export const AfterPipelineRequestSchema = z.object({
   attempt: AttemptSchema,
   response_summary: ResponsePreprocessorOutputSchema,
-  response_text_fallback: z.string().default("")
+  response_text_fallback: z.string().default(""),
+  deep_analysis: z.boolean().default(false)
 })
 
 export const AfterPipelineResponseSchema = AfterAnalysisResultSchema

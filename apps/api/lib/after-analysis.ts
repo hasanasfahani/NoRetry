@@ -15,6 +15,7 @@ import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
 
 const AFTER_STAGE_SOFT_DEADLINE_MS = 8000
+const AFTER_DEEP_STAGE_SOFT_DEADLINE_MS = 16000
 const EVIDENCE_EXCERPT_LIMIT = 320
 
 const EvidenceTargetingSchema = z.object({
@@ -586,7 +587,8 @@ function fallbackVerdict(
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
-  usedFallbackIntent: boolean
+  usedFallbackIntent: boolean,
+  deepAnalysisRequested: boolean
 ) {
   let status: "SUCCESS" | "LIKELY_SUCCESS" | "PARTIAL" | "FAILED" | "WRONG_DIRECTION" | "UNVERIFIED" = "UNVERIFIED"
 
@@ -623,16 +625,22 @@ function fallbackVerdict(
       : status === "WRONG_DIRECTION"
         ? "The answer appears to be about a different problem than the saved goal."
         : detail.inspection_depth === "summary_only"
-          ? "NoRetry only reviewed the response summary, not targeted raw evidence."
+          ? deepAnalysisRequested
+            ? "NoRetry attempted a deeper review, but could not inspect enough raw evidence to raise confidence."
+            : "NoRetry only reviewed the response summary, not targeted raw evidence."
         : isCodeHeavyTask
           ? hasConcreteEvidence
             ? detail.evidence_strength === "strong"
-              ? "NoRetry reviewed targeted raw evidence, including implementation details."
+              ? deepAnalysisRequested
+                ? "NoRetry deeply reviewed targeted raw evidence, including implementation details."
+                : "NoRetry reviewed targeted raw evidence, including implementation details."
               : "The answer included some implementation evidence, but important details remain limited."
             : "The answer stayed on-topic, but it did not include enough concrete implementation evidence."
           : stage2.problem_fit === "correct"
             ? detail.evidence_strength === "strong"
-              ? "NoRetry reviewed targeted raw evidence and found good alignment with the goal."
+              ? deepAnalysisRequested
+                ? "NoRetry deeply reviewed targeted raw evidence and found good alignment with the goal."
+                : "NoRetry reviewed targeted raw evidence and found good alignment with the goal."
               : "The answer appears aligned with the goal, but NoRetry cannot fully verify the outcome from text alone."
             : "The answer gave limited concrete evidence, so this review is cautious."
 
@@ -702,7 +710,9 @@ function fallbackNextPrompt(
 
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const parsed = input
-  const budgetSoftLimit = 1800
+  const deepAnalysisRequested = parsed.deep_analysis ?? false
+  const budgetSoftLimit = deepAnalysisRequested ? 2800 : 1800
+  const stageSoftDeadline = deepAnalysisRequested ? AFTER_DEEP_STAGE_SOFT_DEADLINE_MS : AFTER_STAGE_SOFT_DEADLINE_MS
   const startedAt = Date.now()
   let tokenUsageTotal = 0
   let intent = parsed.attempt.intent
@@ -737,7 +747,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   const rawResponse = parsed.response_text_fallback || parsed.response_summary.response_text
   const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary)
-  const shouldZoomIn = shouldInspectDetails(intent, parsed.response_summary, safeStage1) && evidenceCandidates.length > 0
+  const shouldZoomIn = (deepAnalysisRequested || shouldInspectDetails(intent, parsed.response_summary, safeStage1)) && evidenceCandidates.length > 0
 
   let targetedEvidence = EvidenceTargetingSchema.parse({
     selected_candidate_ids: [],
@@ -757,7 +767,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     targetedEvidence =
       stage2Targeting ??
       EvidenceTargetingSchema.parse({
-        selected_candidate_ids: evidenceCandidates.slice(0, 3).map((candidate) => candidate.id),
+        selected_candidate_ids: evidenceCandidates.slice(0, deepAnalysisRequested ? 4 : 3).map((candidate) => candidate.id),
         risk_flags: parsed.response_summary.success_signals.length ? ["success_claim_needs_evidence"] : [],
         inspection_goal: `Verify whether the visible answer truly supports: ${compressGoal(intent.goal)}`
       })
@@ -767,18 +777,18 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     targetedEvidence.selected_candidate_ids.length
       ? evidenceCandidates.filter((candidate) => targetedEvidence.selected_candidate_ids.includes(candidate.id))
       : shouldZoomIn
-        ? evidenceCandidates.slice(0, 3)
+        ? evidenceCandidates.slice(0, deepAnalysisRequested ? 4 : 3)
         : []
   ).slice(0, 4)
 
   let detailInspection = fallbackDetailInspection(selectedEvidence, parsed.response_summary)
-  if (selectedEvidence.length && elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
+  if (selectedEvidence.length && elapsed() < stageSoftDeadline) {
     const stage3Prompts = buildStage3Prompts(intent, safeStage1, targetedEvidence, selectedEvidence)
     const detail = await callStructuredJson(
       stage3Prompts.system,
       stage3Prompts.user,
       (value) => DetailInspectionSchema.parse(value),
-      tokenUsageTotal >= budgetSoftLimit ? 110 : 170
+      tokenUsageTotal >= budgetSoftLimit ? 130 : deepAnalysisRequested ? 220 : 170
     )
     tokenUsageTotal += estimateTokensFromText(stage3Prompts.system, stage3Prompts.user)
     detailInspection = detail ?? detailInspection
@@ -798,33 +808,41 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     alignmentPrompts.system,
     alignmentPrompts.user,
     (value) => Stage2OutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 120 : 180
+    tokenUsageTotal >= budgetSoftLimit ? 130 : deepAnalysisRequested ? 220 : 180
   )
   tokenUsageTotal += estimateTokensFromText(alignmentPrompts.system, alignmentPrompts.user)
   const safeStage2 = stage4Alignment ?? fallbackStage2(intent, safeStage1, detailInspection, parsed.response_summary)
 
-  let safeVerdict = fallbackVerdict(intent, parsed.response_summary, safeStage1, safeStage2, detailInspection, usedFallbackIntent)
+  let safeVerdict = fallbackVerdict(
+    intent,
+    parsed.response_summary,
+    safeStage1,
+    safeStage2,
+    detailInspection,
+    usedFallbackIntent,
+    deepAnalysisRequested
+  )
   let safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
-  if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
+  if (elapsed() < stageSoftDeadline) {
     const stage4Prompts = buildStage4Prompts(intent, safeStage1, safeStage2, detailInspection, parsed.response_summary)
     const verdict = await callStructuredJson(
       stage4Prompts.system,
       stage4Prompts.user,
       (value) => VerdictOutputSchema.parse(value),
-      tokenUsageTotal >= budgetSoftLimit ? 110 : 160
+      tokenUsageTotal >= budgetSoftLimit ? 120 : deepAnalysisRequested ? 200 : 160
     )
     tokenUsageTotal += estimateTokensFromText(stage4Prompts.system, stage4Prompts.user)
     safeVerdict = verdict ?? safeVerdict
   }
 
-  if (elapsed() < AFTER_STAGE_SOFT_DEADLINE_MS) {
+  if (elapsed() < stageSoftDeadline) {
     const stage5Prompts = buildStage5Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
     const nextPromptOutput = await callStructuredJson(
       stage5Prompts.system,
       stage5Prompts.user,
       (value) => NextPromptOutputSchema.parse(value),
-      tokenUsageTotal >= budgetSoftLimit ? 130 : 180
+      tokenUsageTotal >= budgetSoftLimit ? 150 : deepAnalysisRequested ? 240 : 180
     )
     tokenUsageTotal += estimateTokensFromText(stage5Prompts.system, stage5Prompts.user)
     safeNextPrompt = nextPromptOutput ?? safeNextPrompt

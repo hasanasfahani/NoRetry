@@ -5,6 +5,7 @@ type AfterVerdictPanelProps = {
   verdict: AfterAnalysisResult
   isEvaluating: boolean
   onCopyNextPrompt: () => void
+  onRunDeepAnalysis: () => void
   onClose: () => void
 }
 
@@ -26,6 +27,7 @@ function toneForStatus(status: AfterAnalysisResult["status"]) {
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const tone = toneForStatus(props.verdict.status)
   const canCopyNextPrompt = props.verdict.next_prompt.trim().length > 0
+  const canDeepAnalyze = !props.isEvaluating && props.verdict.confidence !== "high"
 
   return (
     <>
@@ -68,14 +70,26 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <p style={styles.confidenceReason}>{props.verdict.confidence_reason}</p>
             ) : null}
           </div>
-          <button
-            type="button"
-            style={styles.copyButton}
-            onClick={props.onCopyNextPrompt}
-            disabled={props.isEvaluating || !canCopyNextPrompt}
-          >
-            {props.isEvaluating ? "Checking..." : canCopyNextPrompt ? "Copy Next Prompt" : "No Prompt Yet"}
-          </button>
+          <div style={styles.actions}>
+            {props.verdict.confidence !== "high" ? (
+              <button
+                type="button"
+                style={styles.deepButton}
+                onClick={props.onRunDeepAnalysis}
+                disabled={!canDeepAnalyze}
+              >
+                {props.isEvaluating ? "Analyzing deeper..." : "Deep Analyze"}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              style={styles.copyButton}
+              onClick={props.onCopyNextPrompt}
+              disabled={props.isEvaluating || !canCopyNextPrompt}
+            >
+              {props.isEvaluating ? "Checking..." : canCopyNextPrompt ? "Copy Next Prompt" : "No Prompt Yet"}
+            </button>
+          </div>
         </div>
       </section>
     </>
@@ -180,6 +194,22 @@ const styles = {
     fontSize: 11,
     lineHeight: 1.45,
     color: "#475569"
+  } as CSSProperties,
+  actions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    justifyContent: "flex-end"
+  } as CSSProperties,
+  deepButton: {
+    border: "1px solid rgba(99,102,241,0.25)",
+    borderRadius: 999,
+    background: "rgba(99,102,241,0.1)",
+    color: "#4338ca",
+    padding: "10px 14px",
+    fontWeight: 700,
+    cursor: "pointer"
   } as CSSProperties,
   copyButton: {
     border: "none",
