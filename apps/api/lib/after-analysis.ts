@@ -13,6 +13,10 @@ import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
 
+function dedupe(items: string[], limit = 6) {
+  return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
+}
+
 function parseLooseJson(raw: string): unknown {
   const cleaned = raw.trim()
 
@@ -166,6 +170,126 @@ function buildStage4Prompts(
   }
 }
 
+function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"]) {
+  const responseMode =
+    responseSummary.has_code_blocks || responseSummary.mentioned_files.length
+      ? "implemented"
+      : responseSummary.uncertainty_signals.length
+        ? "uncertain"
+        : responseSummary.success_signals.length
+          ? "explained"
+          : "suggested"
+
+  const scopeAssessment =
+    responseSummary.mentioned_files.length >= 6
+      ? "broad"
+      : responseSummary.mentioned_files.length >= 2 || responseSummary.response_length > 1800
+        ? "moderate"
+        : "narrow"
+
+  const summarySource =
+    responseSummary.key_paragraphs[0] || responseSummary.first_excerpt || responseSummary.last_excerpt || "The assistant produced a response."
+
+  return Stage1OutputSchema.parse({
+    assistant_action_summary: summarySource.slice(0, 220),
+    claimed_evidence: dedupe(
+      [
+        ...responseSummary.success_signals,
+        ...responseSummary.mentioned_files,
+        ...(responseSummary.has_code_blocks ? ["Included code blocks"] : [])
+      ],
+      4
+    ),
+    response_mode: responseMode,
+    scope_assessment: scopeAssessment
+  })
+}
+
+function fallbackStage2(intent: AttemptIntent, stage1: ReturnType<typeof Stage1OutputSchema.parse>) {
+  const addressed = stage1.response_mode === "implemented" ? intent.acceptance_criteria.slice(0, 2) : []
+  const missing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
+  const risks = intent.constraints.length ? intent.constraints.slice(0, 3) : []
+
+  return Stage2OutputSchema.parse({
+    addressed_criteria: addressed,
+    missing_criteria: missing,
+    constraint_risks: risks,
+    problem_fit: stage1.scope_assessment === "broad" ? "partial" : "correct",
+    analysis_notes: dedupe(
+      [
+        stage1.response_mode === "uncertain" ? "The assistant sounded uncertain." : "",
+        missing.length ? "Some acceptance criteria remain unverified." : ""
+      ],
+      4
+    )
+  })
+}
+
+function fallbackVerdict(
+  responseSummary: AfterPipelineRequest["response_summary"],
+  stage1: ReturnType<typeof Stage1OutputSchema.parse>,
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>
+) {
+  let status: "SUCCESS" | "LIKELY_SUCCESS" | "PARTIAL" | "FAILED" | "WRONG_DIRECTION" | "UNVERIFIED" = "UNVERIFIED"
+
+  if (responseSummary.failure_signals.length) status = "FAILED"
+  else if (stage2.problem_fit === "wrong_direction") status = "WRONG_DIRECTION"
+  else if (!stage2.missing_criteria.length && responseSummary.success_signals.length) status = "LIKELY_SUCCESS"
+  else if (stage2.missing_criteria.length || responseSummary.uncertainty_signals.length) status = "PARTIAL"
+
+  return VerdictOutputSchema.parse({
+    status,
+    confidence:
+      status === "FAILED" || status === "WRONG_DIRECTION"
+        ? "high"
+        : responseSummary.mentioned_files.length || responseSummary.has_code_blocks
+          ? "medium"
+          : "low",
+    findings: dedupe(
+      [
+        stage1.assistant_action_summary,
+        stage2.missing_criteria.length ? `Missing: ${stage2.missing_criteria[0]}` : "",
+        responseSummary.failure_signals.length ? `Failure signal: ${responseSummary.failure_signals[0]}` : ""
+      ],
+      3
+    ),
+    issues: dedupe(
+      [
+        ...stage2.missing_criteria,
+        ...stage2.constraint_risks,
+        ...(responseSummary.uncertainty_signals.length ? ["The response sounds uncertain."] : [])
+      ],
+      6
+    )
+  })
+}
+
+function fallbackNextPrompt(
+  optimizedPrompt: string,
+  verdict: ReturnType<typeof VerdictOutputSchema.parse>,
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>
+) {
+  const focus =
+    stage2.missing_criteria[0] ||
+    stage2.constraint_risks[0] ||
+    verdict.issues[0] ||
+    "validate the result against the original request"
+
+  const strategy =
+    verdict.status === "FAILED"
+      ? "retry_cleanly"
+      : stage2.constraint_risks.length
+        ? "narrow_scope"
+        : stage2.missing_criteria.length
+          ? "fix_missing"
+          : "validate"
+
+  return NextPromptOutputSchema.parse({
+    next_prompt: `${optimizedPrompt}\n\nBefore continuing, focus only on this: ${focus}. Tell me exactly what you changed, what evidence proves it, and whether the original request is now fully satisfied.`,
+    prompt_strategy: strategy
+  })
+}
+
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const parsed = input
   const budgetSoftLimit = 1800
@@ -197,9 +321,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 180 : 260
   )
   tokenUsageTotal += estimateTokensFromText(stage1Prompts.system, stage1Prompts.user)
-  if (!stage1) throw new Error("Stage 1 response summary failed")
+  const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary)
 
-  const stage2Prompts = buildStage2Prompts(intent, stage1, parsed.response_summary)
+  const stage2Prompts = buildStage2Prompts(intent, safeStage1, parsed.response_summary)
   const stage2 = await callStructuredJson(
     stage2Prompts.system,
     stage2Prompts.user,
@@ -207,9 +331,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 180 : 260
   )
   tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
-  if (!stage2) throw new Error("Stage 2 intent alignment failed")
+  const safeStage2 = stage2 ?? fallbackStage2(intent, safeStage1)
 
-  const stage3Prompts = buildStage3Prompts(intent, stage1, stage2, parsed.response_summary)
+  const stage3Prompts = buildStage3Prompts(intent, safeStage1, safeStage2, parsed.response_summary)
   const verdict = await callStructuredJson(
     stage3Prompts.system,
     stage3Prompts.user,
@@ -217,9 +341,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 160 : 240
   )
   tokenUsageTotal += estimateTokensFromText(stage3Prompts.system, stage3Prompts.user)
-  if (!verdict) throw new Error("Stage 3 verdict generation failed")
+  const safeVerdict = verdict ?? fallbackVerdict(parsed.response_summary, safeStage1, safeStage2)
 
-  const stage4Prompts = buildStage4Prompts(parsed.attempt.optimized_prompt, intent, verdict, stage2)
+  const stage4Prompts = buildStage4Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
   const nextPromptOutput = await callStructuredJson(
     stage4Prompts.system,
     stage4Prompts.user,
@@ -227,19 +351,19 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 180 : 280
   )
   tokenUsageTotal += estimateTokensFromText(stage4Prompts.system, stage4Prompts.user)
-  if (!nextPromptOutput) throw new Error("Stage 4 next-prompt generation failed")
+  const safeNextPrompt = nextPromptOutput ?? fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
   return AfterPipelineResponseSchema.parse({
-    status: verdict.status,
-    confidence: verdict.confidence,
-    findings: verdict.findings,
-    issues: verdict.issues,
-    next_prompt: nextPromptOutput.next_prompt,
-    prompt_strategy: nextPromptOutput.prompt_strategy,
-    stage_1: stage1,
-    stage_2: stage2,
-    verdict,
-    next_prompt_output: nextPromptOutput,
+    status: safeVerdict.status,
+    confidence: safeVerdict.confidence,
+    findings: safeVerdict.findings,
+    issues: safeVerdict.issues,
+    next_prompt: safeNextPrompt.next_prompt,
+    prompt_strategy: safeNextPrompt.prompt_strategy,
+    stage_1: safeStage1,
+    stage_2: safeStage2,
+    verdict: safeVerdict,
+    next_prompt_output: safeNextPrompt,
     response_summary: parsed.response_summary,
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal
