@@ -1,0 +1,176 @@
+import type { CSSProperties } from "react"
+import type { AfterAnalysisResult } from "@prompt-optimizer/shared"
+
+type AfterVerdictPanelProps = {
+  verdict: AfterAnalysisResult
+  isEvaluating: boolean
+  onCopyNextPrompt: () => void
+  onClose: () => void
+}
+
+function toneForStatus(status: AfterAnalysisResult["status"]) {
+  switch (status) {
+    case "SUCCESS":
+    case "LIKELY_SUCCESS":
+      return { badgeBg: "#dcfce7", badgeFg: "#166534", border: "rgba(22,101,52,0.14)" }
+    case "FAILED":
+    case "WRONG_DIRECTION":
+      return { badgeBg: "#fee2e2", badgeFg: "#b91c1c", border: "rgba(185,28,28,0.14)" }
+    case "PARTIAL":
+      return { badgeBg: "#fef3c7", badgeFg: "#b45309", border: "rgba(180,83,9,0.16)" }
+    default:
+      return { badgeBg: "#e2e8f0", badgeFg: "#475569", border: "rgba(71,85,105,0.16)" }
+  }
+}
+
+export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
+  const tone = toneForStatus(props.verdict.status)
+  const canCopyNextPrompt = props.verdict.next_prompt.trim().length > 0
+
+  return (
+    <>
+      <button type="button" style={styles.scrim} onClick={props.onClose} aria-label="Close verdict panel" />
+      <section style={styles.panel(tone.border)}>
+        <div style={styles.header}>
+          <div>
+            <p style={styles.eyebrow}>After response</p>
+            <span style={styles.badge(tone.badgeBg, tone.badgeFg)}>{props.verdict.status}</span>
+          </div>
+          <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
+            x
+          </button>
+        </div>
+
+        <div style={styles.block}>
+          <p style={styles.blockTitle}>What happened</p>
+          {props.verdict.findings.slice(0, 3).map((item) => (
+            <p key={item} style={styles.lineItem}>
+              {item}
+            </p>
+          ))}
+        </div>
+
+        {props.verdict.issues.length ? (
+          <div style={styles.block}>
+            <p style={styles.blockTitle}>What&apos;s missing</p>
+            {props.verdict.issues.slice(0, 3).map((item) => (
+              <p key={item} style={styles.lineItem}>
+                {item}
+              </p>
+            ))}
+          </div>
+        ) : null}
+
+        <div style={styles.footer}>
+          <p style={styles.confidence}>Confidence: {props.verdict.confidence}</p>
+          <button
+            type="button"
+            style={styles.copyButton}
+            onClick={props.onCopyNextPrompt}
+            disabled={props.isEvaluating || !canCopyNextPrompt}
+          >
+            {props.isEvaluating ? "Checking..." : canCopyNextPrompt ? "Copy Next Prompt" : "No Prompt Yet"}
+          </button>
+        </div>
+      </section>
+    </>
+  )
+}
+
+const styles = {
+  scrim: {
+    position: "fixed",
+    inset: 0,
+    border: "none",
+    background: "rgba(15,23,42,0.18)",
+    cursor: "pointer",
+    zIndex: 2147483645
+  } as CSSProperties,
+  panel: (border: string): CSSProperties => ({
+    position: "fixed",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    width: "min(520px, calc(100vw - 32px))",
+    maxHeight: "min(70vh, 680px)",
+    overflowY: "auto",
+    zIndex: 2147483646,
+    padding: 18,
+    borderRadius: 22,
+    background: "rgba(255,255,255,0.98)",
+    border: `1px solid ${border}`,
+    boxShadow: "0 24px 64px rgba(15,23,42,0.18)",
+    backdropFilter: "blur(12px)"
+  }),
+  header: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 10
+  } as CSSProperties,
+  eyebrow: {
+    margin: 0,
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    color: "#64748b"
+  } as CSSProperties,
+  badge: (bg: string, fg: string): CSSProperties => ({
+    display: "inline-flex",
+    alignItems: "center",
+    borderRadius: 999,
+    background: bg,
+    color: fg,
+    padding: "6px 10px",
+    fontSize: 11,
+    fontWeight: 800,
+    letterSpacing: "0.04em",
+    marginTop: 6
+  }),
+  closeButton: {
+    border: "none",
+    background: "transparent",
+    color: "#64748b",
+    fontSize: 16,
+    cursor: "pointer",
+    padding: 2,
+    lineHeight: 1
+  } as CSSProperties,
+  block: {
+    marginBottom: 10
+  } as CSSProperties,
+  blockTitle: {
+    margin: "0 0 6px",
+    fontSize: 12,
+    fontWeight: 800,
+    color: "#0f172a"
+  } as CSSProperties,
+  lineItem: {
+    margin: "0 0 6px",
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: "#334155"
+  } as CSSProperties,
+  footer: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginTop: 10
+  } as CSSProperties,
+  confidence: {
+    margin: 0,
+    fontSize: 12,
+    color: "#64748b"
+  } as CSSProperties,
+  copyButton: {
+    border: "none",
+    borderRadius: 999,
+    background: "#0f172a",
+    color: "#fff",
+    padding: "10px 14px",
+    fontWeight: 700,
+    cursor: "pointer"
+  } as CSSProperties
+}

@@ -3,6 +3,8 @@ import { detectOutcomeLocally as detectOutcomeLocallyFromRules } from "@prompt-o
 import type {
   AnalyzePromptRequest,
   AnalyzePromptResponse,
+  AfterPipelineRequest,
+  AfterPipelineResponse,
   DetectOutcomeRequest,
   DetectOutcomeResponse,
   DiagnoseFailureRequest,
@@ -225,4 +227,8 @@ export async function sendFeedback(outcomeEventId: string, feedbackType: "WORKED
   } catch {
     return null
   }
+}
+
+export async function analyzeAfterAttempt(input: AfterPipelineRequest): Promise<AfterPipelineResponse> {
+  return post("/api/analyze-after", input, (value) => value as AfterPipelineResponse)
 }

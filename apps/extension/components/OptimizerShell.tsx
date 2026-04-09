@@ -29,16 +29,10 @@ type OptimizerShellProps = {
   answeredCount: number
   totalQuestions: number
   draftReady: boolean
-  debugInfo: {
-    surface: "REPLIT" | "CHATGPT"
-    promptDetected: boolean
-    promptLength: number
-    questionSource: "AI" | "FALLBACK" | "NONE"
-    aiAvailable: boolean
-    questionLoadError: string | null
-  }
+  isEvaluatingAfterResponse: boolean
   onClosePanel: () => void
   onOpenPanel: () => void
+  onOpenAfterPanel: () => void
   onRewrite: () => void
   onExplain: () => void
   onApplyFix: () => void
@@ -240,14 +234,23 @@ export function OptimizerShell(props: OptimizerShellProps) {
           }
         `}
       </style>
-      <button type="button" style={styles.badge(tone.bg, tone.fg, tone.border)} onClick={props.panelOpen ? props.onClosePanel : props.onOpenPanel}>
-        <span style={isBusy ? styles.badgeCharge : styles.badgeDot}>
-          {isBusy ? <RunningManIcon /> : null}
-        </span>
-        {!isBusy ? (
-          <CardManIcon color={tone.fg} />
-        ) : null}
-      </button>
+      <div style={styles.badgeStack}>
+        <button type="button" style={styles.badge(tone.bg, tone.fg, tone.border)} onClick={props.panelOpen ? props.onClosePanel : props.onOpenPanel}>
+          <span style={isBusy ? styles.badgeCharge : styles.badgeDot}>
+            {isBusy ? <RunningManIcon /> : null}
+          </span>
+          {!isBusy ? <CardManIcon color={tone.fg} /> : null}
+        </button>
+        <button
+          type="button"
+          style={styles.afterBadge(props.isEvaluatingAfterResponse)}
+          onClick={props.onOpenAfterPanel}
+          aria-label="Open after-response feedback"
+          title="Check the AI response"
+        >
+          <span style={props.isEvaluatingAfterResponse ? styles.afterBadgeSpin : undefined}>⚡</span>
+        </button>
+      </div>
 
       {props.issueVisible && !props.panelOpen ? (
         <section style={styles.issueCard}>
@@ -308,7 +311,7 @@ export function OptimizerShell(props: OptimizerShellProps) {
                       </div>
                       <div style={styles.questionHeaderActions}>
                         <button type="button" style={styles.secondaryButton} onClick={props.onAddQuestions} disabled={props.isAddingQuestions}>
-                          {props.isAddingQuestions ? "Adding..." : "Add 3 Questions"}
+                          {props.isAddingQuestions ? "Adding..." : "Add more questions"}
                         </button>
                       </div>
                     </div>
@@ -437,19 +440,6 @@ export function OptimizerShell(props: OptimizerShellProps) {
                   </div>
                 )}
 
-                <div style={styles.debugCard}>
-                  <p style={styles.debugTitle}>Debug</p>
-                  <p style={styles.debugLine}>
-                    Surface: {props.debugInfo.surface} | Prompt detected: {props.debugInfo.promptDetected ? "yes" : "no"} | Prompt chars:{" "}
-                    {props.debugInfo.promptLength}
-                  </p>
-                  <p style={styles.debugLine}>
-                    Questions: {props.debugInfo.questionSource} | AI available: {props.debugInfo.aiAvailable ? "yes" : "no"} | Loading:{" "}
-                    {props.isLoadingQuestions ? "yes" : "no"}
-                  </p>
-                  {props.debugInfo.questionLoadError ? <p style={styles.debugError}>{props.debugInfo.questionLoadError}</p> : null}
-                </div>
-
                 <div style={styles.panelCard} ref={draftSectionRef}>
                   <div style={styles.progressHeader}>
                     <div style={styles.progressMeta}>
@@ -574,6 +564,11 @@ const styles = {
     opacity: mounted ? 1 : 0,
     transition: "opacity 180ms ease"
   }),
+  badgeStack: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6
+  } as CSSProperties,
   badge: (bg: string, fg: string, border: string): CSSProperties => ({
     border: `1px solid ${border}`,
     borderRadius: "999px",
@@ -596,6 +591,30 @@ const styles = {
     outline: "none",
     transition: "transform 140ms ease, box-shadow 140ms ease"
   }),
+  afterBadge: (isBusy: boolean): CSSProperties => ({
+    border: "1px solid rgba(139,92,246,0.22)",
+    borderRadius: "999px",
+    background: isBusy ? "rgba(245,243,255,0.96)" : "rgba(255,255,255,0.96)",
+    color: "#7c3aed",
+    minWidth: 26,
+    width: 26,
+    height: 26,
+    padding: 0,
+    fontSize: 14,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    boxShadow: "0 8px 18px rgba(15,23,42,0.12)",
+    backdropFilter: "blur(10px)",
+    WebkitBackdropFilter: "blur(10px)",
+    outline: "none",
+    transition: "transform 140ms ease, box-shadow 140ms ease"
+  }),
+  afterBadgeSpin: {
+    display: "inline-flex",
+    animation: "promptOptimizerSpin 0.9s linear infinite"
+  } as CSSProperties,
   badgeDot: {
     display: "none"
   } as CSSProperties,
@@ -996,33 +1015,6 @@ const styles = {
     fontSize: 12,
     lineHeight: 1.45,
     color: "#64748b"
-  } as CSSProperties,
-  debugCard: {
-    marginTop: 12,
-    padding: "10px 12px",
-    borderRadius: 12,
-    background: "#f8fafc",
-    border: "1px solid rgba(148,163,184,0.22)"
-  } as CSSProperties,
-  debugTitle: {
-    margin: 0,
-    fontSize: 11,
-    fontWeight: 800,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    color: "#475569"
-  } as CSSProperties,
-  debugLine: {
-    margin: "6px 0 0",
-    fontSize: 12,
-    color: "#475569",
-    lineHeight: 1.4
-  } as CSSProperties,
-  debugError: {
-    margin: "6px 0 0",
-    fontSize: 12,
-    color: "#b91c1c",
-    lineHeight: 1.4
   } as CSSProperties,
   bottomActionRow: {
     marginTop: 16

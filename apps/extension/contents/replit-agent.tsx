@@ -2,16 +2,37 @@ import type { PlasmoCSConfig, PlasmoGetRootContainer } from "plasmo"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type {
   AnalyzePromptResponse,
+  AfterAnalysisResult,
   ClarificationQuestion,
   DetectOutcomeResponse,
   DiagnoseFailureResponse,
-  SessionSummary
+  SessionSummary,
+  Attempt
 } from "@prompt-optimizer/shared/src/schemas"
 import { DETECTION_THRESHOLDS } from "@prompt-optimizer/shared/src/constants"
 import { analyzePromptLocally, buildPromptFromAnswers } from "@prompt-optimizer/shared/src/analyzePrompt"
+import {
+  buildAttemptIntentFromBefore,
+  mapPromptIntentToTaskType,
+  preprocessResponse
+} from "@prompt-optimizer/shared"
 import { summarizeSessionMemory } from "@prompt-optimizer/shared/src/session"
+import { AfterVerdictPanel } from "../components/AfterVerdictPanel"
 import { OptimizerShell } from "../components/OptimizerShell"
-import { analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, refinePrompt, sendFeedback } from "../lib/api"
+import { analyzeAfterAttempt, analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, refinePrompt, sendFeedback } from "../lib/api"
+import {
+  findLatestChatGptAssistantMessage,
+  findLatestChatGptUserMessage,
+  readChatGptAssistantText,
+  readChatGptUserText
+} from "../lib/after/chatgpt"
+import {
+  attachAnalysisResult,
+  createAttempt,
+  getActiveAttempt,
+  getLatestSubmittedAttempt,
+  markAttemptSubmitted
+} from "../lib/attempt-session-manager"
 import {
   collectChangedFilesSummary,
   collectVisibleErrorSummary,
@@ -72,6 +93,8 @@ export default function PromptOptimizerApp() {
   const [draftReady, setDraftReady] = useState(false)
   const [isLoadingQuestions, setIsLoadingQuestions] = useState(false)
   const [questionLoadError, setQuestionLoadError] = useState<string | null>(null)
+  const [afterVerdict, setAfterVerdict] = useState<AfterAnalysisResult | null>(null)
+  const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
   const promptRef = useRef<HTMLElement | null>(null)
   const submitRef = useRef<HTMLButtonElement | null>(null)
   const pendingPromptRef = useRef<PendingPrompt | null>(null)
@@ -82,6 +105,151 @@ export default function PromptOptimizerApp() {
   const analysisRequestIdRef = useRef(0)
   const lastFocusedPromptRef = useRef<HTMLElement | null>(null)
   const lastPromptValueRef = useRef("")
+  const latestAssistantNodeRef = useRef<HTMLElement | null>(null)
+  const lastEvaluatedAssistantTextRef = useRef("")
+
+  function buildAfterPlaceholder(
+    finding: string,
+    issues: string[] = [],
+    nextPrompt = ""
+  ): AfterAnalysisResult {
+    return {
+      status: "UNVERIFIED",
+      confidence: "low",
+      findings: [finding],
+      issues,
+      next_prompt: nextPrompt,
+      prompt_strategy: "retry_cleanly",
+      stage_1: {
+        assistant_action_summary: finding,
+        claimed_evidence: [],
+        response_mode: "uncertain",
+        scope_assessment: "moderate"
+      },
+      stage_2: {
+        addressed_criteria: [],
+        missing_criteria: [],
+        constraint_risks: issues,
+        problem_fit: "partial",
+        analysis_notes: []
+      },
+      verdict: {
+        status: "UNVERIFIED",
+        confidence: "low",
+        findings: [finding],
+        issues
+      },
+      next_prompt_output: {
+        next_prompt: nextPrompt,
+        prompt_strategy: "retry_cleanly"
+      },
+      response_summary: {
+        response_text: "",
+        response_length: 0,
+        first_excerpt: "",
+        last_excerpt: "",
+        key_paragraphs: [],
+        has_code_blocks: false,
+        mentioned_files: [],
+        certainty_signals: [],
+        uncertainty_signals: [],
+        success_signals: [],
+        failure_signals: []
+      },
+      used_fallback_intent: true,
+      token_usage_total: 0
+    }
+  }
+
+  function getAttemptPlatform(): Attempt["platform"] {
+    return getPromptSurface() === "CHATGPT" ? "chatgpt" : "replit"
+  }
+
+  async function saveDraftAttempt(promptText: string, improvedPrompt?: string | null) {
+    const optimizedPrompt = (improvedPrompt ?? beforeResult?.rewrite ?? promptText).trim()
+    const attempt = await createAttempt({
+      attempt_id: crypto.randomUUID(),
+      platform: getAttemptPlatform(),
+      raw_prompt: promptText.trim(),
+      optimized_prompt: optimizedPrompt,
+      intent: buildAttemptIntentFromBefore(
+        promptText,
+        optimizedPrompt,
+        beforeResult?.intent,
+        beforeResult?.clarification_questions ?? [],
+        normalizeAnswers(answerState)
+      )
+    })
+    return attempt
+  }
+
+  async function ensureSubmittedAttempt() {
+    const userMessage = readChatGptUserText(findLatestChatGptUserMessage())
+    const inferredPrompt = userMessage || lastPromptValueRef.current.trim() || promptPreview.trim()
+    const normalizedPrompt = inferredPrompt.trim()
+    const latestSubmitted = await getLatestSubmittedAttempt()
+    if (
+      latestSubmitted &&
+      (!normalizedPrompt ||
+        latestSubmitted.raw_prompt.trim() === normalizedPrompt ||
+        latestSubmitted.optimized_prompt.trim() === normalizedPrompt)
+    ) {
+      return latestSubmitted
+    }
+
+    const activeAttempt = await getActiveAttempt()
+    if (activeAttempt) {
+      const submitted = await markAttemptSubmitted(activeAttempt.attempt_id)
+      if (submitted) return submitted
+    }
+
+    if (!inferredPrompt) return null
+
+    const fallbackAttempt = await createAttempt({
+      attempt_id: crypto.randomUUID(),
+      platform: getAttemptPlatform(),
+      raw_prompt: inferredPrompt,
+      optimized_prompt: inferredPrompt,
+      intent: {
+        task_type: mapPromptIntentToTaskType(beforeResult?.intent),
+        goal: inferredPrompt,
+        constraints: [],
+        acceptance_criteria: []
+      }
+    })
+    return markAttemptSubmitted(fallbackAttempt.attempt_id)
+  }
+
+  async function runAfterEvaluation(force = false) {
+    const latestMessage = findLatestChatGptAssistantMessage()
+    if (!latestMessage) return false
+
+    const text = readChatGptAssistantText(latestMessage)
+    if (!text || (!force && text === lastEvaluatedAssistantTextRef.current)) {
+      return false
+    }
+
+    const attempt = await ensureSubmittedAttempt()
+    if (!attempt) return false
+
+    latestAssistantNodeRef.current = latestMessage
+    setIsEvaluatingAfterResponse(true)
+
+    try {
+      const responseSummary = preprocessResponse(text)
+      const result = await analyzeAfterAttempt({
+        attempt,
+        response_summary: responseSummary,
+        response_text_fallback: text
+      })
+      setAfterVerdict(result)
+      await attachAnalysisResult(attempt.attempt_id, text, result, latestMessage.getAttribute("data-message-id"))
+      lastEvaluatedAssistantTextRef.current = text
+      return true
+    } finally {
+      setIsEvaluatingAfterResponse(false)
+    }
+  }
 
   const currentSession = useMemo<SessionSummary>(
     () =>
@@ -275,6 +443,64 @@ export default function PromptOptimizerApp() {
     }
   }, [currentSession, inputBindingVersion])
 
+  useEffect(() => {
+    if (getPromptSurface() !== "CHATGPT") return
+
+    let stableTimer: number | null = null
+
+    const observer = new MutationObserver(() => {
+      if (stableTimer) window.clearTimeout(stableTimer)
+      stableTimer = window.setTimeout(() => {
+        void runAfterEvaluation()
+      }, 800)
+    })
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    })
+
+    return () => {
+      observer.disconnect()
+      if (stableTimer) window.clearTimeout(stableTimer)
+    }
+  }, [answerState, beforeResult, otherAnswerState])
+
+  async function handleOpenAfterPanel() {
+    if (afterVerdict) {
+      return
+    }
+
+    setAfterVerdict(
+      buildAfterPlaceholder("NoRetry is checking the latest AI answer.")
+    )
+    setIsEvaluatingAfterResponse(true)
+
+    try {
+      const opened = await runAfterEvaluation(true)
+      if (!opened) {
+        setAfterVerdict(
+          buildAfterPlaceholder(
+            "NoRetry could not capture the latest AI answer yet.",
+            ["Wait for the answer to finish, then click the thunder again."],
+            "Please restate your final result, list the concrete changes you made, and verify whether the original request is now fully satisfied."
+          )
+        )
+      }
+    } catch {
+      setAfterVerdict(
+        buildAfterPlaceholder(
+          "NoRetry hit a problem while analyzing the latest answer.",
+          ["Try clicking the thunder again after the response fully settles."],
+          "Analyze your last answer again. Tell me exactly what you changed, what remains missing, and give me the next focused prompt to continue."
+        )
+      )
+    } finally {
+      setIsEvaluatingAfterResponse(false)
+    }
+  }
+
   async function handleSubmit() {
     const input = promptRef.current
     if (!input) return
@@ -293,6 +519,37 @@ export default function PromptOptimizerApp() {
       intent: beforeResult?.intent ?? "OTHER",
       sentAt: now
     }
+    const activeAttempt = await getActiveAttempt()
+    if (activeAttempt) {
+      await markAttemptSubmitted(activeAttempt.attempt_id, {
+        raw_prompt: prompt,
+        optimized_prompt: beforeResult?.rewrite ?? prompt,
+        intent: buildAttemptIntentFromBefore(
+          prompt,
+          beforeResult?.rewrite ?? prompt,
+          beforeResult?.intent,
+          beforeResult?.clarification_questions ?? [],
+          normalizeAnswers(answerState)
+        )
+      })
+    } else {
+      const fallbackAttempt = await createAttempt({
+        attempt_id: crypto.randomUUID(),
+        platform: getAttemptPlatform(),
+        raw_prompt: prompt,
+        optimized_prompt: beforeResult?.rewrite ?? prompt,
+        intent: buildAttemptIntentFromBefore(
+          prompt,
+          beforeResult?.rewrite ?? prompt,
+          beforeResult?.intent,
+          beforeResult?.clarification_questions ?? [],
+          normalizeAnswers(answerState)
+        )
+      })
+      await markAttemptSubmitted(fallbackAttempt.attempt_id)
+    }
+    setAfterVerdict(null)
+    latestAssistantNodeRef.current = null
     setHasSubmittedPrompt(true)
 
     const nextSession: SessionSummary = {
@@ -390,6 +647,7 @@ export default function PromptOptimizerApp() {
     const input = promptRef.current
     if (!input || !beforeResult?.rewrite) return
     writePromptValue(input, beforeResult.rewrite)
+    void saveDraftAttempt(promptPreview || beforeResult.rewrite, beforeResult.rewrite)
     setPanelOpen(false)
   }
 
@@ -397,6 +655,8 @@ export default function PromptOptimizerApp() {
     const input = promptRef.current
     if (!draftReady || !input || !editableDraft.trim()) return
     writePromptValue(input, editableDraft.trim())
+    const sourcePrompt = promptPreview || readPromptValue(input)
+    void saveDraftAttempt(sourcePrompt, editableDraft.trim())
     setPanelOpen(false)
   }
 
@@ -606,7 +866,7 @@ export default function PromptOptimizerApp() {
           sessionSummary: summarizeSessionMemory(currentSession)
         })
 
-        nextQuestions = extendResult.clarification_questions.slice(0, 2)
+        nextQuestions = extendResult.clarification_questions.slice(0, 5)
         nextQuestionSource = extendResult.clarification_questions.length
           ? extendResult.ai_available
             ? "AI"
@@ -633,7 +893,7 @@ export default function PromptOptimizerApp() {
           nextRewrite = analyzeResult.rewrite
 
           if (analyzeResult.clarification_questions.length) {
-            nextQuestions = analyzeResult.clarification_questions.slice(0, 2)
+            nextQuestions = analyzeResult.clarification_questions.slice(0, 5)
             nextQuestionSource = analyzeResult.ai_available ? "AI" : "FALLBACK"
             nextAiAvailable = analyzeResult.ai_available
             setQuestionLoadError(null)
@@ -760,62 +1020,66 @@ export default function PromptOptimizerApp() {
   }
 
   return (
-    <OptimizerShell
-      mounted={mounted}
-      panelOpen={panelOpen}
-      promptPreview={promptPreview}
-      beforeResult={beforeResult}
-      isAnalyzingPrompt={isAnalyzingPrompt}
-      diagnosis={diagnosis}
-      detection={detection}
-      session={session}
-      onboardingVisible={onboardingVisible}
-      issueVisible={hasSubmittedPrompt && issueVisible}
-      answerState={answerState}
-      otherAnswerState={otherAnswerState}
-      editableDraft={editableDraft}
-      aiDraftNotes={aiDraftNotes}
-      isGeneratingDraft={isGeneratingDraft}
-      isAddingQuestions={isAddingQuestions}
-      answeredCount={
-        (beforeResult?.clarification_questions ?? []).filter((question) =>
-          isAnswered(question, answerState, otherAnswerState)
-        ).length
-      }
-      totalQuestions={beforeResult?.clarification_questions?.length ?? 0}
-      draftReady={draftReady}
-      isLoadingQuestions={isLoadingQuestions}
-      debugInfo={{
-        surface: getPromptSurface(),
-        promptDetected: !!promptRef.current,
-        promptLength: promptPreview.trim().length,
-        questionSource: beforeResult?.question_source ?? "NONE",
-        aiAvailable: beforeResult?.ai_available ?? false,
-        questionLoadError
-      }}
-      onClosePanel={() => setPanelOpen(false)}
-      onOpenPanel={() => {
-        void syncPromptFromPage().then((snapshot) => {
-          if (!snapshot) return
-          void loadAiQuestionsForCurrentPrompt(snapshot.prompt, snapshot.result)
-        })
-        setPanelOpen(true)
-      }}
-      onRewrite={handleRewrite}
-      onExplain={() => void handleExplain()}
-      onApplyFix={handleApplyFix}
-      onCopyFix={() => void handleCopyFix()}
-      onRetry={handleRetry}
-      onDismissOnboarding={() => void dismissOnboarding()}
-      onWorked={() => void markWorked()}
-      onDidNotWork={() => void markDidNotWork()}
-      onAnswerChange={handleAnswerChange}
-      onToggleMultiAnswer={handleToggleMultiAnswer}
-      onOtherAnswerChange={handleOtherAnswerChange}
-      onDraftChange={setEditableDraft}
-      onReplacePrompt={handleReplacePrompt}
-      onGenerateAiDraft={() => void handleGenerateAiDraft()}
-      onAddQuestions={() => void handleAddQuestions()}
-    />
+    <>
+      <OptimizerShell
+        mounted={mounted}
+        panelOpen={panelOpen}
+        promptPreview={promptPreview}
+        beforeResult={beforeResult}
+        isAnalyzingPrompt={isAnalyzingPrompt}
+        diagnosis={diagnosis}
+        detection={detection}
+        session={session}
+        onboardingVisible={onboardingVisible}
+        issueVisible={hasSubmittedPrompt && issueVisible}
+        answerState={answerState}
+        otherAnswerState={otherAnswerState}
+        editableDraft={editableDraft}
+        aiDraftNotes={aiDraftNotes}
+        isGeneratingDraft={isGeneratingDraft}
+        isAddingQuestions={isAddingQuestions}
+        answeredCount={
+          (beforeResult?.clarification_questions ?? []).filter((question) =>
+            isAnswered(question, answerState, otherAnswerState)
+          ).length
+        }
+        totalQuestions={beforeResult?.clarification_questions?.length ?? 0}
+        draftReady={draftReady}
+        isLoadingQuestions={isLoadingQuestions}
+        isEvaluatingAfterResponse={isEvaluatingAfterResponse}
+        onClosePanel={() => setPanelOpen(false)}
+        onOpenPanel={() => {
+          void syncPromptFromPage().then((snapshot) => {
+            if (!snapshot) return
+            void loadAiQuestionsForCurrentPrompt(snapshot.prompt, snapshot.result)
+          })
+          setPanelOpen(true)
+        }}
+        onOpenAfterPanel={() => void handleOpenAfterPanel()}
+        onRewrite={handleRewrite}
+        onExplain={() => void handleExplain()}
+        onApplyFix={handleApplyFix}
+        onCopyFix={() => void handleCopyFix()}
+        onRetry={handleRetry}
+        onDismissOnboarding={() => void dismissOnboarding()}
+        onWorked={() => void markWorked()}
+        onDidNotWork={() => void markDidNotWork()}
+        onAnswerChange={handleAnswerChange}
+        onToggleMultiAnswer={handleToggleMultiAnswer}
+        onOtherAnswerChange={handleOtherAnswerChange}
+        onDraftChange={setEditableDraft}
+        onReplacePrompt={handleReplacePrompt}
+        onGenerateAiDraft={() => void handleGenerateAiDraft()}
+        onAddQuestions={() => void handleAddQuestions()}
+      />
+      {afterVerdict ? (
+        <AfterVerdictPanel
+          verdict={afterVerdict}
+          isEvaluating={isEvaluatingAfterResponse}
+          onCopyNextPrompt={() => void navigator.clipboard.writeText(afterVerdict.next_prompt)}
+          onClose={() => setAfterVerdict(null)}
+        />
+      ) : null}
+    </>
   )
 }

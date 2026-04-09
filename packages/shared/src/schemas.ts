@@ -4,6 +4,20 @@ import { PROMPT_INTENTS, STRENGTH_SCORES } from "./constants"
 export const StrengthScoreSchema = z.enum(STRENGTH_SCORES)
 export const PromptIntentSchema = z.enum(PROMPT_INTENTS)
 export const PromptSurfaceSchema = z.enum(["REPLIT", "CHATGPT"])
+export const AfterTaskTypeSchema = z.enum(["debug", "build", "refactor", "explain"])
+export const AfterStatusSchema = z.enum(["SUCCESS", "PARTIAL", "FAILED", "UNVERIFIED"])
+export const AfterConfidenceSchema = z.enum(["low", "medium", "high"])
+export const AttemptPlatformSchema = z.enum(["chatgpt", "replit"])
+export const AttemptStatusSchema = z.enum(["draft", "submitted", "analyzed"])
+export const UnifiedTaskTypeSchema = z.enum(["debug", "build", "refactor", "explain", "create_ui", "other"])
+export const VerdictStatusSchema = z.enum([
+  "SUCCESS",
+  "LIKELY_SUCCESS",
+  "PARTIAL",
+  "FAILED",
+  "WRONG_DIRECTION",
+  "UNVERIFIED"
+])
 
 export const SessionSummarySchema = z.object({
   sessionId: z.string(),
@@ -76,6 +90,171 @@ export const DetectionFlagsSchema = z.object({
   looping_behavior: z.boolean().default(false),
   overreach_detected: z.boolean().default(false)
 })
+
+export const AfterIntentSchema = z.object({
+  goal: z.string(),
+  task_type: AfterTaskTypeSchema,
+  acceptance_criteria: z.array(z.string()).max(5).default([])
+})
+
+export const AttemptIntentSchema = z.object({
+  task_type: UnifiedTaskTypeSchema,
+  goal: z.string(),
+  constraints: z.array(z.string()).max(6).default([]),
+  acceptance_criteria: z.array(z.string()).max(6).default([])
+})
+
+export const AttemptSchema = z.object({
+  attempt_id: z.string(),
+  platform: AttemptPlatformSchema,
+  raw_prompt: z.string(),
+  optimized_prompt: z.string(),
+  intent: AttemptIntentSchema,
+  status: AttemptStatusSchema,
+  created_at: z.string(),
+  submitted_at: z.string().nullable().optional(),
+  response_text: z.string().nullable().optional(),
+  response_message_id: z.string().nullable().optional(),
+  analysis_result: z.unknown().nullable().optional(),
+  token_usage_total: z.number().int().min(0).default(0),
+  stage_cache: z.record(z.unknown()).default({})
+})
+
+export const ArtifactSummarySchema = z.object({
+  response_length: z.number().int().min(0),
+  contains_code: z.boolean(),
+  mentioned_files: z.array(z.string()).max(20).default([]),
+  claims_success: z.boolean(),
+  uncertainty_detected: z.boolean()
+})
+
+export const ResponsePreprocessorOutputSchema = z.object({
+  response_text: z.string(),
+  response_length: z.number().int().min(0),
+  first_excerpt: z.string(),
+  last_excerpt: z.string(),
+  key_paragraphs: z.array(z.string()).max(2).default([]),
+  has_code_blocks: z.boolean(),
+  mentioned_files: z.array(z.string()).max(20).default([]),
+  certainty_signals: z.array(z.string()).max(6).default([]),
+  uncertainty_signals: z.array(z.string()).max(6).default([]),
+  success_signals: z.array(z.string()).max(6).default([]),
+  failure_signals: z.array(z.string()).max(6).default([])
+})
+
+export const Stage1OutputSchema = z.object({
+  assistant_action_summary: z.string(),
+  claimed_evidence: z.array(z.string()).max(4).default([]),
+  response_mode: z.enum(["implemented", "suggested", "explained", "uncertain"]),
+  scope_assessment: z.enum(["narrow", "moderate", "broad"])
+})
+
+export const Stage2OutputSchema = z.object({
+  addressed_criteria: z.array(z.string()).max(6).default([]),
+  missing_criteria: z.array(z.string()).max(6).default([]),
+  constraint_risks: z.array(z.string()).max(6).default([]),
+  problem_fit: z.enum(["correct", "partial", "wrong_direction"]),
+  analysis_notes: z.array(z.string()).max(4).default([])
+})
+
+export const VerdictOutputSchema = z.object({
+  status: VerdictStatusSchema,
+  confidence: AfterConfidenceSchema,
+  findings: z.array(z.string()).max(3).default([]),
+  issues: z.array(z.string()).max(6).default([])
+})
+
+export const NextPromptOutputSchema = z.object({
+  next_prompt: z.string(),
+  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "retry_cleanly"])
+})
+
+export const AfterAnalysisResultSchema = z.object({
+  status: VerdictStatusSchema,
+  confidence: AfterConfidenceSchema,
+  findings: z.array(z.string()).max(3).default([]),
+  issues: z.array(z.string()).max(6).default([]),
+  next_prompt: z.string(),
+  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "retry_cleanly"]),
+  stage_1: Stage1OutputSchema,
+  stage_2: Stage2OutputSchema,
+  verdict: VerdictOutputSchema,
+  next_prompt_output: NextPromptOutputSchema,
+  response_summary: ResponsePreprocessorOutputSchema,
+  used_fallback_intent: z.boolean().default(false),
+  token_usage_total: z.number().int().min(0).default(0)
+})
+
+export const AfterHeuristicResultSchema = z.object({
+  preliminary_status: AfterStatusSchema,
+  heuristic_flags: z.array(z.string()).max(10).default([])
+})
+
+export const AfterEvaluationResultSchema = z.object({
+  status: AfterStatusSchema,
+  confidence: AfterConfidenceSchema,
+  findings: z.array(z.string()).max(3).default([]),
+  issues: z.array(z.string()).max(5).default([]),
+  next_prompt: z.string(),
+  source: z.enum(["HEURISTIC", "LLM", "HEURISTIC_PLUS_LLM"]).default("HEURISTIC")
+})
+
+export const AfterLlmRequestSchema = z.object({
+  intent: AfterIntentSchema,
+  artifact_summary: ArtifactSummarySchema,
+  snippets: z.array(z.string()).max(2).default([]),
+  heuristic_flags: z.array(z.string()).max(10).default([])
+})
+
+export const AfterLlmResponseSchema = z.object({
+  status: z.enum(["SUCCESS", "PARTIAL", "FAILED", "UNVERIFIED", "WRONG_DIRECTION"]),
+  confidence: AfterConfidenceSchema,
+  findings: z.array(z.string()).max(3).default([]),
+  issues: z.array(z.string()).max(5).default([]),
+  next_prompt: z.string()
+})
+
+export const IntentExtractionOutputSchema = z.object({
+  task_type: UnifiedTaskTypeSchema,
+  goal: z.string(),
+  constraints: z.array(z.string()).max(6).default([]),
+  acceptance_criteria: z.array(z.string()).max(6).default([])
+})
+
+export const AfterStage1RequestSchema = z.object({
+  intent_goal: z.string(),
+  task_type: UnifiedTaskTypeSchema,
+  response_summary: ResponsePreprocessorOutputSchema
+})
+
+export const AfterStage2RequestSchema = z.object({
+  intent: AttemptIntentSchema,
+  stage_1: Stage1OutputSchema,
+  response_excerpts: z.array(z.string()).max(3).default([])
+})
+
+export const AfterStage3RequestSchema = z.object({
+  intent: AttemptIntentSchema,
+  stage_1: Stage1OutputSchema,
+  stage_2: Stage2OutputSchema,
+  response_summary: ResponsePreprocessorOutputSchema
+})
+
+export const AfterStage4RequestSchema = z.object({
+  optimized_prompt: z.string(),
+  intent: AttemptIntentSchema,
+  verdict: VerdictOutputSchema,
+  missing_criteria: z.array(z.string()).max(6).default([]),
+  constraint_risks: z.array(z.string()).max(6).default([])
+})
+
+export const AfterPipelineRequestSchema = z.object({
+  attempt: AttemptSchema,
+  response_summary: ResponsePreprocessorOutputSchema,
+  response_text_fallback: z.string().default("")
+})
+
+export const AfterPipelineResponseSchema = AfterAnalysisResultSchema
 
 export const DetectOutcomeRequestSchema = z.object({
   session_id: z.string(),
@@ -150,3 +329,31 @@ export type PromptIntent = z.infer<typeof PromptIntentSchema>
 export type PromptSurface = z.infer<typeof PromptSurfaceSchema>
 export type StrengthScore = z.infer<typeof StrengthScoreSchema>
 export type DetectionFlags = z.infer<typeof DetectionFlagsSchema>
+export type AfterTaskType = z.infer<typeof AfterTaskTypeSchema>
+export type AfterStatus = z.infer<typeof AfterStatusSchema>
+export type AfterConfidence = z.infer<typeof AfterConfidenceSchema>
+export type AfterIntent = z.infer<typeof AfterIntentSchema>
+export type ArtifactSummary = z.infer<typeof ArtifactSummarySchema>
+export type AfterHeuristicResult = z.infer<typeof AfterHeuristicResultSchema>
+export type AfterEvaluationResult = z.infer<typeof AfterEvaluationResultSchema>
+export type AfterLlmRequest = z.infer<typeof AfterLlmRequestSchema>
+export type AfterLlmResponse = z.infer<typeof AfterLlmResponseSchema>
+export type AttemptPlatform = z.infer<typeof AttemptPlatformSchema>
+export type AttemptStatus = z.infer<typeof AttemptStatusSchema>
+export type UnifiedTaskType = z.infer<typeof UnifiedTaskTypeSchema>
+export type VerdictStatus = z.infer<typeof VerdictStatusSchema>
+export type AttemptIntent = z.infer<typeof AttemptIntentSchema>
+export type Attempt = z.infer<typeof AttemptSchema>
+export type ResponsePreprocessorOutput = z.infer<typeof ResponsePreprocessorOutputSchema>
+export type Stage1Output = z.infer<typeof Stage1OutputSchema>
+export type Stage2Output = z.infer<typeof Stage2OutputSchema>
+export type VerdictOutput = z.infer<typeof VerdictOutputSchema>
+export type NextPromptOutput = z.infer<typeof NextPromptOutputSchema>
+export type AfterAnalysisResult = z.infer<typeof AfterAnalysisResultSchema>
+export type IntentExtractionOutput = z.infer<typeof IntentExtractionOutputSchema>
+export type AfterStage1Request = z.infer<typeof AfterStage1RequestSchema>
+export type AfterStage2Request = z.infer<typeof AfterStage2RequestSchema>
+export type AfterStage3Request = z.infer<typeof AfterStage3RequestSchema>
+export type AfterStage4Request = z.infer<typeof AfterStage4RequestSchema>
+export type AfterPipelineRequest = z.infer<typeof AfterPipelineRequestSchema>
+export type AfterPipelineResponse = z.infer<typeof AfterPipelineResponseSchema>

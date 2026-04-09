@@ -1,8 +1,14 @@
 {
   "name": "@prompt-optimizer/extension",
+  "displayName": "NoRetry",
   "version": "0.1.0",
   "private": true,
   "manifest": {
+    "name": "NoRetry",
+    "description": "Sharpen prompts before you send them.",
+    "action": {
+      "default_title": "NoRetry"
+    },
     "host_permissions": [
       "http://localhost/*",
       "http://127.0.0.1/*"
