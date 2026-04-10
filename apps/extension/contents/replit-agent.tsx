@@ -103,7 +103,9 @@ export default function PromptOptimizerApp() {
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
   const [codeAnalysisMode, setCodeAnalysisModeState] = useState<"quick" | "deep">("quick")
   const [afterNextStepStarted, setAfterNextStepStarted] = useState(false)
+  const [afterQuestionHistory, setAfterQuestionHistory] = useState<ClarificationQuestion[]>([])
   const [afterQuestions, setAfterQuestions] = useState<ClarificationQuestion[]>([])
+  const [afterQuestionLevel, setAfterQuestionLevel] = useState(1)
   const [afterAnswerState, setAfterAnswerState] = useState<Record<string, string>>({})
   const [afterOtherAnswerState, setAfterOtherAnswerState] = useState<Record<string, string>>({})
   const [afterActiveQuestionIndex, setAfterActiveQuestionIndex] = useState(0)
@@ -190,7 +192,9 @@ export default function PromptOptimizerApp() {
 
   function resetAfterNextStepFlow() {
     setAfterNextStepStarted(false)
+    setAfterQuestionHistory([])
     setAfterQuestions([])
+    setAfterQuestionLevel(1)
     setAfterAnswerState({})
     setAfterOtherAnswerState({})
     setAfterActiveQuestionIndex(0)
@@ -217,7 +221,17 @@ export default function PromptOptimizerApp() {
     }
   }
 
-  async function fetchAfterNextQuestion(existingQuestions: ClarificationQuestion[], answers: Record<string, string>) {
+  function mergeUniqueQuestions(existing: ClarificationQuestion[], incoming: ClarificationQuestion[]) {
+    const seen = new Set(existing.map((question) => question.id))
+    return [...existing, ...incoming.filter((question) => !seen.has(question.id))]
+  }
+
+  async function fetchAfterNextQuestions(
+    existingQuestions: ClarificationQuestion[],
+    answers: Record<string, string>,
+    currentLevel: number,
+    requestKind: "next_level" | "expand_level"
+  ) {
     if (!afterVerdict) return null
     const latestAttempt = await getLatestSubmittedAttempt()
     if (!latestAttempt) return null
@@ -226,10 +240,12 @@ export default function PromptOptimizerApp() {
       attempt: latestAttempt,
       analysis: afterVerdict,
       asked_questions: existingQuestions,
-      answers
+      answers,
+      current_level: currentLevel,
+      request_kind: requestKind
     })
 
-    return result.question
+    return result
   }
 
   async function saveDraftAttempt(promptText: string, improvedPrompt?: string | null) {
@@ -655,9 +671,11 @@ export default function PromptOptimizerApp() {
 
     setIsAddingAfterQuestions(true)
     try {
-      const firstQuestion = await fetchAfterNextQuestion([], {})
-      if (firstQuestion) {
-        setAfterQuestions([firstQuestion])
+      const result = await fetchAfterNextQuestions([], {}, 1, "next_level")
+      if (result?.questions.length) {
+        setAfterQuestions(result.questions)
+        setAfterQuestionHistory(result.questions)
+        setAfterQuestionLevel(result.next_level)
         setAfterActiveQuestionIndex(0)
       }
     } finally {
@@ -679,9 +697,11 @@ export default function PromptOptimizerApp() {
           .filter(([, value]) => typeof value === "string" && value.trim())
       ) as Record<string, string>
 
-      const nextQuestion = await fetchAfterNextQuestion(afterQuestions, answers)
-      if (nextQuestion && !afterQuestions.some((question) => question.id === nextQuestion.id)) {
-        setAfterQuestions((current) => [...current, nextQuestion])
+      const askedQuestions = mergeUniqueQuestions(afterQuestionHistory, afterQuestions)
+      const result = await fetchAfterNextQuestions(askedQuestions, answers, afterQuestionLevel, "expand_level")
+      if (result?.questions.length) {
+        setAfterQuestions((current) => mergeUniqueQuestions(current, result.questions))
+        setAfterQuestionHistory((current) => mergeUniqueQuestions(current, result.questions))
         setAfterActiveQuestionIndex(afterQuestions.length)
       }
     } finally {
@@ -719,8 +739,7 @@ export default function PromptOptimizerApp() {
       [questionId]: resolvedValue === OTHER_OPTION ? afterOtherAnswerState[questionId]?.trim() ?? "" : resolvedValue
     }
 
-    const nextIndex = afterQuestions.findIndex((item, index) => {
-      if (index <= afterActiveQuestionIndex) return false
+    const nextIndex = afterQuestions.findIndex((item) => {
       const nextValue = mergedAnswers[item.id]
       const nextOther = afterOtherAnswerState[item.id]?.trim() ?? ""
       return !nextValue || (nextValue === OTHER_OPTION && !nextOther)
@@ -739,17 +758,21 @@ export default function PromptOptimizerApp() {
 
     setIsAddingAfterQuestions(true)
     try {
-      const nextQuestion = await fetchAfterNextQuestion(afterQuestions, normalizedAnswers)
-      if (nextQuestion && !afterQuestions.some((question) => question.id === nextQuestion.id)) {
-        setAfterQuestions((current) => [...current, nextQuestion])
-        setAfterActiveQuestionIndex(afterQuestions.length)
+      const askedQuestions = mergeUniqueQuestions(afterQuestionHistory, afterQuestions)
+      const result = await fetchAfterNextQuestions(askedQuestions, normalizedAnswers, afterQuestionLevel, "next_level")
+      if (result?.questions.length) {
+        setAfterQuestionHistory(askedQuestions)
+        setAfterQuestions(result.questions)
+        setAfterQuestionHistory((current) => mergeUniqueQuestions(current, result.questions))
+        setAfterQuestionLevel(result.next_level)
+        setAfterActiveQuestionIndex(0)
         return
       }
     } finally {
       setIsAddingAfterQuestions(false)
     }
 
-    setAfterActiveQuestionIndex((current) => Math.min(current + 1, Math.max(0, afterQuestions.length - 1)))
+    setAfterActiveQuestionIndex((current) => Math.min(current, Math.max(0, afterQuestions.length - 1)))
   }
 
   async function handleGenerateAfterNextPrompt() {

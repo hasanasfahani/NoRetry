@@ -1,124 +1,182 @@
 import {
   AfterNextQuestionResponseSchema,
-  type AfterNextQuestionRequest
+  type AfterNextQuestionRequest,
+  type ClarificationQuestion
 } from "@prompt-optimizer/shared"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
 
-function dedupe(items: string[], limit = 6) {
+function dedupe(items: string[], limit = 5) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
 }
 
-function buildFallbackQuestion(input: AfterNextQuestionRequest) {
-  const askedIds = new Set(input.asked_questions.map((question) => question.id))
-  const issue = input.analysis.issues[0] || input.analysis.findings[0] || "the flagged gap"
+function mergeUniqueQuestions(existing: ClarificationQuestion[], incoming: ClarificationQuestion[]) {
+  const seen = new Set(existing.map((question) => question.id))
+  return incoming.filter((question) => !seen.has(question.id))
+}
+
+function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
+  const level = input.request_kind === "expand_level" ? input.current_level : input.current_level + (input.asked_questions.length ? 1 : 0)
+  const issue = input.analysis.issues[0] || input.analysis.findings[0] || "the main gap"
   const codeAnswer =
     input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
 
-  const candidates = [
+  const levelCandidates: Record<number, ClarificationQuestion[]> = {
+    1: [
+      {
+        id: "after_goal_focus",
+        label: "What should the next step accomplish first?",
+        helper: "Pick the most important outcome for the very next prompt.",
+        mode: "single",
+        options: ["Fix the missing part", "Validate the result", "Tighten the scope", "Improve quality", "Other"]
+      }
+    ],
+    2: [
+      {
+        id: "after_level2_style",
+        label: "What kind of answer do you want next?",
+        helper: "Choose the response style that will help you most.",
+        mode: "single",
+        options: codeAnswer
+          ? ["Code only", "Minimal patch", "Code with short notes", "Proof plus code", "Other"]
+          : ["Final answer only", "Short bullets", "Step-by-step", "Validate each requirement", "Other"]
+      },
+      {
+        id: "after_level2_scope",
+        label: `How should the next prompt handle ${issue}?`,
+        helper: "Choose how tightly NoRetry should steer the next response.",
+        mode: "single",
+        options: ["Address it directly", "Ask for proof", "Keep scope very tight", "Retry cleanly", "Other"]
+      }
+    ],
+    3: [
+      {
+        id: "after_level3_guardrail",
+        label: "What guardrail matters most for the next prompt?",
+        helper: "Pick the main constraint NoRetry should enforce.",
+        mode: "single",
+        options: ["No unrelated changes", "Keep it concise", "Explain the reasoning", "Validate before claiming success", "Other"]
+      }
+    ]
+  }
+
+  const candidates = levelCandidates[level] ?? [
     {
-      id: "after_focus",
-      label: "What should the next step focus on first?",
-      helper: "Pick the highest-value direction for the next prompt.",
-      mode: "single" as const,
-      options: ["Fix the missing part", "Ask for proof", "Narrow the scope", "Improve the result"]
-    },
-    {
-      id: "after_issue",
-      label: `How should NoRetry handle this concern: ${issue}?`,
-      helper: "Choose the best way to address the main issue.",
-      mode: "single" as const,
-      options: ["Fix it directly", "Validate it clearly", "Explain it briefly", "Keep it tightly scoped"]
-    },
-    {
-      id: "after_format",
-      label: "What format should the next answer use?",
-      helper: "Choose the response style you want from the AI.",
-      mode: "single" as const,
-      options: codeAnswer
-        ? ["Code only", "Code with short notes", "Patch-style answer", "Checklist and code"]
-        : ["Short answer only", "Structured bullets", "Detailed but concise", "Final answer only"]
-    },
-    {
-      id: "after_scope",
-      label: "How tightly should the next prompt constrain the scope?",
-      helper: "Keep the next step focused enough for the result you want.",
-      mode: "single" as const,
-      options: ["Very tight scope", "Moderately tight", "Allow one improvement", "Focus on validation only"]
+      id: `after_level${level}_finish`,
+      label: "What should NoRetry optimize in the next prompt?",
+      helper: "Choose the final steering direction for the next step.",
+      mode: "single",
+      options: ["Accuracy", "Speed", "Proof", "Scope control", "Other"]
     }
   ]
 
-  const nextQuestion = candidates.find((question) => !askedIds.has(question.id)) ?? null
+  const questions = mergeUniqueQuestions(input.asked_questions, candidates).slice(0, input.request_kind === "expand_level" ? 1 : 2)
+
   return AfterNextQuestionResponseSchema.parse({
-    question: nextQuestion,
+    questions,
+    next_level: level,
     ai_available: false
   })
 }
 
-async function callStructuredJson(systemPrompt: string, userPrompt: string, maxTokens = 260) {
+async function callStructuredJson(systemPrompt: string, userPrompt: string, maxTokens = 420) {
   const kimi = await callKimiJson(systemPrompt, userPrompt, maxTokens)
   if (kimi) return kimi
   return callDeepSeekJson(systemPrompt, userPrompt, maxTokens)
 }
 
 function buildPrompts(input: AfterNextQuestionRequest) {
-  const qaPairs = input.asked_questions
-    .map((question) => {
-      const answer = input.answers[question.id]
-      return answer ? `Q: ${question.label}\nA: ${answer}` : ""
+  const askedLabels = input.asked_questions.map((question) => question.label).slice(-8)
+  const answerPairs = Object.entries(input.answers)
+    .map(([questionId, answer]) => {
+      const question = input.asked_questions.find((item) => item.id === questionId)
+      return question ? `${question.label}: ${answer}` : ""
     })
     .filter(Boolean)
-    .slice(0, 6)
+    .slice(-8)
+
+  const targetLevel = input.request_kind === "expand_level" ? input.current_level : input.current_level + (input.asked_questions.length ? 1 : 0)
+  const isCodeAnswer =
+    input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
 
   const systemPrompt =
-    "You generate exactly one useful follow-up clarification question for planning the user's next prompt after an AI answer review. Return JSON only with keys: question. The question must include id, label, helper, mode, and options. Use mode 'single'. Provide 3 or 4 concrete options. The next question must depend on the latest known answers and should narrow the next action, not ask generic repeated questions. Do not ask about topics already covered. Keep label under 110 characters and helper under 140 characters."
+    "You generate decision-tree follow-up questions for planning the user's next prompt after an AI answer review. Return JSON only with keys questions and next_level. questions must be an array of 1 to 2 objects for request_kind next_level, or exactly 1 object for request_kind expand_level. Each object must include id, label, helper, mode, and options. mode must be 'single'. Each question must build on earlier answers and stay in the same branch. Do not repeat asked topics. Keep label under 110 chars and helper under 140 chars. Always include 4 concrete options plus Other."
 
   const userPrompt = JSON.stringify({
     submitted_prompt: input.attempt.raw_prompt,
     task_type: input.attempt.intent.task_type,
     verdict_status: input.analysis.status,
-    findings: input.analysis.findings,
-    issues: input.analysis.issues,
-    asked_questions: input.asked_questions.map((question) => question.label),
-    answers_so_far: qaPairs,
-    code_answer:
-      input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
+    findings: input.analysis.findings.slice(0, 3),
+    issues: input.analysis.issues.slice(0, 3),
+    review_depth: input.analysis.inspection_depth,
+    code_answer: isCodeAnswer,
+    current_level: input.current_level,
+    request_kind: input.request_kind,
+    target_level: targetLevel,
+    asked_questions: askedLabels,
+    answers_so_far: answerPairs
   })
 
-  return { systemPrompt, userPrompt }
+  return { systemPrompt, userPrompt, targetLevel }
+}
+
+function normalizeQuestions(rawQuestions: unknown) {
+  if (!Array.isArray(rawQuestions)) return []
+
+  const normalized = rawQuestions
+    .filter((question): question is Record<string, unknown> => Boolean(question) && typeof question === "object")
+    .map((question) => {
+      const id = typeof question.id === "string" ? question.id.trim() : ""
+      const label = typeof question.label === "string" ? question.label.trim() : ""
+      const helper = typeof question.helper === "string" ? question.helper.trim() : ""
+
+      if (!id || !label || !helper) return null
+
+      return {
+        id,
+        label,
+        helper,
+        mode: "single" as const,
+        options: dedupe(
+          [
+            ...(((question.options as unknown[]) ?? []).filter((item): item is string => typeof item === "string")),
+            "Other"
+          ],
+          5
+        )
+      }
+    })
+    .filter(Boolean)
+
+  return normalized as ClarificationQuestion[]
 }
 
 export async function generateAfterNextQuestion(input: AfterNextQuestionRequest) {
-  const { systemPrompt, userPrompt } = buildPrompts(input)
+  const { systemPrompt, userPrompt, targetLevel } = buildPrompts(input)
 
   try {
-    const raw = await callStructuredJson(systemPrompt, userPrompt, 260)
+    const raw = await callStructuredJson(systemPrompt, userPrompt, 420)
     if (!raw) {
-      return buildFallbackQuestion(input)
+      return fallbackQuestionBatch(input)
     }
 
-    const parsed = JSON.parse(raw) as { question?: unknown }
-    const normalizedQuestion =
-      parsed.question && typeof parsed.question === "object"
-        ? {
-            ...(parsed.question as Record<string, unknown>),
-            options: dedupe(
-              [
-                ...((((parsed.question as Record<string, unknown>).options as unknown[]) ?? []).filter(
-                  (item): item is string => typeof item === "string"
-                )),
-                "Other"
-              ],
-              5
-            )
-          }
-        : null
+    const parsed = JSON.parse(raw) as { questions?: unknown; next_level?: unknown }
+    const normalizedQuestions = normalizeQuestions(parsed.questions)
+    const mergedQuestions = mergeUniqueQuestions(input.asked_questions, normalizedQuestions).slice(
+      0,
+      input.request_kind === "expand_level" ? 1 : 2
+    )
+
+    if (!mergedQuestions.length) {
+      return fallbackQuestionBatch(input)
+    }
 
     return AfterNextQuestionResponseSchema.parse({
-      question: normalizedQuestion,
+      questions: mergedQuestions,
+      next_level: typeof parsed.next_level === "number" ? parsed.next_level : targetLevel,
       ai_available: true
     })
   } catch {
-    return buildFallbackQuestion(input)
+    return fallbackQuestionBatch(input)
   }
 }

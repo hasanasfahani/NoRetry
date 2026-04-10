@@ -264,11 +264,14 @@ export const AfterNextQuestionRequestSchema = z.object({
   attempt: AttemptSchema,
   analysis: AfterAnalysisResultSchema,
   asked_questions: z.array(ClarificationQuestionSchema).max(8).default([]),
-  answers: z.record(z.string()).default({})
+  answers: z.record(z.string()).default({}),
+  current_level: z.number().int().min(1).max(8).default(1),
+  request_kind: z.enum(["next_level", "expand_level"]).default("next_level")
 })
 
 export const AfterNextQuestionResponseSchema = z.object({
-  question: ClarificationQuestionSchema.nullable().default(null),
+  questions: z.array(ClarificationQuestionSchema).max(3).default([]),
+  next_level: z.number().int().min(1).max(8).default(1),
   ai_available: z.boolean().default(false)
 })
 
