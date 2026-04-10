@@ -20,6 +20,7 @@ function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
   const issue = input.analysis.issues[0] || input.analysis.findings[0] || "the main gap"
   const codeAnswer =
     input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
+  const planningGoal = input.planning_goal.trim()
 
   const levelCandidates: Record<number, ClarificationQuestion[]> = {
     1: [
@@ -43,7 +44,9 @@ function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
       },
       {
         id: "after_level2_scope",
-        label: `How should the next prompt handle ${issue}?`,
+        label: planningGoal
+          ? `How should the next prompt move toward: ${planningGoal}?`
+          : `How should the next prompt handle ${issue}?`,
         helper: "Choose how tightly NoRetry should steer the next response.",
         mode: "single",
         options: ["Address it directly", "Ask for proof", "Keep scope very tight", "Retry cleanly", "Other"]
@@ -104,6 +107,7 @@ function buildPrompts(input: AfterNextQuestionRequest) {
 
   const userPrompt = JSON.stringify({
     submitted_prompt: input.attempt.raw_prompt,
+    planning_goal: input.planning_goal,
     task_type: input.attempt.intent.task_type,
     verdict_status: input.analysis.status,
     findings: input.analysis.findings.slice(0, 3),

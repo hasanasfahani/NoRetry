@@ -265,6 +265,7 @@ export const AfterNextQuestionRequestSchema = z.object({
   analysis: AfterAnalysisResultSchema,
   asked_questions: z.array(ClarificationQuestionSchema).max(8).default([]),
   answers: z.record(z.string()).default({}),
+  planning_goal: z.string().max(240).default(""),
   current_level: z.number().int().min(1).max(8).default(1),
   request_kind: z.enum(["next_level", "expand_level"]).default("next_level")
 })

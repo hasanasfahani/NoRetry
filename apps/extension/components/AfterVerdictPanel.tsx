@@ -8,6 +8,8 @@ type AfterVerdictPanelProps = {
   isDeepAnalyzing: boolean
   codeAnalysisMode: "quick" | "deep"
   nextStepStarted: boolean
+  planningGoal: string
+  nextQuestionHistory: ClarificationQuestion[]
   nextQuestions: ClarificationQuestion[]
   nextAnswerState: Record<string, string>
   nextOtherAnswerState: Record<string, string>
@@ -19,6 +21,8 @@ type AfterVerdictPanelProps = {
   onRunDeepAnalysis: () => void
   onSelectCodeAnalysisMode: (mode: "quick" | "deep") => void
   onStartNextStep: () => void
+  onPlanningGoalChange: (value: string) => void
+  onBeginDecisionTree: () => void
   onAddNextQuestions: () => void
   onNextAnswerChange: (question: ClarificationQuestion, value: string) => void
   onNextOtherAnswerChange: (question: ClarificationQuestion, value: string) => void
@@ -157,8 +161,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     .map((item) => humanizeChecklistLabel(item))
     .filter((item) => !coveredKeys.has(canonicalChecklistKey(item)))
   const unresolvedPrefix = props.verdict.inspection_depth === "summary_only" ? "(not sure)" : "🚫"
-  const activeNextQuestion = props.nextQuestions[props.activeNextQuestionIndex] ?? null
-  const answeredNextCount = props.nextQuestions.filter((question) => {
+  const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
+  const activeNextQuestion = visibleQuestions[props.activeNextQuestionIndex] ?? null
+  const answeredNextCount = visibleQuestions.filter((question) => {
     const value = props.nextAnswerState[question.id]?.trim()
     const otherValue = props.nextOtherAnswerState[question.id]?.trim()
     return Boolean(value) && (value !== otherOption || Boolean(otherValue))
@@ -167,6 +172,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const activeNextQuestionUsesOther =
     activeNextQuestion != null && props.nextAnswerState[activeNextQuestion.id] === otherOption
   const showStartNextStep = !props.nextStepStarted
+  const showPlanningGoalEntry = props.nextStepStarted && visibleQuestions.length === 0
 
   return (
     <>
@@ -308,23 +314,49 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <div>
                 <p style={styles.blockTitle}>Plan The Next Step</p>
                 <p style={styles.progressCopy}>
-                  {answeredNextCount} of {props.nextQuestions.length} answered
+                  {visibleQuestions.length ? `${answeredNextCount} of ${visibleQuestions.length} answered` : "Start by describing the next step you want"}
                 </p>
               </div>
-              <button
-                type="button"
-                style={styles.secondaryButton}
-                onClick={props.onAddNextQuestions}
-                disabled={props.isAddingNextQuestions}
-              >
-                {props.isAddingNextQuestions ? "Adding..." : "Add more questions"}
-              </button>
+              {visibleQuestions.length ? (
+                <button
+                  type="button"
+                  style={styles.secondaryButton}
+                  onClick={props.onAddNextQuestions}
+                  disabled={props.isAddingNextQuestions}
+                >
+                  {props.isAddingNextQuestions ? "Adding..." : "Add more questions"}
+                </button>
+              ) : null}
             </div>
 
-            {props.nextQuestions.length ? (
+            {showPlanningGoalEntry ? (
+              <div style={styles.questionCard}>
+                <p style={styles.questionLabel}>What do you want the next step to be?</p>
+                <p style={styles.questionHelper}>Give NoRetry a short direction so it can build the next decision-tree questions around it.</p>
+                <input
+                  type="text"
+                  style={styles.inlineInput}
+                  value={props.planningGoal}
+                  onChange={(event) => props.onPlanningGoalChange(event.currentTarget.value)}
+                  placeholder="Example: Help me debug why the emoji overlay does not appear"
+                />
+                <div style={styles.manualAdvanceRow}>
+                  <button
+                    type="button"
+                    style={styles.secondaryButton}
+                    onClick={props.onBeginDecisionTree}
+                    disabled={!props.planningGoal.trim() || props.isAddingNextQuestions}
+                  >
+                    {props.isAddingNextQuestions ? "Thinking..." : "Next Question"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {visibleQuestions.length ? (
               <>
                 <div style={styles.questionTabs}>
-                  {props.nextQuestions.map((question, index) => (
+                  {visibleQuestions.map((question, index) => (
                     <button
                       key={question.id}
                       type="button"
