@@ -25,6 +25,72 @@ function conciseGoal(value: string) {
   return limitText(value.trim(), 140)
 }
 
+function cleanCriterionText(value: string) {
+  return value
+    .replace(/^[-*•]\s*/, "")
+    .replace(/^and\s+/i, "")
+    .replace(/^then\s+/i, "")
+    .replace(/^that\s+/i, "")
+    .replace(/^it\s+should\s+/i, "")
+    .replace(/^should\s+/i, "")
+    .replace(/^must\s+/i, "")
+    .replace(/^the answer should\s+/i, "")
+    .replace(/^return\s+only\s+/i, "Return only ")
+    .replace(/^keep\s+/i, "Keep ")
+    .replace(/^use\s+/i, "Use ")
+    .replace(/^no\s+/i, "No ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function deriveAcceptanceCriteriaFromSubmittedPrompt(prompt: string) {
+  const normalized = prompt
+    .replace(/\r/g, "")
+    .replace(/[–—]/g, "; ")
+    .replace(/\n+/g, "\n")
+    .trim()
+
+  const matches = normalized.match(/so that:(.*?)(?:return only|no explanations|$)/is)
+  const scopedSource = matches?.[1]?.trim() || normalized
+
+  const rawClauses = scopedSource
+    .split(/\n|;(?=\s)|•|(?<!\d)\.(?=\s+[A-Z@-])/)
+    .map((item) => cleanCriterionText(item))
+    .filter(Boolean)
+
+  const focusedClauses = rawClauses.filter((item) => {
+    const lowered = item.toLowerCase()
+    return (
+      lowered.length >= 6 &&
+      !/^write\b/.test(lowered) &&
+      !/^add\b/.test(lowered) &&
+      !/^extend\b/.test(lowered) &&
+      !/^create\b/.test(lowered) &&
+      !/^build\b/.test(lowered)
+    )
+  })
+
+  const explicitReturnRules = [
+    /return only the complete updated html file(?: inside one markdown code block)?/i,
+    /return only the code block/i,
+    /no explanations/i,
+    /keep the current .* unchanged/i,
+    /use a lightweight, client-side model/i,
+    /works offline/i
+  ]
+    .map((pattern) => normalized.match(pattern)?.[0] ?? "")
+    .map((item) => cleanCriterionText(item))
+    .filter(Boolean)
+
+  const combined = dedupe([...focusedClauses, ...explicitReturnRules], 6)
+
+  if (combined.length) {
+    return combined.map((item) => limitText(item, 72))
+  }
+
+  return [`Solve: ${conciseGoal(normalized)}`]
+}
+
 export function mapPromptIntentToTaskType(intent: PromptIntent | undefined): UnifiedTaskType {
   switch (intent) {
     case "DEBUG":
@@ -96,7 +162,7 @@ export function buildAttemptIntentFromSubmittedPrompt(
     task_type: mapPromptIntentToTaskType(promptIntent),
     goal: normalizedPrompt,
     constraints: [],
-    acceptance_criteria: [`Prove the answer solved this goal: ${conciseGoal(normalizedPrompt)}`]
+    acceptance_criteria: deriveAcceptanceCriteriaFromSubmittedPrompt(normalizedPrompt)
   }
 }
 
