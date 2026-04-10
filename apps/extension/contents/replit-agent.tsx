@@ -6,6 +6,7 @@ import type {
   ClarificationQuestion,
   DetectOutcomeResponse,
   DiagnoseFailureResponse,
+  PromptIntent,
   SessionSummary,
   Attempt
 } from "@prompt-optimizer/shared/src/schemas"
@@ -13,13 +14,14 @@ import { DETECTION_THRESHOLDS } from "@prompt-optimizer/shared/src/constants"
 import { analyzePromptLocally, buildPromptFromAnswers } from "@prompt-optimizer/shared/src/analyzePrompt"
 import {
   buildAttemptIntentFromBefore,
+  buildAttemptIntentFromSubmittedPrompt,
   mapPromptIntentToTaskType,
   preprocessResponse
 } from "@prompt-optimizer/shared"
 import { summarizeSessionMemory } from "@prompt-optimizer/shared/src/session"
 import { AfterVerdictPanel } from "../components/AfterVerdictPanel"
 import { OptimizerShell } from "../components/OptimizerShell"
-import { analyzeAfterAttempt, analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, refinePrompt, sendFeedback } from "../lib/api"
+import { analyzeAfterAttempt, analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, generateAfterNextQuestion, refinePrompt, sendFeedback } from "../lib/api"
 import {
   findLatestChatGptAssistantMessage,
   findLatestChatGptUserMessage,
@@ -96,9 +98,19 @@ export default function PromptOptimizerApp() {
   const [isLoadingQuestions, setIsLoadingQuestions] = useState(false)
   const [questionLoadError, setQuestionLoadError] = useState<string | null>(null)
   const [afterVerdict, setAfterVerdict] = useState<AfterAnalysisResult | null>(null)
+  const [afterPanelOpen, setAfterPanelOpen] = useState(false)
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
   const [codeAnalysisMode, setCodeAnalysisModeState] = useState<"quick" | "deep">("quick")
+  const [afterNextStepStarted, setAfterNextStepStarted] = useState(false)
+  const [afterQuestions, setAfterQuestions] = useState<ClarificationQuestion[]>([])
+  const [afterAnswerState, setAfterAnswerState] = useState<Record<string, string>>({})
+  const [afterOtherAnswerState, setAfterOtherAnswerState] = useState<Record<string, string>>({})
+  const [afterActiveQuestionIndex, setAfterActiveQuestionIndex] = useState(0)
+  const [isAddingAfterQuestions, setIsAddingAfterQuestions] = useState(false)
+  const [isGeneratingAfterNextPrompt, setIsGeneratingAfterNextPrompt] = useState(false)
+  const [afterNextPromptDraft, setAfterNextPromptDraft] = useState("")
+  const [afterNextPromptReady, setAfterNextPromptReady] = useState(false)
   const promptRef = useRef<HTMLElement | null>(null)
   const submitRef = useRef<HTMLButtonElement | null>(null)
   const pendingPromptRef = useRef<PendingPrompt | null>(null)
@@ -176,6 +188,50 @@ export default function PromptOptimizerApp() {
     return getPromptSurface() === "CHATGPT" ? "chatgpt" : "replit"
   }
 
+  function resetAfterNextStepFlow() {
+    setAfterNextStepStarted(false)
+    setAfterQuestions([])
+    setAfterAnswerState({})
+    setAfterOtherAnswerState({})
+    setAfterActiveQuestionIndex(0)
+    setIsAddingAfterQuestions(false)
+    setIsGeneratingAfterNextPrompt(false)
+    setAfterNextPromptDraft("")
+    setAfterNextPromptReady(false)
+  }
+
+  function mapTaskTypeToPromptIntent(taskType: Attempt["intent"]["task_type"]): PromptIntent {
+    switch (taskType) {
+      case "debug":
+        return "DEBUG"
+      case "build":
+        return "BUILD"
+      case "refactor":
+        return "REFACTOR"
+      case "explain":
+        return "EXPLAIN"
+      case "create_ui":
+        return "DESIGN_UI"
+      default:
+        return "OTHER"
+    }
+  }
+
+  async function fetchAfterNextQuestion(existingQuestions: ClarificationQuestion[], answers: Record<string, string>) {
+    if (!afterVerdict) return null
+    const latestAttempt = await getLatestSubmittedAttempt()
+    if (!latestAttempt) return null
+
+    const result = await generateAfterNextQuestion({
+      attempt: latestAttempt,
+      analysis: afterVerdict,
+      asked_questions: existingQuestions,
+      answers
+    })
+
+    return result.question
+  }
+
   async function saveDraftAttempt(promptText: string, improvedPrompt?: string | null) {
     const optimizedPrompt = (improvedPrompt ?? beforeResult?.rewrite ?? promptText).trim()
     const attempt = await createAttempt({
@@ -210,7 +266,14 @@ export default function PromptOptimizerApp() {
 
     const activeAttempt = await getActiveAttempt()
     if (activeAttempt) {
-      const submitted = await markAttemptSubmitted(activeAttempt.attempt_id)
+      const submitted = await markAttemptSubmitted(activeAttempt.attempt_id, {
+        raw_prompt: inferredPrompt,
+        optimized_prompt: inferredPrompt,
+        intent: buildAttemptIntentFromSubmittedPrompt(
+          inferredPrompt,
+          beforeResult?.intent
+        )
+      })
       if (submitted) return submitted
     }
 
@@ -221,12 +284,10 @@ export default function PromptOptimizerApp() {
       platform: getAttemptPlatform(),
       raw_prompt: inferredPrompt,
       optimized_prompt: inferredPrompt,
-      intent: {
-        task_type: mapPromptIntentToTaskType(beforeResult?.intent),
-        goal: inferredPrompt,
-        constraints: [],
-        acceptance_criteria: []
-      }
+      intent: buildAttemptIntentFromSubmittedPrompt(
+        inferredPrompt,
+        beforeResult?.intent
+      )
     })
     return markAttemptSubmitted(fallbackAttempt.attempt_id)
   }
@@ -363,6 +424,8 @@ export default function PromptOptimizerApp() {
       setDiagnosis(null)
       if (prompt.trim() && afterVerdict) {
         setAfterVerdict(null)
+        setAfterPanelOpen(false)
+        resetAfterNextStepFlow()
       }
       if (!prompt.trim()) {
         setIsAnalyzingPrompt(false)
@@ -466,6 +529,8 @@ export default function PromptOptimizerApp() {
 
       lastHref = window.location.href
       setAfterVerdict(null)
+      setAfterPanelOpen(false)
+      resetAfterNextStepFlow()
       setIsEvaluatingAfterResponse(false)
       setIsDeepAnalyzingAfterResponse(false)
       setHasSubmittedPrompt(false)
@@ -481,9 +546,11 @@ export default function PromptOptimizerApp() {
 
   async function handleOpenAfterPanel() {
     if (afterVerdict) {
+      setAfterPanelOpen(true)
       return
     }
 
+    setAfterPanelOpen(true)
     setAfterVerdict(
       buildAfterPlaceholder("NoRetry is checking the latest AI answer.")
     )
@@ -580,6 +647,164 @@ export default function PromptOptimizerApp() {
     }
   }
 
+  async function handleStartNextStep() {
+    if (!afterVerdict) return
+
+    setAfterNextStepStarted(true)
+    if (afterQuestions.length > 0) return
+
+    setIsAddingAfterQuestions(true)
+    try {
+      const firstQuestion = await fetchAfterNextQuestion([], {})
+      if (firstQuestion) {
+        setAfterQuestions([firstQuestion])
+        setAfterActiveQuestionIndex(0)
+      }
+    } finally {
+      setIsAddingAfterQuestions(false)
+    }
+  }
+
+  async function handleAddAfterQuestions() {
+    if (!afterVerdict || isAddingAfterQuestions) return
+
+    setIsAddingAfterQuestions(true)
+    try {
+      const answers = Object.fromEntries(
+        Object.entries(afterAnswerState)
+          .map(([questionId, value]) => [
+            questionId,
+            value === OTHER_OPTION ? afterOtherAnswerState[questionId]?.trim() ?? "" : value
+          ])
+          .filter(([, value]) => typeof value === "string" && value.trim())
+      ) as Record<string, string>
+
+      const nextQuestion = await fetchAfterNextQuestion(afterQuestions, answers)
+      if (nextQuestion && !afterQuestions.some((question) => question.id === nextQuestion.id)) {
+        setAfterQuestions((current) => [...current, nextQuestion])
+        setAfterActiveQuestionIndex(afterQuestions.length)
+      }
+    } finally {
+      setIsAddingAfterQuestions(false)
+    }
+  }
+
+  function handleAfterAnswerChange(question: ClarificationQuestion, value: string) {
+    setAfterAnswerState((current) => ({ ...current, [question.id]: value }))
+    setAfterNextPromptReady(false)
+
+    if (value === OTHER_OPTION) {
+      return
+    }
+    void advanceAfterDecisionTree(question.id, value)
+  }
+
+  function handleAfterOtherAnswerChange(question: ClarificationQuestion, value: string) {
+    setAfterOtherAnswerState((current) => ({ ...current, [question.id]: value }))
+    setAfterNextPromptReady(false)
+  }
+
+  function handleAdvanceAfterQuestion() {
+    const activeQuestion = afterQuestions[afterActiveQuestionIndex]
+    if (!activeQuestion) return
+    const typedOther = afterOtherAnswerState[activeQuestion.id]?.trim()
+    if (!typedOther) return
+
+    void advanceAfterDecisionTree(activeQuestion.id, typedOther)
+  }
+
+  async function advanceAfterDecisionTree(questionId: string, resolvedValue: string) {
+    const mergedAnswers = {
+      ...afterAnswerState,
+      [questionId]: resolvedValue === OTHER_OPTION ? afterOtherAnswerState[questionId]?.trim() ?? "" : resolvedValue
+    }
+
+    const nextIndex = afterQuestions.findIndex((item, index) => {
+      if (index <= afterActiveQuestionIndex) return false
+      const nextValue = mergedAnswers[item.id]
+      const nextOther = afterOtherAnswerState[item.id]?.trim() ?? ""
+      return !nextValue || (nextValue === OTHER_OPTION && !nextOther)
+    })
+
+    if (nextIndex >= 0) {
+      setAfterActiveQuestionIndex(nextIndex)
+      return
+    }
+
+    const normalizedAnswers = Object.fromEntries(
+      Object.entries(mergedAnswers)
+        .map(([key, value]) => [key, typeof value === "string" ? value.trim() : value])
+        .filter(([, value]) => typeof value === "string" && value)
+    ) as Record<string, string>
+
+    setIsAddingAfterQuestions(true)
+    try {
+      const nextQuestion = await fetchAfterNextQuestion(afterQuestions, normalizedAnswers)
+      if (nextQuestion && !afterQuestions.some((question) => question.id === nextQuestion.id)) {
+        setAfterQuestions((current) => [...current, nextQuestion])
+        setAfterActiveQuestionIndex(afterQuestions.length)
+        return
+      }
+    } finally {
+      setIsAddingAfterQuestions(false)
+    }
+
+    setAfterActiveQuestionIndex((current) => Math.min(current + 1, Math.max(0, afterQuestions.length - 1)))
+  }
+
+  async function handleGenerateAfterNextPrompt() {
+    if (!afterVerdict) return
+
+    const latestAttempt = await getLatestSubmittedAttempt()
+    const submittedPrompt = latestAttempt?.raw_prompt.trim() || promptPreview.trim()
+    if (!submittedPrompt) return
+
+    const answers = Object.fromEntries(
+      Object.entries(afterAnswerState)
+        .map(([questionId, value]) => [
+          questionId,
+          value === OTHER_OPTION ? afterOtherAnswerState[questionId]?.trim() ?? "" : value
+        ])
+        .filter(([, value]) => typeof value === "string" && value.trim())
+    ) as Record<string, string>
+
+    if (!Object.keys(answers).length) return
+
+    setIsGeneratingAfterNextPrompt(true)
+
+    const basePrompt = afterVerdict.next_prompt.trim()
+      ? afterVerdict.next_prompt.trim()
+      : `${submittedPrompt}\n\nFocus the next step on this analysis:\n- Status: ${afterVerdict.status}\n- Findings: ${afterVerdict.findings.join("; ")}\n- Issues: ${afterVerdict.issues.join("; ")}`
+
+    try {
+      const result = await refinePrompt({
+        prompt: basePrompt,
+        surface: getPromptSurface(),
+        intent: mapTaskTypeToPromptIntent(latestAttempt?.intent.task_type ?? "other"),
+        answers,
+        sessionSummary: summarizeSessionMemory(currentSession)
+      })
+      setAfterNextPromptDraft(result.improved_prompt)
+      setAfterNextPromptReady(true)
+    } catch {
+      const localFallback = buildPromptFromAnswers(basePrompt, answers)
+      setAfterNextPromptDraft(localFallback)
+      setAfterNextPromptReady(true)
+    } finally {
+      setIsGeneratingAfterNextPrompt(false)
+    }
+  }
+
+  async function handleSubmitAfterNextPrompt() {
+    const input = promptRef.current
+    if (!input || !afterNextPromptReady || !afterNextPromptDraft.trim()) return
+
+    writePromptValue(input, afterNextPromptDraft.trim())
+    const sourcePrompt = promptPreview || readPromptValue(input)
+    await saveDraftAttempt(sourcePrompt, afterNextPromptDraft.trim())
+    setAfterPanelOpen(false)
+  }
+
   async function handleSubmit() {
     const input = promptRef.current
     if (!input) return
@@ -602,13 +827,10 @@ export default function PromptOptimizerApp() {
     if (activeAttempt) {
       await markAttemptSubmitted(activeAttempt.attempt_id, {
         raw_prompt: prompt,
-        optimized_prompt: beforeResult?.rewrite ?? prompt,
-        intent: buildAttemptIntentFromBefore(
+        optimized_prompt: prompt,
+        intent: buildAttemptIntentFromSubmittedPrompt(
           prompt,
-          beforeResult?.rewrite ?? prompt,
-          beforeResult?.intent,
-          beforeResult?.clarification_questions ?? [],
-          normalizeAnswers(answerState)
+          beforeResult?.intent
         )
       })
     } else {
@@ -616,18 +838,17 @@ export default function PromptOptimizerApp() {
         attempt_id: crypto.randomUUID(),
         platform: getAttemptPlatform(),
         raw_prompt: prompt,
-        optimized_prompt: beforeResult?.rewrite ?? prompt,
-        intent: buildAttemptIntentFromBefore(
+        optimized_prompt: prompt,
+        intent: buildAttemptIntentFromSubmittedPrompt(
           prompt,
-          beforeResult?.rewrite ?? prompt,
-          beforeResult?.intent,
-          beforeResult?.clarification_questions ?? [],
-          normalizeAnswers(answerState)
+          beforeResult?.intent
         )
       })
       await markAttemptSubmitted(fallbackAttempt.attempt_id)
     }
     setAfterVerdict(null)
+    setAfterPanelOpen(false)
+    resetAfterNextStepFlow()
     latestAssistantNodeRef.current = null
     setHasSubmittedPrompt(true)
 
@@ -1151,16 +1372,33 @@ export default function PromptOptimizerApp() {
         onGenerateAiDraft={() => void handleGenerateAiDraft()}
         onAddQuestions={() => void handleAddQuestions()}
       />
-      {afterVerdict ? (
+      {afterVerdict && afterPanelOpen ? (
         <AfterVerdictPanel
           verdict={afterVerdict}
           isEvaluating={isEvaluatingAfterResponse}
           isDeepAnalyzing={isDeepAnalyzingAfterResponse}
           codeAnalysisMode={codeAnalysisMode}
-          onCopyNextPrompt={() => void navigator.clipboard.writeText(afterVerdict.next_prompt)}
+          nextStepStarted={afterNextStepStarted}
+          nextQuestions={afterQuestions}
+          nextAnswerState={afterAnswerState}
+          nextOtherAnswerState={afterOtherAnswerState}
+          activeNextQuestionIndex={afterActiveQuestionIndex}
+          isAddingNextQuestions={isAddingAfterQuestions}
+          isGeneratingNextPrompt={isGeneratingAfterNextPrompt}
+          nextPromptDraft={afterNextPromptDraft}
+          nextPromptReady={afterNextPromptReady}
           onRunDeepAnalysis={() => void handleRunDeepAnalysis()}
           onSelectCodeAnalysisMode={(mode) => void handleSelectCodeAnalysisMode(mode)}
-          onClose={() => setAfterVerdict(null)}
+          onStartNextStep={() => void handleStartNextStep()}
+          onAddNextQuestions={() => void handleAddAfterQuestions()}
+          onNextAnswerChange={(question, value) => handleAfterAnswerChange(question, value)}
+          onNextOtherAnswerChange={(question, value) => handleAfterOtherAnswerChange(question, value)}
+          onNextQuestionIndexChange={setAfterActiveQuestionIndex}
+          onAdvanceNextQuestion={() => handleAdvanceAfterQuestion()}
+          onNextPromptDraftChange={setAfterNextPromptDraft}
+          onGenerateNextPrompt={() => void handleGenerateAfterNextPrompt()}
+          onSubmitNextPrompt={() => void handleSubmitAfterNextPrompt()}
+          onClose={() => setAfterPanelOpen(false)}
         />
       ) : null}
     </>

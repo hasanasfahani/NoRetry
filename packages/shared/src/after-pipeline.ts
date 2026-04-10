@@ -86,6 +86,20 @@ export function buildAttemptIntentFromBefore(
   }
 }
 
+export function buildAttemptIntentFromSubmittedPrompt(
+  submittedPrompt: string,
+  promptIntent: PromptIntent | undefined
+): AttemptIntent {
+  const normalizedPrompt = submittedPrompt.trim()
+
+  return {
+    task_type: mapPromptIntentToTaskType(promptIntent),
+    goal: normalizedPrompt,
+    constraints: [],
+    acceptance_criteria: [`Prove the answer solved this goal: ${conciseGoal(normalizedPrompt)}`]
+  }
+}
+
 export function preprocessResponse(responseText: string): ResponsePreprocessorOutput {
   const normalized = responseText.trim()
   const paragraphs = normalized

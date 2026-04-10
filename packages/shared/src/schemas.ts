@@ -260,6 +260,18 @@ export const AfterPipelineRequestSchema = z.object({
 
 export const AfterPipelineResponseSchema = AfterAnalysisResultSchema
 
+export const AfterNextQuestionRequestSchema = z.object({
+  attempt: AttemptSchema,
+  analysis: AfterAnalysisResultSchema,
+  asked_questions: z.array(ClarificationQuestionSchema).max(8).default([]),
+  answers: z.record(z.string()).default({})
+})
+
+export const AfterNextQuestionResponseSchema = z.object({
+  question: ClarificationQuestionSchema.nullable().default(null),
+  ai_available: z.boolean().default(false)
+})
+
 export const DetectOutcomeRequestSchema = z.object({
   session_id: z.string(),
   prompt_id: z.string(),
@@ -361,3 +373,5 @@ export type AfterStage3Request = z.infer<typeof AfterStage3RequestSchema>
 export type AfterStage4Request = z.infer<typeof AfterStage4RequestSchema>
 export type AfterPipelineRequest = z.infer<typeof AfterPipelineRequestSchema>
 export type AfterPipelineResponse = z.infer<typeof AfterPipelineResponseSchema>
+export type AfterNextQuestionRequest = z.infer<typeof AfterNextQuestionRequestSchema>
+export type AfterNextQuestionResponse = z.infer<typeof AfterNextQuestionResponseSchema>
