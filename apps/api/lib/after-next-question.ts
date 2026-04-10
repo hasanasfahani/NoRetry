@@ -89,21 +89,34 @@ async function callStructuredJson(systemPrompt: string, userPrompt: string, maxT
 }
 
 function buildPrompts(input: AfterNextQuestionRequest) {
-  const askedLabels = input.asked_questions.map((question) => question.label).slice(-8)
-  const answerPairs = Object.entries(input.answers)
-    .map(([questionId, answer]) => {
-      const question = input.asked_questions.find((item) => item.id === questionId)
-      return question ? `${question.label}: ${answer}` : ""
+  const orderedQuestions = [...input.asked_questions].sort(
+    (left, right) =>
+      (input.question_levels[left.id] ?? 99) - (input.question_levels[right.id] ?? 99) ||
+      input.asked_questions.findIndex((question) => question.id === left.id) -
+        input.asked_questions.findIndex((question) => question.id === right.id)
+  )
+  const askedLabels = orderedQuestions.map((question) => question.label).slice(-8)
+  const answerPairs = orderedQuestions
+    .map((question) => {
+      const answer = input.answers[question.id]
+      if (!answer) return ""
+      const level = input.question_levels[question.id] ?? 1
+      return `L${level} | ${question.label}: ${answer}`
     })
     .filter(Boolean)
     .slice(-8)
+  const branchSummary = answerPairs.length
+    ? answerPairs.join("\n")
+    : input.planning_goal
+      ? `L1 planning goal: ${input.planning_goal}`
+      : ""
 
   const targetLevel = input.request_kind === "expand_level" ? input.current_level : input.current_level + (input.asked_questions.length ? 1 : 0)
   const isCodeAnswer =
     input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
 
   const systemPrompt =
-    "You generate decision-tree follow-up questions for planning the user's next prompt after an AI answer review. Return JSON only with keys questions and next_level. questions must be an array of 1 to 2 objects for request_kind next_level, or exactly 1 object for request_kind expand_level. Each object must include id, label, helper, mode, and options. mode must be 'single'. Each question must build on earlier answers and stay in the same branch. Do not repeat asked topics. Keep label under 110 chars and helper under 140 chars. Always include 4 concrete options plus Other."
+    "You generate decision-tree follow-up questions for planning the user's next prompt after an AI answer review. Return JSON only with keys questions and next_level. questions must be an array of 1 to 2 objects for request_kind next_level, or exactly 1 object for request_kind expand_level. Each object must include id, label, helper, mode, and options. mode must be 'single'. Each question must directly build on the full answered path and stay in the same branch. Do not ask speculative failure questions unless the verdict or issues explicitly suggest a failure. Prefer narrowing the user's intended next action, proof standard, scope, or output format. Do not repeat asked topics. Keep label under 110 chars and helper under 140 chars. Always include 4 concrete options plus Other."
 
   const userPrompt = JSON.stringify({
     submitted_prompt: input.attempt.raw_prompt,
@@ -112,13 +125,17 @@ function buildPrompts(input: AfterNextQuestionRequest) {
     verdict_status: input.analysis.status,
     findings: input.analysis.findings.slice(0, 3),
     issues: input.analysis.issues.slice(0, 3),
+    analysis_summary: input.analysis.findings[0] ?? "",
+    addressed_criteria: input.analysis.stage_2.addressed_criteria.slice(0, 5),
+    missing_criteria: input.analysis.stage_2.missing_criteria.slice(0, 5),
     review_depth: input.analysis.inspection_depth,
     code_answer: isCodeAnswer,
     current_level: input.current_level,
     request_kind: input.request_kind,
     target_level: targetLevel,
     asked_questions: askedLabels,
-    answers_so_far: answerPairs
+    answers_so_far: answerPairs,
+    branch_summary: branchSummary
   })
 
   return { systemPrompt, userPrompt, targetLevel }

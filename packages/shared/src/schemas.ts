@@ -264,6 +264,7 @@ export const AfterNextQuestionRequestSchema = z.object({
   attempt: AttemptSchema,
   analysis: AfterAnalysisResultSchema,
   asked_questions: z.array(ClarificationQuestionSchema).max(8).default([]),
+  question_levels: z.record(z.number().int().min(1).max(8)).default({}),
   answers: z.record(z.string()).default({}),
   planning_goal: z.string().max(240).default(""),
   current_level: z.number().int().min(1).max(8).default(1),

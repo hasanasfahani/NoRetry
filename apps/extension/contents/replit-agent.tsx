@@ -286,6 +286,7 @@ export default function PromptOptimizerApp() {
       attempt: afterAttempt,
       analysis: afterVerdict,
       asked_questions: existingQuestions,
+      question_levels: afterQuestionLevels,
       answers,
       planning_goal: afterPlanningGoal,
       current_level: currentLevel,
