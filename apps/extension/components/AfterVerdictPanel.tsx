@@ -155,18 +155,6 @@ function canonicalChecklistKey(value: string) {
     .trim()
 }
 
-function extractCheckedDetails(notes: string[]) {
-  const checkedNote = notes.find((note) => note.toLowerCase().startsWith("checked requested details:"))
-  if (!checkedNote) return []
-
-  const [, rawItems = ""] = checkedNote.split(":", 2)
-  return rawItems
-    .replace(/\.$/, "")
-    .split(",")
-    .map((item) => humanizeChecklistLabel(item))
-    .filter(Boolean)
-}
-
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const tone = toneForStatus(props.verdict.status)
@@ -186,18 +174,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const summarySentence =
     props.verdict.findings.find((item) => item.trim().length > 0) ||
     "NoRetry reviewed the answer against your request."
-  const coveredItems = Array.from(
-    new Set([
-      ...extractCheckedDetails(props.verdict.stage_2.analysis_notes),
-      ...props.verdict.stage_2.addressed_criteria.map((item) => humanizeChecklistLabel(item))
-    ])
-  )
-  const coveredKeys = new Set(coveredItems.map((item) => canonicalChecklistKey(item)))
-  const unresolvedItems = props.verdict.issues
-    .slice(0, 4)
-    .map((item) => humanizeChecklistLabel(item))
-    .filter((item) => !coveredKeys.has(canonicalChecklistKey(item)))
-  const unresolvedPrefix = props.verdict.inspection_depth === "summary_only" ? "(not sure)" : "🚫"
+  const checklistItems = props.verdict.acceptance_checklist.map((item) => ({
+    label: humanizeChecklistLabel(item.label),
+    marker: item.status === "met" ? "✅" : item.status === "missed" ? "🚫" : "(not sure)"
+  }))
   const confidenceTone = toneForConfidence(props.verdict.confidence)
   const reviewTone = toneForReview(props.verdict.inspection_depth)
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
@@ -263,24 +243,15 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
           </div>
         </div>
 
-        {coveredItems.length || unresolvedItems.length ? (
+        {checklistItems.length ? (
           <div style={styles.block}>
             <ul style={styles.list}>
-              {coveredItems.map((item) => (
-                <li key={`covered-${item}`} style={styles.listItem}>
+              {checklistItems.map((item) => (
+                <li key={item.label} style={styles.listItem}>
                   <span style={styles.leadingBullet}>•</span>
                   <span style={styles.listText}>
-                    {item}
-                    <span style={styles.inlineMarker}> ✅</span>
-                  </span>
-                </li>
-              ))}
-              {unresolvedItems.map((item) => (
-                <li key={`unresolved-${item}`} style={styles.listItem}>
-                  <span style={styles.leadingBullet}>•</span>
-                  <span style={styles.listText}>
-                    {item}
-                    <span style={styles.inlineMarker}> {unresolvedPrefix}</span>
+                    {item.label}
+                    <span style={styles.inlineMarker}> {item.marker}</span>
                   </span>
                 </li>
               ))}

@@ -165,6 +165,11 @@ export const VerdictOutputSchema = z.object({
   issues: z.array(z.string()).max(6).default([])
 })
 
+export const AcceptanceChecklistItemSchema = z.object({
+  label: z.string().max(120),
+  status: z.enum(["met", "not_sure", "missed"])
+})
+
 export const NextPromptOutputSchema = z.object({
   next_prompt: z.string(),
   prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "retry_cleanly"])
@@ -183,6 +188,7 @@ export const AfterAnalysisResultSchema = z.object({
   stage_2: Stage2OutputSchema,
   verdict: VerdictOutputSchema,
   next_prompt_output: NextPromptOutputSchema,
+  acceptance_checklist: z.array(AcceptanceChecklistItemSchema).max(6).default([]),
   response_summary: ResponsePreprocessorOutputSchema,
   used_fallback_intent: z.boolean().default(false),
   token_usage_total: z.number().int().min(0).default(0)

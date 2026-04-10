@@ -1,4 +1,5 @@
 import {
+  AcceptanceChecklistItemSchema,
   AfterPipelineResponseSchema,
   IntentExtractionOutputSchema,
   NextPromptOutputSchema,
@@ -121,7 +122,18 @@ function hasGoalEvidence(goal: string, responseSummary: AfterPipelineRequest["re
 }
 
 function responseFocusSnippet(responseSummary: AfterPipelineRequest["response_summary"]) {
-  const snippet = responseSummary.key_paragraphs[0] || responseSummary.first_excerpt || responseSummary.last_excerpt
+  const candidates = [
+    ...responseSummary.key_paragraphs,
+    responseSummary.first_excerpt,
+    responseSummary.last_excerpt
+  ]
+    .map((value) => normalizeWhitespace(value))
+    .filter(Boolean)
+
+  const snippet =
+    candidates.find((value) => !looksLikeCode(value)) ||
+    candidates.find((value) => /[a-z]{3,}\s+[a-z]{3,}/i.test(value)) ||
+    candidates[0]
   return conciseGoal(snippet || "the visible answer")
 }
 
@@ -138,6 +150,63 @@ function summarizeVisibleAnswer(responseSummary: AfterPipelineRequest["response_
 
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim()
+}
+
+function looksLikeCode(value: string) {
+  const compact = value.trim()
+  return (
+    compact.startsWith("```") ||
+    /var\s+\w+\s*=|const\s+\w+\s*=|function\s+\w+\s*\(|=>|<\/?[a-z][^>]*>|[{};]{2,}/i.test(compact)
+  )
+}
+
+function normalizeCriterionLabel(value: string) {
+  return value
+    .replace(/^prove the answer solved this goal:\s*/i, "")
+    .replace(/\(already implemented\)/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function responseIsMostlyCode(responseText: string) {
+  const stripped = normalizeWhitespace(
+    responseText
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+  )
+  return stripped.length < 80
+}
+
+function quickCriterionSatisfied(criterion: string, responseSummary: AfterPipelineRequest["response_summary"]) {
+  const normalizedCriterion = normalizeForMatch(criterion)
+  const haystack = normalizeForMatch(responseSummary.response_text)
+
+  if (/return only/i.test(criterion) && /html|code block|markdown code block/i.test(criterion)) {
+    return responseSummary.has_code_blocks
+  }
+
+  if (/no explanations/i.test(criterion)) {
+    return responseSummary.has_code_blocks && responseIsMostlyCode(responseSummary.response_text)
+  }
+
+  const tokens = extractMeaningfulTokens(normalizedCriterion).filter(
+    (token) =>
+      !["return", "only", "complete", "updated", "html", "block", "markdown", "already", "implemented"].includes(token)
+  )
+
+  if (!tokens.length) return false
+
+  const matched = tokens.filter((token) => haystack.includes(token))
+  return matched.length >= Math.min(2, tokens.length) || matched.length / tokens.length >= 0.66
+}
+
+function issueMentionsCriterion(criterion: string, issues: string[]) {
+  const criterionTokens = extractMeaningfulTokens(criterion).slice(0, 6)
+  if (!criterionTokens.length) return false
+  const issueHaystack = normalizeForMatch(issues.join(" "))
+  const matched = criterionTokens.filter((token) => issueHaystack.includes(token))
+  return matched.length >= Math.min(2, criterionTokens.length)
 }
 
 function extractCodeBlocks(rawResponse: string) {
@@ -615,10 +684,15 @@ function fallbackStage2(
       stage1.response_mode === "explained" ||
       responseSummary.success_signals.length > 0 ||
       responseSummary.response_length > 220)
+  const quickAddressedCriteria = intent.acceptance_criteria.filter((criterion) =>
+    quickCriterionSatisfied(criterion, responseSummary)
+  )
 
   const addressed =
     (stage1.response_mode === "implemented" || detail.evidence_strength === "strong") && goalMatched
-      ? intent.acceptance_criteria.slice(0, 2)
+      ? dedupe([...quickAddressedCriteria, ...intent.acceptance_criteria], 4)
+      : quickAddressedCriteria.length
+        ? quickAddressedCriteria.slice(0, 4)
       : !codeHeavyTask && nonCodeChecks.addressed.length && goalMatched && detail.inspection_depth !== "summary_only"
         ? intent.acceptance_criteria.slice(0, Math.min(2, Math.max(1, nonCodeChecks.addressed.length)))
       : !codeHeavyTask && usesDefaultGoalCriterion && goalMatched && detail.inspection_depth !== "summary_only"
@@ -704,6 +778,28 @@ function fallbackDetailInspection(
     evidence_strength: evidenceStrength,
     inspection_depth: hasCode ? "targeted_code" : selectedEvidence.length ? "targeted_text" : "summary_only"
   })
+}
+
+function buildAcceptanceChecklist(
+  intent: AttemptIntent,
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  detail: ReturnType<typeof DetailInspectionSchema.parse>,
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  const addressedKeys = new Set(stage2.addressed_criteria.map((item) => normalizeForMatch(item)))
+  const issuePool = [...stage2.missing_criteria, ...stage2.constraint_risks, ...detail.unresolved_risks]
+
+  return intent.acceptance_criteria.slice(0, 6).map((criterion) =>
+    AcceptanceChecklistItemSchema.parse({
+      label: limitText(normalizeCriterionLabel(criterion), 72),
+      status:
+        addressedKeys.has(normalizeForMatch(criterion)) || quickCriterionSatisfied(criterion, responseSummary)
+          ? "met"
+          : detail.inspection_depth !== "summary_only" && issueMentionsCriterion(criterion, issuePool)
+            ? "missed"
+            : "not_sure"
+    })
+  )
 }
 
 function fallbackVerdict(
@@ -805,7 +901,9 @@ function fallbackVerdict(
       ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${intent.goal.trim()}.`
       : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
         ? `The answer appears aligned with the goal: ${intent.goal.trim()}.`
-        : stage1.assistant_action_summary
+        : stage2.problem_fit === "correct"
+          ? "The answer appears aligned with the goal, but some requested details still need confirmation."
+          : stage1.assistant_action_summary
 
   return VerdictOutputSchema.parse({
     status,
@@ -1017,6 +1115,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     stage_2: safeStage2,
     verdict: safeVerdict,
     next_prompt_output: safeNextPrompt,
+    acceptance_checklist: buildAcceptanceChecklist(intent, safeStage2, detailInspection, parsed.response_summary),
     response_summary: parsed.response_summary,
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal
