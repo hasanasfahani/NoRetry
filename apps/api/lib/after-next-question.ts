@@ -16,7 +16,13 @@ function mergeUniqueQuestions(existing: ClarificationQuestion[], incoming: Clari
 }
 
 function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
-  const level = input.request_kind === "expand_level" ? input.current_level : input.current_level + (input.asked_questions.length ? 1 : 0)
+  const hasPlanningRoot = Boolean(input.planning_goal.trim()) && input.asked_questions.length === 0
+  const level =
+    input.request_kind === "expand_level"
+      ? input.current_level
+      : hasPlanningRoot
+        ? Math.max(2, input.current_level + 1)
+        : input.current_level + (input.asked_questions.length ? 1 : 0)
   const issue = input.analysis.issues[0] || input.analysis.findings[0] || "the main gap"
   const codeAnswer =
     input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
@@ -111,12 +117,18 @@ function buildPrompts(input: AfterNextQuestionRequest) {
       ? `L1 planning goal: ${input.planning_goal}`
       : ""
 
-  const targetLevel = input.request_kind === "expand_level" ? input.current_level : input.current_level + (input.asked_questions.length ? 1 : 0)
+  const hasPlanningRoot = Boolean(input.planning_goal.trim()) && input.asked_questions.length === 0
+  const targetLevel =
+    input.request_kind === "expand_level"
+      ? input.current_level
+      : hasPlanningRoot
+        ? Math.max(2, input.current_level + 1)
+        : input.current_level + (input.asked_questions.length ? 1 : 0)
   const isCodeAnswer =
     input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
 
   const systemPrompt =
-    "You generate decision-tree follow-up questions for planning the user's next prompt after an AI answer review. Return JSON only with keys questions and next_level. questions must be an array of 1 to 2 objects for request_kind next_level, or exactly 1 object for request_kind expand_level. Each object must include id, label, helper, mode, and options. mode must be 'single'. Each question must directly build on the full answered path and stay in the same branch. Do not ask speculative failure questions unless the verdict or issues explicitly suggest a failure. Prefer narrowing the user's intended next action, proof standard, scope, or output format. Do not repeat asked topics. Keep label under 110 chars and helper under 140 chars. Always include 4 concrete options plus Other."
+    "You generate decision-tree follow-up questions for planning the user's next prompt after an AI answer review. Return JSON only with keys questions and next_level. questions must be an array of 1 to 2 objects for request_kind next_level, or exactly 1 object for request_kind expand_level. Each object must include id, label, helper, mode, and options. mode must be 'single'. Each question must directly build on the full answered path and stay in the same branch. Treat planning_goal as an already-decided root choice. If planning_goal exists, never ask another direction-setting question that repeats or paraphrases it. Instead ask the next operational question needed to carry out that chosen direction. Do not ask speculative failure questions unless the verdict or issues explicitly suggest a failure. Prefer narrowing implementation focus, proof standard, scope, output format, or validation strategy. Do not repeat asked topics. Keep label under 110 chars and helper under 140 chars. Always include 4 concrete options plus Other."
 
   const userPrompt = JSON.stringify({
     submitted_prompt: input.attempt.raw_prompt,

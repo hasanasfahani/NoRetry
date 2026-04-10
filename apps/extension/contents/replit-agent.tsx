@@ -895,9 +895,39 @@ export default function PromptOptimizerApp() {
 
     setIsGeneratingAfterNextPrompt(true)
 
-    const basePrompt = afterVerdict.next_prompt.trim()
-      ? afterVerdict.next_prompt.trim()
-      : `${submittedPrompt}\n\nFocus the next step on this analysis:\n- Status: ${afterVerdict.status}\n- Findings: ${afterVerdict.findings.join("; ")}\n- Issues: ${afterVerdict.issues.join("; ")}`
+    const orderedAnsweredPath = afterQuestionHistory
+      .map((question) => {
+        const rawValue = afterAnswerState[question.id]
+        const resolvedValue =
+          rawValue === OTHER_OPTION ? afterOtherAnswerState[question.id]?.trim() ?? "" : rawValue?.trim() ?? ""
+        if (!resolvedValue) return ""
+        return `- ${question.label}: ${resolvedValue}`
+      })
+      .filter(Boolean)
+
+    const planningGoalLine = afterPlanningGoal.trim()
+      ? `Desired next step: ${afterPlanningGoal.trim()}`
+      : ""
+
+    const analysisLines = [
+      `Analysis status: ${afterVerdict.status}`,
+      afterVerdict.findings.length ? `Key findings: ${afterVerdict.findings.join("; ")}` : "",
+      afterVerdict.issues.length ? `Remaining concerns: ${afterVerdict.issues.join("; ")}` : ""
+    ].filter(Boolean)
+
+    const basePrompt = [
+      "Write a fresh next prompt for the AI assistant.",
+      planningGoalLine,
+      orderedAnsweredPath.length ? `Decisions already made:\n${orderedAnsweredPath.join("\n")}` : "",
+      `Original prompt for context only: ${submittedPrompt}`,
+      analysisLines.length ? analysisLines.join("\n") : "",
+      "Use the user's decisions as the main source of truth.",
+      "Do not mostly repeat the original prompt.",
+      "Only keep details from the original prompt that are still necessary for the chosen next step.",
+      "Return a focused follow-up prompt the user can send next."
+    ]
+      .filter(Boolean)
+      .join("\n\n")
 
     try {
       const result = await refinePrompt({
