@@ -735,6 +735,13 @@ function fallbackVerdict(
   else if (stage2.missing_criteria.length || responseSummary.uncertainty_signals.length) status = "PARTIAL"
 
   const hasConcreteEvidence = responseSummary.mentioned_files.length > 0 || responseSummary.has_code_blocks
+  const deepReviewed = detail.inspection_depth !== "summary_only"
+  const strongAlignedOutcome =
+    deepReviewed &&
+    stage2.problem_fit === "correct" &&
+    !stage2.missing_criteria.length &&
+    !stage2.constraint_risks.length &&
+    (status === "SUCCESS" || status === "LIKELY_SUCCESS")
   const confidence =
     status === "FAILED"
       ? detail.inspection_depth === "summary_only"
@@ -746,6 +753,8 @@ function fallbackVerdict(
         ? detail.inspection_depth === "summary_only"
           ? "medium"
           : "high"
+      : strongAlignedOutcome
+        ? "high"
       : usedFallbackIntent
         ? "low"
         : detail.inspection_depth === "summary_only"

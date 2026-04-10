@@ -367,9 +367,16 @@ export default function PromptOptimizerApp() {
     }
   }
 
+  function normalizeAssistantTextForReuse(value: string) {
+    return value.replace(/\s+/g, " ").trim()
+  }
+
   async function runAfterEvaluation(force = false, deepAnalysis = false) {
     const { latestMessage, text } = getCurrentAssistantResponseText()
-    if (!text || (!force && text === lastEvaluatedAssistantTextRef.current)) {
+    const normalizedText = normalizeAssistantTextForReuse(text)
+    const normalizedLastText = normalizeAssistantTextForReuse(lastEvaluatedAssistantTextRef.current)
+
+    if (!text || (!force && normalizedText === normalizedLastText)) {
       return false
     }
 
@@ -387,7 +394,7 @@ export default function PromptOptimizerApp() {
         response_text_fallback: text,
         deep_analysis: deepAnalysis
       })
-      if (text !== lastEvaluatedAssistantTextRef.current) {
+      if (normalizedText !== normalizedLastText) {
         resetAfterNextStepFlow()
       }
       setAfterAttempt(attempt)
@@ -625,8 +632,10 @@ export default function PromptOptimizerApp() {
 
   async function handleOpenAfterPanel() {
     const { text } = getCurrentAssistantResponseText()
+    const normalizedText = normalizeAssistantTextForReuse(text)
+    const normalizedLastText = normalizeAssistantTextForReuse(lastEvaluatedAssistantTextRef.current)
 
-    if (afterVerdict && text && text === lastEvaluatedAssistantTextRef.current) {
+    if (afterVerdict && (!text || normalizedText === normalizedLastText)) {
       setAfterPanelOpen(true)
       return
     }
@@ -635,7 +644,7 @@ export default function PromptOptimizerApp() {
     resetAfterNextStepFlow()
     setAfterAttempt(null)
     setAfterVerdict(
-      buildAfterPlaceholder("NoRetry is checking the latest AI answer.")
+      buildAfterPlaceholder("Checking the latest change.")
     )
     setIsEvaluatingAfterResponse(true)
 
@@ -754,36 +763,6 @@ export default function PromptOptimizerApp() {
     }
   }
 
-  async function handleAddAfterQuestions() {
-    if (!afterVerdict || isAddingAfterQuestions) return
-
-    setIsAddingAfterQuestions(true)
-    try {
-      const answers = Object.fromEntries(
-        Object.entries(afterAnswerState)
-          .map(([questionId, value]) => [
-            questionId,
-            value === OTHER_OPTION ? afterOtherAnswerState[questionId]?.trim() ?? "" : value
-          ])
-          .filter(([, value]) => typeof value === "string" && value.trim())
-      ) as Record<string, string>
-
-      const askedQuestions = mergeUniqueQuestions(afterQuestionHistory, afterQuestions)
-      const result = await fetchAfterNextQuestions(askedQuestions, answers, afterQuestionLevel, "expand_level")
-      if (result?.questions.length) {
-        setAfterQuestions((current) => mergeUniqueQuestions(current, result.questions))
-        setAfterQuestionHistory((current) => mergeUniqueQuestions(current, result.questions))
-        setAfterQuestionLevels((current) => ({
-          ...current,
-          ...buildLevelMap(result.questions, afterQuestionLevel)
-        }))
-        setAfterActiveQuestionIndex(afterQuestionHistory.length)
-      }
-    } finally {
-      setIsAddingAfterQuestions(false)
-    }
-  }
-
   function handleAfterAnswerChange(question: ClarificationQuestion, value: string) {
     const previousValue = afterAnswerState[question.id] ?? ""
     const previousResolvedValue =
@@ -794,8 +773,24 @@ export default function PromptOptimizerApp() {
     setAfterAnswerState((current) => ({ ...current, [question.id]: value }))
     setAfterNextPromptReady(false)
 
-    if (questionIndex >= 0 && questionIndex < afterQuestionHistory.length - 1 && previousResolvedValue !== nextResolvedValue) {
+    if (
+      questionIndex >= 0 &&
+      questionIndex < afterQuestionHistory.length - 1 &&
+      previousResolvedValue.trim() &&
+      previousResolvedValue !== nextResolvedValue
+    ) {
+      const keptHistory = afterQuestionHistory.slice(0, questionIndex + 1)
+      const activeLevel = afterQuestionLevels[question.id] ?? 1
+      const keptLevelQuestions = keptHistory.filter((item) => (afterQuestionLevels[item.id] ?? 1) === activeLevel)
       pruneAfterBranchFromIndex(questionIndex)
+      if (value !== OTHER_OPTION) {
+        void advanceAfterDecisionTree(question.id, value, {
+          history: keptHistory,
+          currentLevelQuestions: keptLevelQuestions,
+          currentLevel: activeLevel
+        })
+        return
+      }
     }
 
     if (value === OTHER_OPTION) {
@@ -810,7 +805,7 @@ export default function PromptOptimizerApp() {
   }
 
   function handleAdvanceAfterQuestion() {
-    const activeQuestion = afterQuestions[afterActiveQuestionIndex]
+    const activeQuestion = afterQuestionHistory[afterActiveQuestionIndex] ?? afterQuestions[afterActiveQuestionIndex]
     if (!activeQuestion) return
     const typedOther = afterOtherAnswerState[activeQuestion.id]?.trim()
     if (!typedOther) return
@@ -820,20 +815,45 @@ export default function PromptOptimizerApp() {
     const previousResolvedValue =
       previousValue === OTHER_OPTION ? afterOtherAnswerState[activeQuestion.id]?.trim() ?? "" : previousValue ?? ""
 
-    if (questionIndex >= 0 && questionIndex < afterQuestionHistory.length - 1 && previousResolvedValue !== typedOther) {
+    if (
+      questionIndex >= 0 &&
+      questionIndex < afterQuestionHistory.length - 1 &&
+      previousResolvedValue.trim() &&
+      previousResolvedValue !== typedOther
+    ) {
+      const keptHistory = afterQuestionHistory.slice(0, questionIndex + 1)
+      const activeLevel = afterQuestionLevels[activeQuestion.id] ?? 1
+      const keptLevelQuestions = keptHistory.filter((item) => (afterQuestionLevels[item.id] ?? 1) === activeLevel)
       pruneAfterBranchFromIndex(questionIndex)
+      void advanceAfterDecisionTree(activeQuestion.id, typedOther, {
+        history: keptHistory,
+        currentLevelQuestions: keptLevelQuestions,
+        currentLevel: activeLevel
+      })
+      return
     }
 
     void advanceAfterDecisionTree(activeQuestion.id, typedOther)
   }
 
-  async function advanceAfterDecisionTree(questionId: string, resolvedValue: string) {
+  async function advanceAfterDecisionTree(
+    questionId: string,
+    resolvedValue: string,
+    branchContext?: {
+      history: ClarificationQuestion[]
+      currentLevelQuestions: ClarificationQuestion[]
+      currentLevel: number
+    }
+  ) {
     const mergedAnswers = {
       ...afterAnswerState,
       [questionId]: resolvedValue === OTHER_OPTION ? afterOtherAnswerState[questionId]?.trim() ?? "" : resolvedValue
     }
+    const visibleLevelQuestions = branchContext?.currentLevelQuestions ?? afterQuestions
+    const visibleHistory = branchContext?.history ?? afterQuestionHistory
+    const visibleLevel = branchContext?.currentLevel ?? afterQuestionLevel
 
-    const nextIndex = afterQuestions.findIndex((item) => {
+    const nextIndex = visibleLevelQuestions.findIndex((item) => {
       const nextValue = mergedAnswers[item.id]
       const nextOther = afterOtherAnswerState[item.id]?.trim() ?? ""
       return !nextValue || (nextValue === OTHER_OPTION && !nextOther)
@@ -852,8 +872,8 @@ export default function PromptOptimizerApp() {
 
     setIsAddingAfterQuestions(true)
     try {
-      const askedQuestions = mergeUniqueQuestions(afterQuestionHistory, afterQuestions)
-      const result = await fetchAfterNextQuestions(askedQuestions, normalizedAnswers, afterQuestionLevel, "next_level")
+      const askedQuestions = mergeUniqueQuestions(visibleHistory, visibleLevelQuestions)
+      const result = await fetchAfterNextQuestions(askedQuestions, normalizedAnswers, visibleLevel, "next_level")
       if (result?.questions.length) {
         setAfterQuestionHistory((current) => mergeUniqueQuestions(current, result.questions))
         setAfterQuestions(result.questions)
@@ -869,7 +889,7 @@ export default function PromptOptimizerApp() {
       setIsAddingAfterQuestions(false)
     }
 
-    setAfterActiveQuestionIndex((current) => Math.min(current, Math.max(0, afterQuestions.length - 1)))
+    setAfterActiveQuestionIndex((current) => Math.min(current, Math.max(0, visibleLevelQuestions.length - 1)))
   }
 
   async function handleGenerateAfterNextPrompt() {
@@ -1547,7 +1567,6 @@ export default function PromptOptimizerApp() {
           onStartNextStep={() => void handleStartNextStep()}
           onPlanningGoalChange={setAfterPlanningGoal}
           onBeginDecisionTree={() => void handleBeginAfterDecisionTree()}
-          onAddNextQuestions={() => void handleAddAfterQuestions()}
           onNextAnswerChange={(question, value) => handleAfterAnswerChange(question, value)}
           onNextOtherAnswerChange={(question, value) => handleAfterOtherAnswerChange(question, value)}
           onNextQuestionIndexChange={setAfterActiveQuestionIndex}

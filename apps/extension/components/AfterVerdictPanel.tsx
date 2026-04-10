@@ -23,7 +23,6 @@ type AfterVerdictPanelProps = {
   onStartNextStep: () => void
   onPlanningGoalChange: (value: string) => void
   onBeginDecisionTree: () => void
-  onAddNextQuestions: () => void
   onNextAnswerChange: (question: ClarificationQuestion, value: string) => void
   onNextOtherAnswerChange: (question: ClarificationQuestion, value: string) => void
   onNextQuestionIndexChange: (index: number) => void
@@ -46,6 +45,28 @@ function toneForStatus(status: AfterAnalysisResult["status"]) {
       return { badgeBg: "#fef3c7", badgeFg: "#b45309", border: "rgba(180,83,9,0.16)" }
     default:
       return { badgeBg: "#e2e8f0", badgeFg: "#475569", border: "rgba(71,85,105,0.16)" }
+  }
+}
+
+function toneForConfidence(confidence: AfterAnalysisResult["confidence"]) {
+  switch (confidence) {
+    case "high":
+      return { bg: "#dcfce7", fg: "#166534", border: "rgba(22,101,52,0.16)" }
+    case "medium":
+      return { bg: "#fef3c7", fg: "#b45309", border: "rgba(180,83,9,0.16)" }
+    default:
+      return { bg: "#e2e8f0", fg: "#475569", border: "rgba(71,85,105,0.16)" }
+  }
+}
+
+function toneForReview(depth: AfterAnalysisResult["inspection_depth"]) {
+  switch (depth) {
+    case "targeted_code":
+      return { bg: "#dbeafe", fg: "#1d4ed8", border: "rgba(29,78,216,0.16)", label: "deep" }
+    case "targeted_text":
+      return { bg: "#ede9fe", fg: "#6d28d9", border: "rgba(109,40,217,0.16)", label: "deep" }
+    default:
+      return { bg: "#f1f5f9", fg: "#475569", border: "rgba(71,85,105,0.14)", label: "quick" }
   }
 }
 
@@ -82,6 +103,16 @@ function LightningPulseIcon() {
         strokeLinejoin="round"
       />
     </svg>
+  )
+}
+
+function QuestionTrailLoader() {
+  return (
+    <div style={styles.questionTrailLoader} aria-hidden="true">
+      <span style={styles.questionTrailDot(0)} />
+      <span style={styles.questionTrailDot(0.15)} />
+      <span style={styles.questionTrailDot(0.3)} />
+    </div>
   )
 }
 
@@ -141,8 +172,14 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const tone = toneForStatus(props.verdict.status)
   const isCodeAnswer =
     props.verdict.response_summary.has_code_blocks || props.verdict.response_summary.mentioned_files.length > 0
+  const isInitialChecking =
+    props.isEvaluating &&
+    !props.isDeepAnalyzing &&
+    props.verdict.findings.length === 1 &&
+    props.verdict.findings[0] === "Checking the latest change."
   const showDeepAnalyze =
-    !props.isEvaluating &&
+    !isInitialChecking &&
+    !props.nextStepStarted &&
     !isCodeAnswer &&
     props.verdict.confidence !== "high" &&
     props.verdict.inspection_depth === "summary_only"
@@ -161,6 +198,8 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     .map((item) => humanizeChecklistLabel(item))
     .filter((item) => !coveredKeys.has(canonicalChecklistKey(item)))
   const unresolvedPrefix = props.verdict.inspection_depth === "summary_only" ? "(not sure)" : "🚫"
+  const confidenceTone = toneForConfidence(props.verdict.confidence)
+  const reviewTone = toneForReview(props.verdict.inspection_depth)
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
   const activeNextQuestion = visibleQuestions[props.activeNextQuestionIndex] ?? null
   const answeredNextCount = visibleQuestions.filter((question) => {
@@ -171,7 +210,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const canGenerateNextPrompt = answeredNextCount > 0 && !props.isGeneratingNextPrompt
   const activeNextQuestionUsesOther =
     activeNextQuestion != null && props.nextAnswerState[activeNextQuestion.id] === otherOption
-  const showStartNextStep = !props.nextStepStarted
+  const showStartNextStep = !isInitialChecking && !props.nextStepStarted
   const showPlanningGoalEntry = props.nextStepStarted && visibleQuestions.length === 0
 
   return (
@@ -187,6 +226,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             0%, 20% { opacity: 0.2; }
             50% { opacity: 1; }
             100% { opacity: 0.2; }
+          }
+          @keyframes afterQuestionTrailPulse {
+            0%, 100% { transform: scale(0.72); opacity: 0.24; }
+            50% { transform: scale(1); opacity: 1; }
           }
         `}
       </style>
@@ -249,8 +292,12 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
           <div style={styles.confidenceBlock}>
             <p style={styles.blockTitle}>Analysis Status</p>
             <p style={styles.statusMeta}>
-              <span>Confidence: {props.verdict.confidence}</span>
-              <span>Review: {props.verdict.inspection_depth === "summary_only" ? "quick" : "deep"}</span>
+              <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
+                Confidence: {props.verdict.confidence}
+              </span>
+              <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
+                Review: {reviewTone.label}
+              </span>
             </p>
           </div>
           <div style={styles.actions}>
@@ -279,7 +326,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 type="button"
                 style={styles.deepButton}
                 onClick={props.onRunDeepAnalysis}
-                disabled={props.isDeepAnalyzing}
+                disabled={props.isDeepAnalyzing || props.isEvaluating}
               >
                 {props.isDeepAnalyzing ? (
                   <span style={styles.loadingLabel}>
@@ -300,9 +347,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 type="button"
                 style={styles.copyButton}
                 onClick={props.onStartNextStep}
-                disabled={props.isEvaluating}
+                disabled={props.isEvaluating || props.isDeepAnalyzing}
               >
-                {props.isEvaluating ? "Analyzing..." : "Start Next Step"}
+                Start Next Step
               </button>
             ) : null}
           </div>
@@ -317,16 +364,6 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   {visibleQuestions.length ? `${answeredNextCount} of ${visibleQuestions.length} answered` : "Start by describing the next step you want"}
                 </p>
               </div>
-              {visibleQuestions.length ? (
-                <button
-                  type="button"
-                  style={styles.secondaryButton}
-                  onClick={props.onAddNextQuestions}
-                  disabled={props.isAddingNextQuestions}
-                >
-                  {props.isAddingNextQuestions ? "Adding..." : "Add more questions"}
-                </button>
-              ) : null}
             </div>
 
             {showPlanningGoalEntry ? (
@@ -347,7 +384,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                     onClick={props.onBeginDecisionTree}
                     disabled={!props.planningGoal.trim() || props.isAddingNextQuestions}
                   >
-                    {props.isAddingNextQuestions ? "Thinking..." : "Next Question"}
+                    {props.isAddingNextQuestions ? "Thinking..." : "Submit"}
                   </button>
                 </div>
               </div>
@@ -366,6 +403,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                       {index + 1}
                     </button>
                   ))}
+                  {props.isAddingNextQuestions ? <QuestionTrailLoader /> : null}
                 </div>
 
                 {activeNextQuestion ? (
@@ -404,7 +442,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                           onClick={props.onAdvanceNextQuestion}
                           disabled={!(props.nextOtherAnswerState[activeNextQuestion.id] ?? "").trim()}
                         >
-                          Next Question
+                          Submit
                         </button>
                       </div>
                     ) : null}
@@ -616,6 +654,16 @@ const styles = {
     lineHeight: 1.45,
     color: "#475569"
   } as CSSProperties,
+  metaChip: (bg: string, fg: string, border: string): CSSProperties => ({
+    display: "inline-flex",
+    alignItems: "center",
+    borderRadius: 999,
+    background: bg,
+    color: fg,
+    border: `1px solid ${border}`,
+    padding: "4px 10px",
+    fontWeight: 700
+  }),
   actions: {
     display: "flex",
     alignItems: "center",
@@ -654,8 +702,25 @@ const styles = {
   questionTabs: {
     display: "flex",
     gap: 8,
-    flexWrap: "wrap"
+    flexWrap: "wrap",
+    alignItems: "center"
   } as CSSProperties,
+  questionTrailLoader: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    minHeight: 32,
+    marginLeft: 4
+  } as CSSProperties,
+  questionTrailDot: (delay: number): CSSProperties => ({
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    background: "linear-gradient(135deg, #818cf8 0%, #4f46e5 100%)",
+    animation: "afterQuestionTrailPulse 0.9s ease-in-out infinite",
+    animationDelay: `${delay}s`,
+    boxShadow: "0 0 0 4px rgba(99,102,241,0.08)"
+  }),
   questionTab: (active: boolean, answered: boolean): CSSProperties => ({
     border: active ? "1px solid rgba(99,102,241,0.25)" : "1px solid rgba(148,163,184,0.18)",
     background: active ? "rgba(99,102,241,0.12)" : answered ? "rgba(220,252,231,0.7)" : "#ffffff",
