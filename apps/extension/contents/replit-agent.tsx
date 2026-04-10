@@ -105,6 +105,8 @@ export default function PromptOptimizerApp() {
   const [codeAnalysisMode, setCodeAnalysisModeState] = useState<"quick" | "deep">("quick")
   const [afterNextStepStarted, setAfterNextStepStarted] = useState(false)
   const [afterPlanningGoal, setAfterPlanningGoal] = useState("")
+  const [activeSuggestedDirectionChipId, setActiveSuggestedDirectionChipId] = useState<string | null>(null)
+  const [usedSuggestedDirectionChipIds, setUsedSuggestedDirectionChipIds] = useState<string[]>([])
   const [afterQuestionHistory, setAfterQuestionHistory] = useState<ClarificationQuestion[]>([])
   const [afterQuestionLevels, setAfterQuestionLevels] = useState<Record<string, number>>({})
   const [afterQuestions, setAfterQuestions] = useState<ClarificationQuestion[]>([])
@@ -171,6 +173,7 @@ export default function PromptOptimizerApp() {
         next_prompt: nextPrompt,
         prompt_strategy: "retry_cleanly"
       },
+      acceptance_checklist: [],
       response_summary: {
         response_text: "",
         response_length: 0,
@@ -196,6 +199,8 @@ export default function PromptOptimizerApp() {
   function resetAfterNextStepFlow() {
     setAfterNextStepStarted(false)
     setAfterPlanningGoal("")
+    setActiveSuggestedDirectionChipId(null)
+    setUsedSuggestedDirectionChipIds([])
     setAfterQuestionHistory([])
     setAfterQuestionLevels({})
     setAfterQuestions([])
@@ -760,6 +765,110 @@ export default function PromptOptimizerApp() {
       }
     } finally {
       setIsAddingAfterQuestions(false)
+    }
+  }
+
+  async function handleSubmitPlanningGoalPrompt() {
+    const input = promptRef.current
+    if (!input || !afterPlanningGoal.trim()) return
+
+    writePromptValue(input, afterPlanningGoal.trim())
+    const sourcePrompt = promptPreview || readPromptValue(input)
+    await saveDraftAttempt(sourcePrompt, afterPlanningGoal.trim())
+    setAfterPanelOpen(false)
+  }
+
+  function appendPlanningDirection(current: string, nextDirection: string) {
+    const trimmedCurrent = current.trim()
+    const trimmedNext = nextDirection.trim()
+    if (!trimmedNext) return trimmedCurrent
+    if (!trimmedCurrent) return `1. ${trimmedNext.replace(/^\d+\.\s*/, "")}`
+
+    const lines = trimmedCurrent
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+
+    const normalizedNext = trimmedNext.replace(/^\d+\.\s*/, "")
+    const existingNormalized = lines.map((line) => line.replace(/^\d+\.\s*/, ""))
+    if (existingNormalized.includes(normalizedNext)) {
+      return trimmedCurrent
+    }
+
+    const renumbered = [...existingNormalized, normalizedNext].map((line, index) => `${index + 1}. ${line}`)
+    return renumbered.join("\n")
+  }
+
+  const suggestedDirectionChips = useMemo(() => {
+    if (!afterVerdict || !afterVerdict.acceptance_checklist?.length) return []
+
+    return afterVerdict.acceptance_checklist
+      .filter((item) => item.status !== "met")
+      .filter((item) => !usedSuggestedDirectionChipIds.includes(item.label))
+      .slice(0, 4)
+      .map((item) => ({
+        id: item.label,
+        label: `${
+          item.status === "missed" ? "Fix" : "Double-check"
+        } ${item.label.charAt(0).toLowerCase()}${item.label.slice(1)}`,
+        actionStyle: item.status === "missed" ? "fix" : "double-check"
+      }))
+  }, [afterVerdict, usedSuggestedDirectionChipIds])
+
+  async function handleSuggestedDirectionClick(chipId: string) {
+    if (!afterVerdict || !afterAttempt) return
+    const chip = suggestedDirectionChips.find((item) => item.id === chipId)
+    if (!chip) return
+
+    setActiveSuggestedDirectionChipId(chipId)
+    const currentDirection = afterPlanningGoal.trim()
+    const actionVerb =
+      chip.actionStyle === "fix" ? "fix" : "double-check and, if needed, fix"
+    const rewritePrompt = [
+      "Turn this unmet acceptance criterion into one concise next-step direction for the user.",
+      `Original submitted prompt: ${afterAttempt.raw_prompt.trim()}`,
+      `Acceptance criterion: ${chip.id}`,
+      `Confidence: ${afterVerdict.confidence}`,
+      `Action style: ${actionVerb}`,
+      currentDirection ? `Current direction draft: ${currentDirection}` : "",
+      "Write one short imperative direction the user can take next.",
+      "Do not repeat the whole original prompt.",
+      "Return only the rewritten direction."
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+
+    try {
+      const result = await refinePrompt({
+        prompt: rewritePrompt,
+        surface: getPromptSurface(),
+        intent: mapTaskTypeToPromptIntent(afterAttempt.intent.task_type),
+        answers: {
+          acceptance_criterion: chip.id,
+          action_style: actionVerb,
+          current_direction: currentDirection
+        },
+        sessionSummary: summarizeSessionMemory(currentSession)
+      })
+
+      const nextDirection = result.improved_prompt.trim()
+      if (nextDirection) {
+        setAfterPlanningGoal((current) => {
+          return appendPlanningDirection(current, nextDirection)
+        })
+        setUsedSuggestedDirectionChipIds((current) => [...new Set([...current, chip.id])])
+      }
+    } catch {
+      const fallbackDirection =
+        chip.actionStyle === "fix"
+          ? `Fix this missing requirement: ${chip.id}`
+          : `Double-check and fix if needed: ${chip.id}`
+      setAfterPlanningGoal((current) => {
+        return appendPlanningDirection(current, fallbackDirection)
+      })
+      setUsedSuggestedDirectionChipIds((current) => [...new Set([...current, chip.id])])
+    } finally {
+      setActiveSuggestedDirectionChipId(null)
     }
   }
 
@@ -1553,6 +1662,9 @@ export default function PromptOptimizerApp() {
           codeAnalysisMode={codeAnalysisMode}
           nextStepStarted={afterNextStepStarted}
           planningGoal={afterPlanningGoal}
+          suggestedDirectionChips={suggestedDirectionChips}
+          activeSuggestionChipId={activeSuggestedDirectionChipId}
+          hasUsedSuggestedDirection={usedSuggestedDirectionChipIds.length > 0}
           nextQuestionHistory={afterQuestionHistory}
           nextQuestions={afterQuestions}
           nextAnswerState={afterAnswerState}
@@ -1566,7 +1678,9 @@ export default function PromptOptimizerApp() {
           onSelectCodeAnalysisMode={(mode) => void handleSelectCodeAnalysisMode(mode)}
           onStartNextStep={() => void handleStartNextStep()}
           onPlanningGoalChange={setAfterPlanningGoal}
+          onSuggestedDirectionClick={(chipId) => void handleSuggestedDirectionClick(chipId)}
           onBeginDecisionTree={() => void handleBeginAfterDecisionTree()}
+          onSubmitPlanningGoalPrompt={() => void handleSubmitPlanningGoalPrompt()}
           onNextAnswerChange={(question, value) => handleAfterAnswerChange(question, value)}
           onNextOtherAnswerChange={(question, value) => handleAfterOtherAnswerChange(question, value)}
           onNextQuestionIndexChange={setAfterActiveQuestionIndex}

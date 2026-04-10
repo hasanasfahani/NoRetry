@@ -25,70 +25,116 @@ function conciseGoal(value: string) {
   return limitText(value.trim(), 140)
 }
 
+function normalizePromptText(value: string) {
+  return value.replace(/\r/g, "").replace(/\t/g, " ").replace(/\s+/g, " ").trim()
+}
+
 function cleanCriterionText(value: string) {
-  return value
+  const trimmed = value
     .replace(/^[-*•]\s*/, "")
     .replace(/^and\s+/i, "")
     .replace(/^then\s+/i, "")
     .replace(/^that\s+/i, "")
     .replace(/^it\s+should\s+/i, "")
+    .replace(/^the answer should\s+/i, "")
     .replace(/^should\s+/i, "")
     .replace(/^must\s+/i, "")
-    .replace(/^the answer should\s+/i, "")
-    .replace(/^return\s+only\s+/i, "Return only ")
-    .replace(/^keep\s+/i, "Keep ")
-    .replace(/^use\s+/i, "Use ")
-    .replace(/^no\s+/i, "No ")
+    .replace(/^please\s+/i, "")
     .replace(/\s+/g, " ")
+    .replace(/[.,;:]\s*$/, "")
     .trim()
+
+  if (!trimmed) return ""
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
+}
+
+function splitExplicitClauses(source: string) {
+  return source
+    .replace(/[–—]/g, " - ")
+    .split(/\n+|;\s+|•|(?<=:)\s*-\s+|\s+-\s+(?=[A-Z@a-z])/)
+    .map((item) => cleanCriterionText(item))
+    .filter(Boolean)
+}
+
+function isExplicitCriterionClause(value: string) {
+  const lowered = value.toLowerCase()
+
+  if (lowered.length < 6) return false
+  if (/^(write|add|extend|create|build|make)\b/.test(lowered)) return false
+
+  return (
+    /^(return|output|keep|use|include|list|show|set|force|print|open|opens|hide|hides|same|max-|min-|under|within|without|no |do not|don't|works|work offline|right-clicking|tooltip|page|font-size)/.test(
+      lowered
+    ) ||
+    /\b(return only|no explanations|no other ui changes|same width|max-height|font-size|works offline|code block|markdown code block)\b/.test(
+      lowered
+    )
+  )
+}
+
+function extractSectionClauses(prompt: string) {
+  const normalized = normalizePromptText(prompt)
+  const sectionMatches = [
+    ...normalized.matchAll(/(?:so that|requirements?|success criteria|must-haves?)\s*:\s*(.+?)(?=(?:return only|output only|no explanations|no text outside|keep\b|do not\b|don't\b|$))/gi)
+  ]
+
+  return dedupe(
+    sectionMatches
+      .flatMap((match) => splitExplicitClauses(match[1] ?? ""))
+      .filter(isExplicitCriterionClause),
+    8
+  )
+}
+
+function extractGlobalPromptRules(prompt: string) {
+  const normalized = normalizePromptText(prompt)
+  const patterns = [
+    /\breturn only [^.]+/gi,
+    /\boutput only [^.]+/gi,
+    /\bno explanations?\b/gi,
+    /\bno text outside [^.]+/gi,
+    /\bkeep [^.]+ unchanged\b/gi,
+    /\bkeep [^.]+ behaviour unchanged\b/gi,
+    /\bkeep [^.]+ behavior unchanged\b/gi,
+    /\bdo not [^.]+/gi,
+    /\bdon't [^.]+/gi,
+    /\buse [^.]+ works offline\b/gi,
+    /\bworks offline\b/gi
+  ]
+
+  return dedupe(
+    patterns
+      .flatMap((pattern) => [...normalized.matchAll(pattern)].map((match) => cleanCriterionText(match[0] ?? "")))
+      .filter(isExplicitCriterionClause),
+    8
+  )
+}
+
+function extractMinimalCoreTask(prompt: string) {
+  const normalized = normalizePromptText(prompt)
+  const core = normalized
+    .split(/\bso that\b/i)[0]
+    .split(/\breturn only\b/i)[0]
+    .split(/\boutput only\b/i)[0]
+    .trim()
+
+  if (!core) return ""
+
+  const shortened = cleanCriterionText(core)
+  return limitText(shortened, 72)
 }
 
 function deriveAcceptanceCriteriaFromSubmittedPrompt(prompt: string) {
-  const normalized = prompt
-    .replace(/\r/g, "")
-    .replace(/[–—]/g, "; ")
-    .replace(/\n+/g, "\n")
-    .trim()
-
-  const matches = normalized.match(/so that:(.*?)(?:return only|no explanations|$)/is)
-  const scopedSource = matches?.[1]?.trim() || normalized
-
-  const rawClauses = scopedSource
-    .split(/\n|;(?=\s)|•|(?<!\d)\.(?=\s+[A-Z@-])/)
-    .map((item) => cleanCriterionText(item))
-    .filter(Boolean)
-
-  const focusedClauses = rawClauses.filter((item) => {
-    const lowered = item.toLowerCase()
-    return (
-      lowered.length >= 6 &&
-      !/^write\b/.test(lowered) &&
-      !/^add\b/.test(lowered) &&
-      !/^extend\b/.test(lowered) &&
-      !/^create\b/.test(lowered) &&
-      !/^build\b/.test(lowered)
-    )
-  })
-
-  const explicitReturnRules = [
-    /return only the complete updated html file(?: inside one markdown code block)?/i,
-    /return only the code block/i,
-    /no explanations/i,
-    /keep the current .* unchanged/i,
-    /use a lightweight, client-side model/i,
-    /works offline/i
-  ]
-    .map((pattern) => normalized.match(pattern)?.[0] ?? "")
-    .map((item) => cleanCriterionText(item))
-    .filter(Boolean)
-
-  const combined = dedupe([...focusedClauses, ...explicitReturnRules], 6)
+  const explicitClauses = extractSectionClauses(prompt)
+  const outputRules = extractGlobalPromptRules(prompt)
+  const combined = dedupe([...explicitClauses, ...outputRules], 6).map((item) => limitText(item, 72))
 
   if (combined.length) {
-    return combined.map((item) => limitText(item, 72))
+    return combined
   }
 
-  return [`Solve: ${conciseGoal(normalized)}`]
+  const fallbackCoreTask = extractMinimalCoreTask(prompt)
+  return [fallbackCoreTask || `Solve: ${conciseGoal(prompt.trim())}`]
 }
 
 export function mapPromptIntentToTaskType(intent: PromptIntent | undefined): UnifiedTaskType {

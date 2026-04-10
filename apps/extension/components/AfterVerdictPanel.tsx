@@ -18,11 +18,16 @@ type AfterVerdictPanelProps = {
   isGeneratingNextPrompt: boolean
   nextPromptDraft: string
   nextPromptReady: boolean
+  suggestedDirectionChips: { id: string; label: string }[]
+  activeSuggestionChipId: string | null
+  hasUsedSuggestedDirection: boolean
   onRunDeepAnalysis: () => void
   onSelectCodeAnalysisMode: (mode: "quick" | "deep") => void
   onStartNextStep: () => void
   onPlanningGoalChange: (value: string) => void
+  onSuggestedDirectionClick: (chipId: string) => void
   onBeginDecisionTree: () => void
+  onSubmitPlanningGoalPrompt: () => void
   onNextAnswerChange: (question: ClarificationQuestion, value: string) => void
   onNextOtherAnswerChange: (question: ClarificationQuestion, value: string) => void
   onNextQuestionIndexChange: (index: number) => void
@@ -148,13 +153,6 @@ function humanizeChecklistLabel(value: string) {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
-function canonicalChecklistKey(value: string) {
-  return humanizeChecklistLabel(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-}
-
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const tone = toneForStatus(props.verdict.status)
@@ -174,7 +172,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const summarySentence =
     props.verdict.findings.find((item) => item.trim().length > 0) ||
     "NoRetry reviewed the answer against your request."
-  const checklistItems = props.verdict.acceptance_checklist.map((item) => ({
+  const checklistItems = (props.verdict.acceptance_checklist ?? []).map((item) => ({
     label: humanizeChecklistLabel(item.label),
     marker: item.status === "met" ? "✅" : item.status === "missed" ? "🚫" : "(not sure)"
   }))
@@ -341,22 +339,60 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <div style={styles.questionCard}>
                 <p style={styles.questionLabel}>What do you want the next step to be?</p>
                 <p style={styles.questionHelper}>Give NoRetry a short direction so it can build the next decision-tree questions around it.</p>
-                <input
-                  type="text"
-                  style={styles.inlineInput}
+                {props.suggestedDirectionChips.length ? (
+                  <div style={styles.suggestionSection}>
+                    <p style={styles.suggestionLabel}>Suggested from this review</p>
+                    <div style={styles.suggestionChips}>
+                      {props.suggestedDirectionChips.map((chip) => {
+                        const active = props.activeSuggestionChipId === chip.id
+                        return (
+                          <button
+                            key={chip.id}
+                            type="button"
+                            style={styles.suggestionChip(active)}
+                            onClick={() => props.onSuggestedDirectionClick(chip.id)}
+                            disabled={Boolean(props.activeSuggestionChipId)}
+                          >
+                            {chip.label}
+                            {active ? (
+                              <span style={styles.loadingDotsInline} aria-hidden="true">
+                                <span style={styles.loadingDot(0)}>.</span>
+                                <span style={styles.loadingDot(0.2)}>.</span>
+                                <span style={styles.loadingDot(0.4)}>.</span>
+                              </span>
+                            ) : null}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                <textarea
+                  style={styles.planningTextarea}
                   value={props.planningGoal}
                   onChange={(event) => props.onPlanningGoalChange(event.currentTarget.value)}
                   placeholder="Example: Help me debug why the emoji overlay does not appear"
                 />
                 <div style={styles.manualAdvanceRow}>
-                  <button
-                    type="button"
-                    style={styles.secondaryButton}
-                    onClick={props.onBeginDecisionTree}
-                    disabled={!props.planningGoal.trim() || props.isAddingNextQuestions}
-                  >
-                    {props.isAddingNextQuestions ? "Thinking..." : "Submit"}
-                  </button>
+                  {props.hasUsedSuggestedDirection ? (
+                    <button
+                      type="button"
+                      style={styles.copyButton}
+                      onClick={props.onSubmitPlanningGoalPrompt}
+                      disabled={!props.planningGoal.trim()}
+                    >
+                      Submit Prompt
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      style={styles.secondaryButton}
+                      onClick={props.onBeginDecisionTree}
+                      disabled={!props.planningGoal.trim() || props.isAddingNextQuestions}
+                    >
+                      {props.isAddingNextQuestions ? "Thinking..." : "Submit"}
+                    </button>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -720,6 +756,36 @@ const styles = {
     lineHeight: 1.45,
     color: "#64748b"
   } as CSSProperties,
+  suggestionSection: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    marginTop: 12,
+    marginBottom: 12
+  } as CSSProperties,
+  suggestionLabel: {
+    margin: 0,
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#475569"
+  } as CSSProperties,
+  suggestionChips: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8
+  } as CSSProperties,
+  suggestionChip: (active: boolean): CSSProperties => ({
+    border: "1px solid rgba(99,102,241,0.18)",
+    borderRadius: 999,
+    background: active ? "rgba(99,102,241,0.12)" : "rgba(248,250,252,0.96)",
+    color: "#4338ca",
+    padding: "8px 12px",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: active ? "default" : "pointer",
+    display: "inline-flex",
+    alignItems: "center"
+  }),
   optionList: {
     display: "flex",
     flexDirection: "column",
@@ -732,6 +798,18 @@ const styles = {
     border: "1px solid rgba(148,163,184,0.24)",
     padding: "10px 12px",
     fontSize: 12,
+    color: "#0f172a",
+    background: "#ffffff"
+  } as CSSProperties,
+  planningTextarea: {
+    width: "100%",
+    minHeight: 92,
+    resize: "vertical",
+    borderRadius: 12,
+    border: "1px solid rgba(148,163,184,0.24)",
+    padding: "10px 12px",
+    fontSize: 12,
+    lineHeight: 1.5,
     color: "#0f172a",
     background: "#ffffff"
   } as CSSProperties,
@@ -814,6 +892,10 @@ const styles = {
   loadingDots: {
     display: "inline-flex",
     marginLeft: 2
+  } as CSSProperties,
+  loadingDotsInline: {
+    display: "inline-flex",
+    marginLeft: 4
   } as CSSProperties,
   loadingDot: (delay: number): CSSProperties => ({
     display: "inline-block",
