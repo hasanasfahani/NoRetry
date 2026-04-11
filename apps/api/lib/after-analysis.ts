@@ -1079,7 +1079,7 @@ function buildAcceptanceChecklist(
 
 function reconcileVerdictWithChecklist(
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
-  checklist: ReturnType<typeof AcceptanceChecklistItemSchema.array().parse>,
+  checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>
 ) {
