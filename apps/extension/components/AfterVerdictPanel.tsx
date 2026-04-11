@@ -491,8 +491,8 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <div style={styles.contextCard}>
                 <p style={styles.contextTitle}>Project memory</p>
                 <p style={styles.contextHelper}>
-                  Ask Replit for a structured project handoff, paste the markdown here once, and NoRetry will use it
-                  to stop asking context-blind questions in the middle of the project.
+                  Ask Replit for a structured project handoff, paste it here once, and NoRetry will use it before
+                  reviewing your earlier project answer so the first analysis is not taken out of context.
                 </p>
                 <div style={styles.manualAdvanceRow}>
                   <button

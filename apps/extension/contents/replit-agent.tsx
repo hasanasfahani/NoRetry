@@ -111,6 +111,13 @@ export const getRootContainer: PlasmoGetRootContainer = async () => {
 }
 
 export default function PromptOptimizerApp() {
+  type PendingContextAnalysis = {
+    attempt: Attempt
+    responseText: string
+    responseIdentity: string
+    threadIdentity: string
+  }
+
   const OTHER_OPTION = "Other"
   const [mounted, setMounted] = useState(false)
   const [inputBindingVersion, setInputBindingVersion] = useState(0)
@@ -187,6 +194,7 @@ export default function PromptOptimizerApp() {
   const afterNextPromptRequestIdRef = useRef(0)
   const recentAnsweredTimeoutRef = useRef<number | null>(null)
   const afterLoadingIntervalRef = useRef<number | null>(null)
+  const pendingContextAnalysisRef = useRef<PendingContextAnalysis | null>(null)
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -467,19 +475,27 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
-  async function runAfterEvaluation(force = false, deepAnalysis = false) {
+  async function runAfterEvaluation(
+    force = false,
+    deepAnalysis = false,
+    targetOverride?: PendingContextAnalysis
+  ) {
     const requestId = ++afterEvaluationRequestIdRef.current
-    const { latestMessage, text, identity } = getCurrentAssistantResponseText()
+    const liveTarget = getCurrentAssistantResponseText()
+    const latestMessage = targetOverride ? null : liveTarget.latestMessage
+    const text = targetOverride?.responseText ?? liveTarget.text
+    const identity = targetOverride?.responseIdentity ?? liveTarget.identity
     const normalizedText = normalizeAssistantTextForReuse(text)
     const normalizedLastText = normalizeAssistantTextForReuse(lastEvaluatedAssistantTextRef.current)
     const latestMessageId = identity || readAssistantMessageIdentity(latestMessage, text)
     const currentThread = getCurrentThreadSnapshot()
+    const effectiveThreadIdentity = targetOverride?.threadIdentity ?? currentThread.identity
 
     if (!text || (!force && normalizedText === normalizedLastText)) {
       return false
     }
 
-    const attempt = await ensureSubmittedAttempt()
+    const attempt = targetOverride?.attempt ?? (await ensureSubmittedAttempt())
     if (!attempt) return false
 
     latestAssistantNodeRef.current = latestMessage
@@ -506,7 +522,7 @@ export default function PromptOptimizerApp() {
       await attachAnalysisResult(attempt.attempt_id, text, result, latestMessageId)
       lastEvaluatedAssistantTextRef.current = text
       lastEvaluatedAssistantMessageIdRef.current = latestMessageId
-      lastEvaluatedChatHrefRef.current = currentThread.identity
+      lastEvaluatedChatHrefRef.current = effectiveThreadIdentity
       return true
     } finally {
       if (requestId === afterEvaluationRequestIdRef.current) {
@@ -733,6 +749,7 @@ export default function PromptOptimizerApp() {
       setIsDeepAnalyzingAfterResponse(false)
       setHasSubmittedPrompt(false)
       latestAssistantNodeRef.current = null
+      pendingContextAnalysisRef.current = null
       lastEvaluatedAssistantTextRef.current = ""
       lastEvaluatedAssistantMessageIdRef.current = ""
       lastEvaluatedChatHrefRef.current = ""
@@ -767,6 +784,34 @@ export default function PromptOptimizerApp() {
 
     if (afterVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
       setAfterPanelOpen(true)
+      return
+    }
+
+    if (isReplitSurface() && text && !hasProjectMemory) {
+      const pendingAttempt = await ensureSubmittedAttempt()
+      if (pendingAttempt) {
+        pendingContextAnalysisRef.current = {
+          attempt: pendingAttempt,
+          responseText: text,
+          responseIdentity: latestMessageId,
+          threadIdentity: threadSnapshot.identity
+        }
+      }
+
+      setAfterPanelOpen(true)
+      resetAfterNextStepFlow()
+      setAfterVerdict(
+        buildAfterPlaceholder(
+          "Before I review this, I need project context so I don’t judge your work out of context.",
+          [
+            "Paste the Replit handoff below. After you save it, NoRetry will return to your latest project answer and review it automatically."
+          ],
+          ""
+        )
+      )
+      setAfterAttempt(pendingAttempt)
+      setAfterNextStepStarted(true)
+      setAfterPlanningGoal("")
       return
     }
 
@@ -1324,6 +1369,43 @@ export default function PromptOptimizerApp() {
       setProjectHandoffDraft(buildProjectHandoffMarkdown(parsed.projectContext, parsed.currentState))
       setHasProjectMemory(Boolean(parsed.projectContext.trim() || parsed.currentState.trim()))
       showPlanningGoalNotice("Project memory saved")
+
+      if (pendingContextAnalysisRef.current) {
+        const preservedTarget = pendingContextAnalysisRef.current
+        pendingContextAnalysisRef.current = null
+        resetAfterNextStepFlow()
+        setAfterPanelOpen(true)
+        setAfterVerdict(
+          buildAfterPlaceholder(
+            "Context loaded. Returning to your latest project answer now."
+          )
+        )
+        setIsEvaluatingAfterResponse(true)
+        startAfterLoadingProgress("quick")
+        try {
+          const opened = await runAfterEvaluation(true, false, preservedTarget)
+          if (!opened) {
+            setAfterVerdict(
+              buildAfterPlaceholder(
+                "NoRetry could not return to the earlier project answer yet.",
+                ["Try clicking the thunder again after the Replit thread fully settles."],
+                ""
+              )
+            )
+          }
+        } catch {
+          setAfterVerdict(
+            buildAfterPlaceholder(
+              "NoRetry could not review the preserved project answer yet.",
+              ["Try clicking the thunder again now that project context is saved."],
+              ""
+            )
+          )
+        } finally {
+          stopAfterLoadingProgress()
+          setIsEvaluatingAfterResponse(false)
+        }
+      }
     } finally {
       setIsSavingProjectMemory(false)
     }
