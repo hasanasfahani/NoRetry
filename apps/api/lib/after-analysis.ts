@@ -387,6 +387,12 @@ function summarizeChecklistLabels(labels: string[], limit = 2) {
     .join(" • ")
 }
 
+function reviewQualityContract(deepAnalysisRequested: boolean) {
+  return deepAnalysisRequested
+    ? "Use the exact acceptance criteria provided. Do not replace them with generic placeholders like 'solve the user's latest request'. Deep review should resolve each criterion into a binary outcome whenever the visible evidence is sufficient."
+    : "Use the exact acceptance criteria provided. Do not replace them with generic placeholders like 'solve the user's latest request'. If one criterion is still unclear, name that concrete criterion directly."
+}
+
 function responseIsMostlyCode(responseText: string) {
   const stripped = normalizeWhitespace(
     responseText
@@ -814,6 +820,7 @@ function buildStage2Prompts(
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
   candidates: EvidenceCandidate[],
+  deepAnalysisRequested = false,
   projectContext = "",
   currentState = "",
   changedFiles: string[] = [],
@@ -821,7 +828,7 @@ function buildStage2Prompts(
 ) {
   return {
     system:
-      "Choose which raw answer excerpts deserve closer inspection. Prioritize evidence that can confirm or refute the claimed fix against the saved goal, current debugging state, repeated bugs, and visible error summary. Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.",
+      `Choose which raw answer excerpts deserve closer inspection. Prioritize evidence that can confirm or refute the claimed fix against the saved goal, current debugging state, repeated bugs, and visible error summary. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.`,
     user: JSON.stringify({
       intent: {
         goal: compressGoal(intent.goal),
@@ -851,6 +858,7 @@ function buildStage3Prompts(
   stage2: ReturnType<typeof EvidenceTargetingSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
   selectedEvidence: EvidenceCandidate[],
+  deepAnalysisRequested = false,
   projectContext = "",
   currentState = "",
   changedFiles: string[] = [],
@@ -858,7 +866,7 @@ function buildStage3Prompts(
 ) {
   return {
     system:
-      "Inspect the selected raw answer excerpts and decide whether they support the assistant's claims. Use the project context, current debugging state, repeated bugs, and the current visible error summary to distinguish a real fix from a partial or drifting change. Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.",
+      `Inspect the selected raw answer excerpts and decide whether they support the assistant's claims. Use the project context, current debugging state, repeated bugs, and the current visible error summary to distinguish a real fix from a partial or drifting change. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.`,
     user: JSON.stringify({
       intent: {
         goal: compressGoal(intent.goal),
@@ -888,6 +896,7 @@ function buildStage4Prompts(
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
+  deepAnalysisRequested = false,
   projectContext = "",
   currentState = "",
   changedFiles: string[] = [],
@@ -895,7 +904,7 @@ function buildStage4Prompts(
 ) {
   return {
     system:
-      "Generate a trustworthy verdict for the AI response. Prefer UNVERIFIED over success when evidence is weak. Use the project context, current debugging state, changed file hints, and visible error summary to judge whether the answer really resolves the user's debugging situation instead of only sounding plausible. Return JSON only with keys: status, confidence, findings, issues.",
+      `Generate a trustworthy verdict for the AI response. Prefer UNVERIFIED over success when evidence is weak. Use the project context, current debugging state, changed file hints, and visible error summary to judge whether the answer really resolves the user's debugging situation instead of only sounding plausible. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: status, confidence, findings, issues.`,
     user: JSON.stringify({
       intent,
       project_context: projectContext,
@@ -1155,7 +1164,12 @@ function reconcileVerdictWithChecklist(
 
   if (allKnownCriteriaMet && stage2.problem_fit === "correct" && !hasUnresolvedStageRisks) {
     status = detail.inspection_depth === "summary_only" ? "LIKELY_SUCCESS" : "SUCCESS"
-    if (confidence === "low") confidence = "medium"
+    if (detail.inspection_depth !== "summary_only" && deepAnalysisRequested) {
+      confidence = "high"
+      confidenceReason = "Deep review found direct visible support for every acceptance criterion."
+    } else if (confidence === "low") {
+      confidence = "medium"
+    }
   } else if ((status === "FAILED" || status === "WRONG_DIRECTION") && metCount >= 2 && missedCount === 0) {
     status = "PARTIAL"
     confidence = confidence === "high" ? "medium" : confidence
@@ -1507,6 +1521,10 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   intent = mergeIntentWithProjectMemory(intent, parsed.project_context, parsed.current_state, {
     aggressive: deepAnalysisRequested
   })
+  intent = {
+    ...intent,
+    acceptance_criteria: canonicalAcceptanceCriteria(intent, parsed.baseline_acceptance_criteria)
+  }
 
   const stage1Prompts = buildStage1Prompts(
     parsed.response_summary,
@@ -1541,6 +1559,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       safeStage1,
       parsed.response_summary,
       evidenceCandidates,
+      deepAnalysisRequested,
       parsed.project_context,
       parsed.current_state,
       changedFiles,
@@ -1578,6 +1597,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       targetedEvidence,
       parsed.response_summary,
       selectedEvidence,
+      deepAnalysisRequested,
       parsed.project_context,
       parsed.current_state,
       changedFiles,
@@ -1595,7 +1615,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   const alignmentPrompts = {
     system:
-      "Compare the assistant response to the intended goal. Use the saved project context and current debugging state so the judgment stays grounded in the user's real situation. Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.",
+      `Compare the assistant response to the intended goal. Use the saved project context and current debugging state so the judgment stays grounded in the user's real situation. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.`,
     user: JSON.stringify({
       intent,
       project_context: parsed.project_context,
@@ -1642,6 +1662,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       safeStage2,
       detailInspection,
       parsed.response_summary,
+      deepAnalysisRequested,
       parsed.project_context,
       parsed.current_state,
       changedFiles,
