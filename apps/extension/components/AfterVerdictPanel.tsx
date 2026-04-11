@@ -8,6 +8,7 @@ type AfterVerdictPanelProps = {
   isDeepAnalyzing: boolean
   loadingProgress: { percent: number; label: string } | null
   codeAnalysisMode: "quick" | "deep"
+  displayedReviewMode: "quick" | "deep"
   nextStepStarted: boolean
   planningGoal: string
   planningGoalNotice: string
@@ -118,6 +119,21 @@ function toneForReview(depth: AfterAnalysisResult["inspection_depth"]) {
   }
 }
 
+function toneForDisplayedReview(
+  displayedMode: "quick" | "deep",
+  depth: AfterAnalysisResult["inspection_depth"]
+) {
+  if (displayedMode === "quick") {
+    return { bg: "#f1f5f9", fg: "#475569", border: "rgba(71,85,105,0.14)", label: "quick" }
+  }
+
+  if (depth === "targeted_code") {
+    return { bg: "#dbeafe", fg: "#1d4ed8", border: "rgba(29,78,216,0.16)", label: "deep" }
+  }
+
+  return { bg: "#ede9fe", fg: "#6d28d9", border: "rgba(109,40,217,0.16)", label: "deep" }
+}
+
 function depthLabel(depth: AfterAnalysisResult["inspection_depth"]) {
   switch (depth) {
     case "targeted_code":
@@ -213,6 +229,16 @@ function improvementLabel(answeredCount: number, isAddingNextQuestions: boolean,
   return "Direction set"
 }
 
+function isMeaningfulDeepEvidenceItem(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  if (trimmed.length < 18) return false
+  if (/^(fixed|working|updated|changed|done|resolved)\b/i.test(trimmed)) return false
+  if (/^here is exactly what was wrong/i.test(trimmed)) return false
+  if (/^the user'?s latest request$/i.test(trimmed)) return false
+  return true
+}
+
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const tone = toneForStatus(props.verdict.status)
@@ -236,21 +262,22 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   }))
   const confidenceTone = toneForConfidence(props.verdict.confidence)
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
-  const reviewTone = toneForReview(props.verdict.inspection_depth)
+  const activeReviewMode = props.displayedReviewMode
+  const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
   const deepReviewLimitedHint =
-    props.verdict.inspection_depth !== "summary_only" && props.verdict.confidence === "low"
+    activeReviewMode === "deep" && props.verdict.confidence === "low"
       ? props.verdict.confidence_reason || "Deep review ran, but the visible evidence is still limited."
       : ""
   const deepReviewEvidenceItems =
-    props.verdict.inspection_depth !== "summary_only"
+    activeReviewMode === "deep"
       ? Array.from(
           new Map(
             props.verdict.stage_1.claimed_evidence.map((item) => [item.trim().toLowerCase(), item.trim()])
           ).values()
-        ).filter(Boolean)
+        ).filter(isMeaningfulDeepEvidenceItem)
       : []
   const deepReviewEvidenceHint =
-    props.verdict.inspection_depth !== "summary_only" && deepReviewEvidenceItems.length
+    activeReviewMode === "deep" && deepReviewEvidenceItems.length
       ? `Deep review inspected: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
       : ""
   const shouldShowLoadingProgress =
@@ -620,7 +647,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 <div style={styles.modeToggle}>
                   <button
                     type="button"
-                    style={styles.modeButton(props.codeAnalysisMode === "quick")}
+                    style={styles.modeButton(activeReviewMode === "quick")}
                     onClick={() => props.onSelectCodeAnalysisMode("quick")}
                     disabled={props.isEvaluating || props.isDeepAnalyzing}
                   >
@@ -628,11 +655,11 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   </button>
                   <button
                     type="button"
-                    style={styles.modeButton(props.codeAnalysisMode === "deep")}
+                    style={styles.modeButton(activeReviewMode === "deep")}
                     onClick={() => props.onSelectCodeAnalysisMode("deep")}
                     disabled={props.isEvaluating || props.isDeepAnalyzing}
                   >
-                    {props.isDeepAnalyzing && props.codeAnalysisMode === "deep" ? "Digging deeper..." : "Deep"}
+                    {props.isDeepAnalyzing && activeReviewMode === "deep" ? "Digging deeper..." : "Deep"}
                   </button>
                 </div>
               ) : null}

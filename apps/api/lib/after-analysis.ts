@@ -107,6 +107,19 @@ function extractMeaningfulTokens(value: string) {
 function extractSectionLines(source: string, headings: string[]) {
   if (!source.trim()) return []
 
+  const requestedHeadings = headings.map((heading) => heading.toLowerCase())
+  const commonContextHeadings = new Set([
+    "project overview",
+    "architecture",
+    "constraints",
+    "relevant files",
+    "current state",
+    "repeated bugs",
+    "fix attempts",
+    "ai drift patterns",
+    "user intent to preserve",
+    "definition of done"
+  ])
   const lines = source
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -117,15 +130,19 @@ function extractSectionLines(source: string, headings: string[]) {
 
   for (const line of lines) {
     const normalized = line.toLowerCase()
-    const isHeading = /^#{1,6}\s*/.test(line)
-    const headingText = normalized.replace(/^#{1,6}\s*/, "").trim()
+    const headingText = normalized.replace(/^#{1,6}\s*/, "").replace(/[:\s]+$/g, "").trim()
+    const isMarkdownHeading = /^#{1,6}\s*/.test(line)
+    const isPlainSectionHeading =
+      commonContextHeadings.has(headingText) &&
+      !/^[-*•]\s+/.test(line)
+    const isHeading = isMarkdownHeading || isPlainSectionHeading
 
     if (isHeading) {
-      capture = headings.some((heading) => headingText.includes(heading))
+      capture = requestedHeadings.some((heading) => headingText.includes(heading))
       continue
     }
 
-    if (capture && /^[A-Z][A-Za-z ]+:\s*$/.test(line)) {
+    if (capture && (commonContextHeadings.has(headingText) || /^[A-Z][A-Za-z ]+:\s*$/.test(line))) {
       capture = false
     }
 

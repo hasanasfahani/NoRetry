@@ -119,6 +119,14 @@ export default function PromptOptimizerApp() {
     threadIdentity: string
   }
 
+  type CachedAfterReviews = {
+    threadIdentity: string
+    responseIdentity: string
+    normalizedText: string
+    quick: AfterAnalysisResult | null
+    deep: AfterAnalysisResult | null
+  }
+
   const OTHER_OPTION = "Other"
   const [mounted, setMounted] = useState(false)
   const [inputBindingVersion, setInputBindingVersion] = useState(0)
@@ -146,6 +154,7 @@ export default function PromptOptimizerApp() {
   const [afterPanelOpen, setAfterPanelOpen] = useState(false)
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
+  const [afterDisplayedReviewMode, setAfterDisplayedReviewMode] = useState<"quick" | "deep">("quick")
   const [afterLoadingProgress, setAfterLoadingProgress] = useState<{
     percent: number
     label: string
@@ -209,6 +218,8 @@ export default function PromptOptimizerApp() {
     normalizedText: string
     threadIdentity: string
   } | null>(null)
+  const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
+  const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -224,6 +235,8 @@ export default function PromptOptimizerApp() {
       setHasProjectMemory(false)
       projectMemoryAwaitingFreshAnswerRef.current = false
       projectMemoryBaselineResponseRef.current = null
+      strongestAfterVerdictRef.current = null
+      afterReviewCacheRef.current = null
       return
     }
 
@@ -248,6 +261,8 @@ export default function PromptOptimizerApp() {
           threadIdentity: record.baselineThreadIdentity ?? ""
         }
       : null
+    strongestAfterVerdictRef.current = null
+    afterReviewCacheRef.current = null
   }
 
   useEffect(() => {
@@ -592,10 +607,36 @@ export default function PromptOptimizerApp() {
 
     return {
       ...nextResult,
+      status: previousResult.status,
+      confidence: previousResult.confidence,
+      confidence_reason: previousResult.confidence_reason,
       findings: previousResult.findings,
+      issues: previousResult.issues,
+      next_prompt: previousResult.next_prompt,
+      prompt_strategy: previousResult.prompt_strategy,
+      verdict: previousResult.verdict,
+      next_prompt_output: previousResult.next_prompt_output,
       acceptance_checklist: previousResult.acceptance_checklist,
+      stage_1: previousResult.stage_1,
       stage_2: previousResult.stage_2
     }
+  }
+
+  function isSameCachedAfterTarget(
+    cache: CachedAfterReviews | null,
+    threadIdentity: string,
+    responseIdentity: string,
+    normalizedText: string
+  ) {
+    if (!cache) return false
+
+    if (cache.threadIdentity !== threadIdentity) return false
+
+    if (responseIdentity && cache.responseIdentity) {
+      return responseIdentity === cache.responseIdentity
+    }
+
+    return normalizedText === cache.normalizedText
   }
 
   function buildCurrentAfterTargetOverride(): PendingContextAnalysis | null {
@@ -651,6 +692,12 @@ export default function PromptOptimizerApp() {
     const latestMessageId = identity || readAssistantMessageIdentity(latestMessage, text)
     const currentThread = getCurrentThreadSnapshot()
     const effectiveThreadIdentity = targetOverride?.threadIdentity ?? currentThread.identity
+    const sameAnalyzedTarget = isSameCachedAfterTarget(
+      afterReviewCacheRef.current,
+      effectiveThreadIdentity,
+      latestMessageId,
+      normalizedText
+    )
 
     if (!text || (!force && normalizedText === normalizedLastText)) {
       return false
@@ -676,8 +723,15 @@ export default function PromptOptimizerApp() {
         error_summary: collectVisibleErrorSummary(),
         changed_file_paths_summary: changedFiles
       })
-      const result =
-        deepAnalysis && afterVerdict ? preserveStrongerReviewContext(rawResult, afterVerdict) : rawResult
+      const cachedReviews = sameAnalyzedTarget ? afterReviewCacheRef.current : null
+      const baselineVerdict = sameAnalyzedTarget
+        ? deepAnalysis
+          ? cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
+          : cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
+        : null
+      const result = baselineVerdict
+        ? preserveStrongerReviewContext(rawResult, baselineVerdict)
+        : rawResult
       if (requestId !== afterEvaluationRequestIdRef.current) {
         return false
       }
@@ -701,10 +755,36 @@ export default function PromptOptimizerApp() {
       }
       setAfterAttempt(attempt)
       setAfterVerdict(result)
+      setAfterDisplayedReviewMode(deepAnalysis ? "deep" : "quick")
       await attachAnalysisResult(attempt.attempt_id, text, result, latestMessageId)
       lastEvaluatedAssistantTextRef.current = text
       lastEvaluatedAssistantMessageIdRef.current = latestMessageId
       lastEvaluatedChatHrefRef.current = effectiveThreadIdentity
+      if (!sameAnalyzedTarget || !afterReviewCacheRef.current) {
+        afterReviewCacheRef.current = {
+          threadIdentity: effectiveThreadIdentity,
+          responseIdentity: latestMessageId,
+          normalizedText,
+          quick: deepAnalysis ? null : result,
+          deep: deepAnalysis ? result : null
+        }
+      } else if (deepAnalysis) {
+        afterReviewCacheRef.current = {
+          ...afterReviewCacheRef.current,
+          quick: afterReviewCacheRef.current.quick ?? baselineVerdict ?? null,
+          deep: result
+        }
+      } else {
+        afterReviewCacheRef.current = {
+          ...afterReviewCacheRef.current,
+          quick: result
+        }
+      }
+      if (!sameAnalyzedTarget || !strongestAfterVerdictRef.current) {
+        strongestAfterVerdictRef.current = result
+      } else if (specificityScore(result) >= specificityScore(strongestAfterVerdictRef.current)) {
+        strongestAfterVerdictRef.current = result
+      }
       return true
     } finally {
       if (requestId === afterEvaluationRequestIdRef.current) {
@@ -962,6 +1042,7 @@ export default function PromptOptimizerApp() {
       void loadProjectMemoryForCurrentLocation()
       setAfterVerdict(null)
       setAfterAttempt(null)
+      setAfterDisplayedReviewMode("quick")
       setAfterPanelOpen(false)
       resetAfterNextStepFlow()
       setProjectContextSetupActive(false)
@@ -974,6 +1055,8 @@ export default function PromptOptimizerApp() {
       lastEvaluatedAssistantTextRef.current = ""
       lastEvaluatedAssistantMessageIdRef.current = ""
       lastEvaluatedChatHrefRef.current = ""
+      strongestAfterVerdictRef.current = null
+      afterReviewCacheRef.current = null
       pendingPromptRef.current = null
     }, 500)
 
@@ -997,13 +1080,7 @@ export default function PromptOptimizerApp() {
     const sameChat = threadSnapshot.identity === lastEvaluatedChatHrefRef.current
     const currentDraftPrompt = draftSnapshot.text.trim()
     const savedDraftPrompt = afterPlanningGoal.trim() || afterAttempt?.raw_prompt.trim() || ""
-    const initialResponseSummary = text ? preprocessResponse(text) : null
-    const shouldStartWithDeepReview =
-      codeAnalysisMode === "deep" &&
-      Boolean(
-        initialResponseSummary &&
-          (initialResponseSummary.has_code_blocks || initialResponseSummary.mentioned_files.length > 0)
-      )
+    const shouldStartWithDeepReview = false
     const sameMessage =
       latestMessageId && lastEvaluatedAssistantMessageIdRef.current
         ? latestMessageId === lastEvaluatedAssistantMessageIdRef.current
@@ -1021,6 +1098,7 @@ export default function PromptOptimizerApp() {
       setProjectContextSetupActive(false)
       setProjectContextReadyActive(true)
       setAfterPanelOpen(true)
+      setAfterDisplayedReviewMode("quick")
       setAfterVerdict(
         buildAfterPlaceholder(
           "Your project memory is saved and ready.",
@@ -1054,6 +1132,7 @@ export default function PromptOptimizerApp() {
       setProjectContextSetupActive(true)
       setProjectContextReadyActive(false)
       resetAfterNextStepFlow()
+      setAfterDisplayedReviewMode("quick")
       setAfterVerdict(
         buildAfterPlaceholder(
           "Before I review this, I need project context so I don’t judge your work out of context.",
@@ -1083,6 +1162,7 @@ export default function PromptOptimizerApp() {
 
       setAfterPanelOpen(true)
       resetAfterNextStepFlow()
+      setAfterDisplayedReviewMode("quick")
       setAfterVerdict(emptyVerdict)
       setAfterAttempt(
         currentDraftPrompt
@@ -1146,6 +1226,7 @@ export default function PromptOptimizerApp() {
     setAfterPanelOpen(true)
     resetAfterNextStepFlow()
     setAfterAttempt(null)
+    setAfterDisplayedReviewMode("quick")
     setAfterVerdict(
       buildAfterPlaceholder("Checking the latest change.")
     )
@@ -1180,11 +1261,29 @@ export default function PromptOptimizerApp() {
   async function handleRunDeepAnalysis() {
     if (!afterVerdict || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
 
+    const targetOverride = buildCurrentAfterTargetOverride()
+    if (targetOverride) {
+      const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
+      const cachedReviews = isSameCachedAfterTarget(
+        afterReviewCacheRef.current,
+        targetOverride.threadIdentity,
+        targetOverride.responseIdentity,
+        normalizedText
+      )
+        ? afterReviewCacheRef.current
+        : null
+
+      if (cachedReviews?.deep) {
+        setAfterDisplayedReviewMode("deep")
+        setAfterVerdict(cachedReviews.deep)
+        return
+      }
+    }
+
     setIsDeepAnalyzingAfterResponse(true)
     startAfterLoadingProgress("deep")
 
     try {
-      const targetOverride = buildCurrentAfterTargetOverride()
       const opened = await runAfterEvaluation(true, true, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
@@ -1210,12 +1309,34 @@ export default function PromptOptimizerApp() {
   }
 
   async function handleSelectCodeAnalysisMode(mode: "quick" | "deep") {
-    if (mode === codeAnalysisMode || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
+    const currentReviewMode = afterDisplayedReviewMode
+
+    if (mode === currentReviewMode || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
 
     setCodeAnalysisModeState(mode)
     await setCodeAnalysisMode(mode)
 
     if (!afterVerdict) return
+
+    const targetOverride = buildCurrentAfterTargetOverride()
+    if (targetOverride) {
+      const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
+      const cachedReviews = isSameCachedAfterTarget(
+        afterReviewCacheRef.current,
+        targetOverride.threadIdentity,
+        targetOverride.responseIdentity,
+        normalizedText
+      )
+        ? afterReviewCacheRef.current
+        : null
+
+      const cachedResult = mode === "deep" ? cachedReviews?.deep : cachedReviews?.quick
+      if (cachedResult) {
+        setAfterDisplayedReviewMode(mode)
+        setAfterVerdict(cachedResult)
+        return
+      }
+    }
 
     if (mode === "deep") {
       await handleRunDeepAnalysis()
@@ -1225,7 +1346,7 @@ export default function PromptOptimizerApp() {
     setIsEvaluatingAfterResponse(true)
     startAfterLoadingProgress("quick")
     try {
-      const opened = await runAfterEvaluation(true, false)
+      const opened = await runAfterEvaluation(true, false, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
@@ -2275,6 +2396,7 @@ export default function PromptOptimizerApp() {
           isDeepAnalyzing={isDeepAnalyzingAfterResponse}
           loadingProgress={afterLoadingProgress}
           codeAnalysisMode={codeAnalysisMode}
+          displayedReviewMode={afterDisplayedReviewMode}
           nextStepStarted={afterNextStepStarted}
           planningGoal={afterPlanningGoal}
           planningGoalNotice={planningGoalNotice}
