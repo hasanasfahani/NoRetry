@@ -104,6 +104,110 @@ function extractMeaningfulTokens(value: string) {
     .filter((token) => token.length >= 4 && !STOP_WORDS.has(token))
 }
 
+function extractSectionLines(source: string, headings: string[]) {
+  if (!source.trim()) return []
+
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const results: string[] = []
+  let capture = false
+
+  for (const line of lines) {
+    const normalized = line.toLowerCase()
+    const isHeading = /^#{1,6}\s*/.test(line)
+    const headingText = normalized.replace(/^#{1,6}\s*/, "").trim()
+
+    if (isHeading) {
+      capture = headings.some((heading) => headingText.includes(heading))
+      continue
+    }
+
+    if (capture && /^[A-Z][A-Za-z ]+:\s*$/.test(line)) {
+      capture = false
+    }
+
+    if (!capture) continue
+
+    const cleaned = line.replace(/^[-*•]\s*/, "").trim()
+    if (cleaned) results.push(cleaned)
+  }
+
+  return dedupe(results, 10)
+}
+
+function extractPrefixedLine(source: string, prefixes: string[]) {
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  for (const line of lines) {
+    const normalized = line.toLowerCase()
+    const prefix = prefixes.find((candidate) => normalized.startsWith(candidate))
+    if (!prefix) continue
+    const value = line.slice(prefix.length).replace(/^[:\-\s]+/, "").trim()
+    if (value) return value
+  }
+
+  return ""
+}
+
+function hasWeakGoal(goal: string) {
+  const normalized = normalizeForMatch(goal)
+  const goalTokens = extractMeaningfulTokens(goal)
+
+  return (
+    !normalized ||
+    normalized === "the user s latest request" ||
+    normalized === "solve the requested task" ||
+    /^solve\s+(the|this|that)\b/.test(normalized) ||
+    /^fix(\s+it)?$/.test(normalized) ||
+    goalTokens.length < 4
+  )
+}
+
+function mergeIntentWithProjectMemory(
+  intent: AttemptIntent,
+  projectContext: string,
+  currentState: string
+): AttemptIntent {
+  const currentGoalHint =
+    extractPrefixedLine(currentState, ["working on", "current goal", "goal", "what i am working on"]) ||
+    extractPrefixedLine(projectContext, ["user-facing goal", "definition of done", "goal"])
+
+  const definitionOfDone = extractSectionLines(projectContext, ["definition of done"]).concat(
+    extractSectionLines(currentState, ["definition of done"])
+  )
+
+  const userIntentToPreserve = extractSectionLines(projectContext, ["user intent to preserve"])
+  const constraintsFromContext = extractSectionLines(projectContext, ["constraints"]).filter(
+    (line) => /must|non-negotiable|do not|keep|without|visible|works|survive|no /i.test(line)
+  )
+
+  const mergedGoal = hasWeakGoal(intent.goal) && currentGoalHint ? currentGoalHint : intent.goal
+  const mergedConstraints = dedupe([...intent.constraints, ...constraintsFromContext], 6)
+
+  const contextCriteria = dedupe([...definitionOfDone, ...userIntentToPreserve], 6).filter((item) =>
+    extractMeaningfulTokens(item).length >= 3
+  )
+
+  const mergedAcceptance =
+    intent.acceptance_criteria.length === 0 ||
+    intent.acceptance_criteria.every((criterion) => hasGenericAcceptanceCriterion(criterion))
+      ? dedupe([...contextCriteria, ...intent.acceptance_criteria], 6)
+      : dedupe([...intent.acceptance_criteria, ...contextCriteria], 6)
+
+  return {
+    ...intent,
+    goal: mergedGoal,
+    constraints: mergedConstraints,
+    acceptance_criteria: mergedAcceptance.length ? mergedAcceptance : intent.acceptance_criteria
+  }
+}
+
 function hasGoalEvidence(goal: string, responseSummary: AfterPipelineRequest["response_summary"]) {
   const goalTokens = extractMeaningfulTokens(goal)
   if (!goalTokens.length) return true
@@ -1165,6 +1269,8 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       usedFallbackIntent = true
     }
   }
+
+  intent = mergeIntentWithProjectMemory(intent, parsed.project_context, parsed.current_state)
 
   const stage1Prompts = buildStage1Prompts(
     parsed.response_summary,

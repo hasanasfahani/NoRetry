@@ -550,6 +550,25 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
+  function buildCurrentAfterTargetOverride(): PendingContextAnalysis | null {
+    if (!afterAttempt) return null
+
+    const liveTarget = getCurrentAssistantResponseText()
+    const currentThread = getCurrentThreadSnapshot()
+    const responseText = lastEvaluatedAssistantTextRef.current || liveTarget.text
+    const responseIdentity = lastEvaluatedAssistantMessageIdRef.current || liveTarget.identity
+    const threadIdentity = lastEvaluatedChatHrefRef.current || currentThread.identity
+
+    if (!responseText.trim()) return null
+
+    return {
+      attempt: afterAttempt,
+      responseText,
+      responseIdentity,
+      threadIdentity
+    }
+  }
+
   function compactContextForApi(value: string, maxLength: number) {
     const normalized = value.trim()
     if (normalized.length <= maxLength) return normalized
@@ -1115,7 +1134,8 @@ export default function PromptOptimizerApp() {
     startAfterLoadingProgress("deep")
 
     try {
-      const opened = await runAfterEvaluation(true, true)
+      const targetOverride = buildCurrentAfterTargetOverride()
+      const opened = await runAfterEvaluation(true, true, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
