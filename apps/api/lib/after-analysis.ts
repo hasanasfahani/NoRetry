@@ -203,10 +203,14 @@ function mergeIntentWithProjectMemory(
     extractSectionLines(currentState, ["definition of done"])
   )
 
-  const userIntentToPreserve = extractSectionLines(projectContext, ["user intent to preserve"])
-  const constraintsFromContext = extractSectionLines(projectContext, ["constraints"]).filter(
-    (line) => /must|non-negotiable|do not|keep|without|visible|works|survive|no /i.test(line)
+  const userIntentToPreserve = extractSectionLines(projectContext, ["user intent to preserve"]).concat(
+    extractSectionLines(currentState, ["user intent to preserve"])
   )
+  const constraintsFromContext = extractSectionLines(projectContext, ["constraints"])
+    .concat(extractSectionLines(currentState, ["constraints"]))
+    .filter(
+      (line) => /must|non-negotiable|do not|keep|without|visible|works|survive|no /i.test(line)
+    )
 
   const weakGoal = hasWeakGoal(intent.goal)
   const weakCriteria =
@@ -720,11 +724,9 @@ function needsFallbackIntent(intent: AttemptIntent) {
   const weakCriteria =
     intent.acceptance_criteria.length === 0 ||
     intent.acceptance_criteria.every((criterion) => hasGenericAcceptanceCriterion(criterion))
+  const weakGoal = hasWeakGoal(intent.goal)
 
-  return (
-    intent.task_type === "other" &&
-    (weakCriteria || goalTokens.length < 3)
-  )
+  return weakCriteria || weakGoal || goalTokens.length < 3
 }
 
 function buildIntentExtractionPrompts(rawPrompt: string, projectContext = "", currentState = "") {
@@ -1326,6 +1328,54 @@ function fallbackNextPrompt(
   })
 }
 
+function buildDeepReviewPrimaryFinding(
+  intent: AttemptIntent,
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  detail: ReturnType<typeof DetailInspectionSchema.parse>
+) {
+  const supportedClaim = detail.supported_claims
+    .map((item) => normalizeWhitespace(item))
+    .find(Boolean)
+  const unresolvedRisk = detail.unresolved_risks
+    .map((item) => normalizeWhitespace(item))
+    .find(Boolean)
+  const contradiction = detail.contradictions
+    .map((item) => normalizeWhitespace(item))
+    .find(Boolean)
+  const missingCriterion = stage2.missing_criteria
+    .map((item) => normalizeCriterionLabel(item))
+    .find(Boolean)
+  const addressedCriterion = stage2.addressed_criteria
+    .map((item) => normalizeCriterionLabel(item))
+    .find(Boolean)
+
+  if (supportedClaim && missingCriterion) {
+    return `Deep review verified ${supportedClaim}, but it still does not directly prove: ${missingCriterion}.`
+  }
+
+  if (supportedClaim) {
+    return `Deep review verified ${supportedClaim} against the request.`
+  }
+
+  if (contradiction) {
+    return `Deep review found a contradiction: ${contradiction}`
+  }
+
+  if (unresolvedRisk) {
+    return `Deep review found a remaining risk: ${unresolvedRisk}`
+  }
+
+  if (missingCriterion) {
+    return `Deep review still could not directly verify: ${missingCriterion}.`
+  }
+
+  if (addressedCriterion) {
+    return `Deep review found visible support for: ${addressedCriterion}.`
+  }
+
+  return `Deep review inspected the visible answer for proof that it satisfied: ${conciseGoal(intent.goal)}.`
+}
+
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const parsed = input
   const changedFiles = summarizeChangedFiles(parsed.changed_file_paths_summary ?? [])
@@ -1535,6 +1585,14 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   const acceptanceChecklist = buildAcceptanceChecklist(intent, safeStage2, detailInspection, parsed.response_summary)
   safeVerdict = reconcileVerdictWithChecklist(safeVerdict, acceptanceChecklist, safeStage2, detailInspection)
+
+  if (deepAnalysisRequested && detailInspection.inspection_depth !== "summary_only") {
+    const deepPrimaryFinding = buildDeepReviewPrimaryFinding(intent, safeStage2, detailInspection)
+    safeVerdict = VerdictOutputSchema.parse({
+      ...safeVerdict,
+      findings: dedupe([deepPrimaryFinding, ...safeVerdict.findings], 3)
+    })
+  }
 
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
