@@ -605,20 +605,52 @@ export default function PromptOptimizerApp() {
     const previousScore = specificityScore(previousResult)
     if (nextScore >= previousScore || previousScore === 0) return nextResult
 
+    const nextChecklistIsWeak =
+      (nextResult.acceptance_checklist?.length ?? 0) === 0 ||
+      nextResult.acceptance_checklist.every((item) => isGenericChecklistLabel(item.label))
+    const nextFindingsAreWeak =
+      nextResult.findings.length === 0 ||
+      nextResult.findings.every((item) => {
+        const normalized = item.trim().toLowerCase()
+        return (
+          !normalized ||
+          normalized.includes("the user's latest request") ||
+          normalized.includes("help replit users write stronger ai prompts") ||
+          normalized.includes("the answer appears aligned with the goal")
+        )
+      })
+
     return {
       ...nextResult,
-      status: previousResult.status,
-      confidence: previousResult.confidence,
-      confidence_reason: previousResult.confidence_reason,
-      findings: previousResult.findings,
-      issues: previousResult.issues,
-      next_prompt: previousResult.next_prompt,
-      prompt_strategy: previousResult.prompt_strategy,
-      verdict: previousResult.verdict,
-      next_prompt_output: previousResult.next_prompt_output,
-      acceptance_checklist: previousResult.acceptance_checklist,
-      stage_1: previousResult.stage_1,
-      stage_2: previousResult.stage_2
+      findings: nextFindingsAreWeak ? previousResult.findings : nextResult.findings,
+      acceptance_checklist: nextChecklistIsWeak ? previousResult.acceptance_checklist : nextResult.acceptance_checklist,
+      stage_1: {
+        ...nextResult.stage_1,
+        claimed_evidence: Array.from(
+          new Map(
+            [...previousResult.stage_1.claimed_evidence, ...nextResult.stage_1.claimed_evidence].map((item) => [
+              item.trim().toLowerCase(),
+              item
+            ])
+          ).values()
+        ).filter(Boolean).slice(0, 4)
+      },
+      stage_2: nextChecklistIsWeak
+        ? {
+            ...nextResult.stage_2,
+            addressed_criteria: previousResult.stage_2.addressed_criteria,
+            missing_criteria: previousResult.stage_2.missing_criteria,
+            constraint_risks: previousResult.stage_2.constraint_risks,
+            analysis_notes: Array.from(
+              new Map(
+                [...nextResult.stage_2.analysis_notes, ...previousResult.stage_2.analysis_notes].map((item) => [
+                  item.trim().toLowerCase(),
+                  item
+                ])
+              ).values()
+            ).filter(Boolean).slice(0, 4)
+          }
+        : nextResult.stage_2
     }
   }
 

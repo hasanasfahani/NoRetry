@@ -1232,11 +1232,33 @@ function fallbackVerdict(
                 ? "NoRetry deeply reviewed the answer and found strong alignment with the requested outcome."
                 : "NoRetry found the answer aligned with the requested outcome."
               : "The answer appears aligned with the goal, but some requested details still look unconfirmed."
-            : "The answer gave limited concrete evidence, so this review is cautious."
+          : "The answer gave limited concrete evidence, so this review is cautious."
+
+  const supportedDeepEvidence = detail.supported_claims
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean)
+    .slice(0, 2)
+  const firstMissingCriterion = stage2.missing_criteria.length
+    ? normalizeCriterionLabel(stage2.missing_criteria[0])
+    : ""
+  const firstAnalysisNote = stage2.analysis_notes.find((item) => {
+    const normalized = item.trim().toLowerCase()
+    return (
+      normalized.length > 18 &&
+      !normalized.includes("the answer appears to directly deliver the requested content") &&
+      !normalized.includes("some acceptance criteria remain unverified")
+    )
+  }) || ""
 
   const primaryFinding =
     status === "WRONG_DIRECTION"
       ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${intent.goal.trim()}.`
+      : deepReviewed && supportedDeepEvidence.length && firstMissingCriterion
+        ? `Deep review verified ${supportedDeepEvidence[0]}, but it still does not clearly prove: ${firstMissingCriterion}.`
+      : deepReviewed && supportedDeepEvidence.length
+        ? `Deep review verified ${supportedDeepEvidence.join(" and ")} against the request.`
+      : deepReviewed && firstAnalysisNote
+        ? `Deep review found: ${firstAnalysisNote}`
       : !codeHeavyTask && deepReviewed && detail.evidence_strength === "weak"
         ? "NoRetry ran a deeper review, but the visible evidence is still too limited to confirm the request is fully satisfied."
       : stage2.problem_fit === "correct" && stage2.missing_criteria.length

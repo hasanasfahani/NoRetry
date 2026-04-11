@@ -239,6 +239,15 @@ function isMeaningfulDeepEvidenceItem(value: string) {
   return true
 }
 
+function isMeaningfulDeepAnalysisNote(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  if (trimmed.length < 20) return false
+  if (/^some acceptance criteria remain unverified/i.test(trimmed)) return false
+  if (/^the answer appears to directly deliver the requested content/i.test(trimmed)) return false
+  return true
+}
+
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const tone = toneForStatus(props.verdict.status)
@@ -276,8 +285,18 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
           ).values()
         ).filter(isMeaningfulDeepEvidenceItem)
       : []
+  const deepReviewAnalysisNotes =
+    activeReviewMode === "deep"
+      ? Array.from(
+          new Map(
+            props.verdict.stage_2.analysis_notes.map((item) => [item.trim().toLowerCase(), item.trim()])
+          ).values()
+        ).filter(isMeaningfulDeepAnalysisNote)
+      : []
   const deepReviewEvidenceHint =
-    activeReviewMode === "deep" && deepReviewEvidenceItems.length
+    activeReviewMode === "deep" && deepReviewAnalysisNotes.length
+      ? `Deep review found: ${deepReviewAnalysisNotes.slice(0, 2).join(" • ")}`
+      : activeReviewMode === "deep" && deepReviewEvidenceItems.length
       ? `Deep review inspected: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
       : ""
   const shouldShowLoadingProgress =
