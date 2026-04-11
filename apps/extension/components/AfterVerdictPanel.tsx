@@ -217,8 +217,6 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const tone = toneForStatus(props.verdict.status)
   const statusLabel = userFacingStatusLabel(props.verdict.status)
-  const isCodeAnswer =
-    props.verdict.response_summary.has_code_blocks || props.verdict.response_summary.mentioned_files.length > 0
   const isInitialChecking =
     props.isEvaluating &&
     !props.isDeepAnalyzing &&
@@ -227,13 +225,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const hasRealReview =
     props.verdict.response_summary.response_length > 0 ||
     (props.verdict.acceptance_checklist?.length ?? 0) > 0
-  const showDeepAnalyze =
-    !isInitialChecking &&
-    hasRealReview &&
-    !props.nextStepStarted &&
-    !isCodeAnswer &&
-    props.verdict.inspection_depth === "summary_only" &&
-    props.verdict.confidence !== "high"
+  const showModeToggle = !isInitialChecking && hasRealReview && !props.nextStepStarted
   const summarySentence =
     props.verdict.findings.find((item) => item.trim().length > 0) ||
     "NoRetry reviewed the answer against your request."
@@ -624,7 +616,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               ))}
             </ul>
             <div style={styles.checklistActions}>
-              {isCodeAnswer ? (
+              {showModeToggle ? (
                 <div style={styles.modeToggle}>
                   <button
                     type="button"
@@ -643,27 +635,6 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                     {props.isDeepAnalyzing && props.codeAnalysisMode === "deep" ? "Digging deeper..." : "Deep"}
                   </button>
                 </div>
-              ) : null}
-              {showDeepAnalyze ? (
-                <button
-                  type="button"
-                  style={styles.deepButton}
-                  onClick={props.onRunDeepAnalysis}
-                  disabled={props.isDeepAnalyzing || props.isEvaluating}
-                >
-                  {props.isDeepAnalyzing ? (
-                    <span style={styles.loadingLabel}>
-                      Digging deeper
-                      <span style={styles.loadingDots} aria-hidden="true">
-                        <span style={styles.loadingDot(0)}>.</span>
-                        <span style={styles.loadingDot(0.2)}>.</span>
-                        <span style={styles.loadingDot(0.4)}>.</span>
-                      </span>
-                    </span>
-                  ) : (
-                    "Deep Analyze"
-                  )}
-                </button>
               ) : null}
               {showStartNextStep ? (
                 <button

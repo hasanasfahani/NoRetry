@@ -1077,6 +1077,44 @@ function buildAcceptanceChecklist(
   )
 }
 
+function reconcileVerdictWithChecklist(
+  verdict: ReturnType<typeof VerdictOutputSchema.parse>,
+  checklist: ReturnType<typeof AcceptanceChecklistItemSchema.array().parse>,
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  detail: ReturnType<typeof DetailInspectionSchema.parse>
+) {
+  const metCount = checklist.filter((item) => item.status === "met").length
+  const missedCount = checklist.filter((item) => item.status === "missed").length
+  const allKnownCriteriaMet = checklist.length > 0 && metCount === checklist.length
+  const hasUnresolvedStageRisks = stage2.missing_criteria.length > 0 || stage2.constraint_risks.length > 0
+
+  let status = verdict.status
+  let confidence = verdict.confidence
+  let confidenceReason = verdict.confidence_reason
+  let findings = verdict.findings
+
+  if (allKnownCriteriaMet && stage2.problem_fit === "correct" && !hasUnresolvedStageRisks) {
+    status = detail.inspection_depth === "summary_only" ? "LIKELY_SUCCESS" : "SUCCESS"
+    if (confidence === "low") confidence = "medium"
+  } else if ((status === "FAILED" || status === "WRONG_DIRECTION") && metCount >= 2 && missedCount === 0) {
+    status = "PARTIAL"
+    confidence = confidence === "high" ? "medium" : confidence
+    confidenceReason = "The answer still needs review, but the visible checklist shows meaningful alignment with the request."
+    findings = [
+      "The answer shows meaningful progress against the request, but NoRetry still found gaps or weak evidence in the overall review.",
+      ...verdict.findings.slice(1)
+    ].slice(0, 3)
+  }
+
+  return VerdictOutputSchema.parse({
+    ...verdict,
+    status,
+    confidence,
+    confidence_reason: confidenceReason,
+    findings
+  })
+}
+
 function fallbackVerdict(
   intent: AttemptIntent,
   responseSummary: AfterPipelineRequest["response_summary"],
@@ -1456,6 +1494,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     safeNextPrompt = nextPromptOutput ?? safeNextPrompt
   }
 
+  const acceptanceChecklist = buildAcceptanceChecklist(intent, safeStage2, detailInspection, parsed.response_summary)
+  safeVerdict = reconcileVerdictWithChecklist(safeVerdict, acceptanceChecklist, safeStage2, detailInspection)
+
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
@@ -1469,7 +1510,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     stage_2: safeStage2,
     verdict: safeVerdict,
     next_prompt_output: safeNextPrompt,
-    acceptance_checklist: buildAcceptanceChecklist(intent, safeStage2, detailInspection, parsed.response_summary),
+    acceptance_checklist: acceptanceChecklist,
     response_summary: parsed.response_summary,
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal

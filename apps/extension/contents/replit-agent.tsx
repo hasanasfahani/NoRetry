@@ -550,6 +550,54 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
+  function isGenericChecklistLabel(label: string) {
+    const normalized = label.trim().toLowerCase()
+    return (
+      !normalized ||
+      normalized === "solve the requested task" ||
+      normalized === "solve: the user's latest request" ||
+      normalized === "solve: the user’s latest request" ||
+      normalized === "solve: the users latest request"
+    )
+  }
+
+  function specificityScore(result: AfterAnalysisResult | null) {
+    if (!result) return 0
+
+    const checklistScore = (result.acceptance_checklist ?? []).reduce((score, item) => {
+      if (isGenericChecklistLabel(item.label)) return score
+      return score + Math.min(item.label.trim().length, 80)
+    }, 0)
+
+    const findingScore = result.findings.reduce((score, item) => {
+      const normalized = item.trim().toLowerCase()
+      if (!normalized) return score
+      if (normalized.includes("the user's latest request")) return score
+      if (normalized.includes("help replit users write stronger ai prompts")) return score
+      return score + Math.min(item.trim().length, 120)
+    }, 0)
+
+    return checklistScore + findingScore
+  }
+
+  function preserveStrongerReviewContext(
+    nextResult: AfterAnalysisResult,
+    previousResult: AfterAnalysisResult | null
+  ) {
+    if (!previousResult) return nextResult
+
+    const nextScore = specificityScore(nextResult)
+    const previousScore = specificityScore(previousResult)
+    if (nextScore >= previousScore || previousScore === 0) return nextResult
+
+    return {
+      ...nextResult,
+      findings: previousResult.findings,
+      acceptance_checklist: previousResult.acceptance_checklist,
+      stage_2: previousResult.stage_2
+    }
+  }
+
   function buildCurrentAfterTargetOverride(): PendingContextAnalysis | null {
     if (!afterAttempt) return null
 
@@ -618,7 +666,7 @@ export default function PromptOptimizerApp() {
       const compactProjectMemory = getCompactProjectMemory()
       const responseSummary = preprocessResponse(text)
       const changedFiles = collectChangedFilesSummary()
-      const result = await analyzeAfterAttempt({
+      const rawResult = await analyzeAfterAttempt({
         attempt,
         response_summary: responseSummary,
         response_text_fallback: text,
@@ -628,6 +676,8 @@ export default function PromptOptimizerApp() {
         error_summary: collectVisibleErrorSummary(),
         changed_file_paths_summary: changedFiles
       })
+      const result =
+        deepAnalysis && afterVerdict ? preserveStrongerReviewContext(rawResult, afterVerdict) : rawResult
       if (requestId !== afterEvaluationRequestIdRef.current) {
         return false
       }
