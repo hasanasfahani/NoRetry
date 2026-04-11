@@ -161,11 +161,17 @@ function looksLikeCode(value: string) {
 }
 
 function normalizeCriterionLabel(value: string) {
-  return value
+  const normalized = value
     .replace(/^prove the answer solved this goal:\s*/i, "")
     .replace(/\(already implemented\)/gi, "")
     .replace(/\s+/g, " ")
     .trim()
+
+  if (!normalized || /^solve:\s*$/i.test(normalized)) {
+    return "Solve the requested task"
+  }
+
+  return normalized
 }
 
 function responseIsMostlyCode(responseText: string) {
@@ -930,6 +936,8 @@ function fallbackVerdict(
   const primaryFinding =
     status === "WRONG_DIRECTION"
       ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${intent.goal.trim()}.`
+      : !codeHeavyTask && deepReviewed && detail.evidence_strength === "weak"
+        ? "NoRetry ran a deeper review, but the visible evidence is still too limited to confirm the request is fully satisfied."
       : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
         ? `The answer appears aligned with the goal: ${intent.goal.trim()}.`
         : stage2.problem_fit === "correct"

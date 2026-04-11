@@ -160,7 +160,8 @@ function deriveAcceptanceCriteriaFromSubmittedPrompt(prompt: string) {
     return [fallbackCoreTask]
   }
 
-  return [`Solve: ${conciseGoal(prompt.trim())}`]
+  const fallbackGoal = conciseGoal(prompt.trim()) || "the user's latest request"
+  return [`Solve: ${fallbackGoal}`]
 }
 
 export function mapPromptIntentToTaskType(intent: PromptIntent | undefined): UnifiedTaskType {

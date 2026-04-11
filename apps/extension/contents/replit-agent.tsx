@@ -188,6 +188,7 @@ export default function PromptOptimizerApp() {
   const analysisRequestIdRef = useRef(0)
   const lastFocusedPromptRef = useRef<HTMLElement | null>(null)
   const lastPromptValueRef = useRef("")
+  const lastStablePromptValueRef = useRef("")
   const latestAssistantNodeRef = useRef<HTMLElement | null>(null)
   const lastEvaluatedAssistantTextRef = useRef("")
   const lastEvaluatedAssistantMessageIdRef = useRef("")
@@ -497,8 +498,15 @@ export default function PromptOptimizerApp() {
 
   async function ensureSubmittedAttempt() {
     const userMessage = getCurrentUserSnapshot().text.trim()
+    const submittedPrompt = pendingPromptRef.current?.prompt.trim() ?? ""
     const draftPrompt = getCurrentDraftSnapshot().text.trim()
-    const inferredPrompt = userMessage || draftPrompt || lastPromptValueRef.current.trim() || promptPreview.trim()
+    const inferredPrompt =
+      userMessage ||
+      submittedPrompt ||
+      draftPrompt ||
+      lastStablePromptValueRef.current.trim() ||
+      lastPromptValueRef.current.trim() ||
+      promptPreview.trim()
     const normalizedPrompt = inferredPrompt.trim()
     const latestSubmitted = await getLatestSubmittedAttempt()
     if (shouldReuseLatestSubmittedAttempt({ normalizedPrompt, latestSubmitted })) {
@@ -767,6 +775,9 @@ export default function PromptOptimizerApp() {
       const previousPromptValue = lastPromptValueRef.current
       const promptChanged = prompt !== previousPromptValue
       lastPromptValueRef.current = prompt
+      if (prompt.trim()) {
+        lastStablePromptValueRef.current = prompt.trim()
+      }
       setPromptPreview(prompt.slice(0, 220))
       setIssueVisible(false)
       setDiagnosis(null)
@@ -1216,7 +1227,9 @@ export default function PromptOptimizerApp() {
     const draftSnapshot = getCurrentDraftSnapshot()
     if (!draftSnapshot.exists || !afterPlanningGoal.trim()) return
 
-    getActiveSurfaceAdapter().writeDraftPrompt(afterPlanningGoal.trim())
+    const normalizedPlanningGoal = afterPlanningGoal.trim()
+    lastStablePromptValueRef.current = normalizedPlanningGoal
+    getActiveSurfaceAdapter().writeDraftPrompt(normalizedPlanningGoal)
     const sourcePrompt = promptPreview || getCurrentDraftSnapshot().text
     await saveDraftAttempt(sourcePrompt, afterPlanningGoal.trim())
     setAfterPanelOpen(false)
@@ -1514,7 +1527,9 @@ export default function PromptOptimizerApp() {
     const draftSnapshot = getCurrentDraftSnapshot()
     if (!draftSnapshot.exists || !afterNextPromptReady || !afterNextPromptDraft.trim()) return
 
-    getActiveSurfaceAdapter().writeDraftPrompt(afterNextPromptDraft.trim())
+    const normalizedNextPrompt = afterNextPromptDraft.trim()
+    lastStablePromptValueRef.current = normalizedNextPrompt
+    getActiveSurfaceAdapter().writeDraftPrompt(normalizedNextPrompt)
     const sourcePrompt = promptPreview || getCurrentDraftSnapshot().text
     if (projectMemoryKey && projectMemoryLabel && hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current) {
       projectMemoryAwaitingFreshAnswerRef.current = false
@@ -1593,6 +1608,7 @@ export default function PromptOptimizerApp() {
     if (!input) return
     const prompt = readPromptValue(input).trim()
     if (!prompt) return
+    lastStablePromptValueRef.current = prompt
 
     const now = Date.now()
     const retryCount =

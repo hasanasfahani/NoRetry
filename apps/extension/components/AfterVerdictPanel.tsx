@@ -175,6 +175,10 @@ const FRIENDLY_CHECK_LABELS: Record<string, string> = {
 }
 
 function humanizeChecklistLabel(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed || /^solve:\s*$/i.test(trimmed)) {
+    return "Solve the requested task"
+  }
   const normalized = value.trim().toLowerCase()
   if (FRIENDLY_CHECK_LABELS[normalized]) return FRIENDLY_CHECK_LABELS[normalized]
   if (/^the answer did not clearly/i.test(value)) {
@@ -225,6 +229,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     hasRealReview &&
     !props.nextStepStarted &&
     !isCodeAnswer &&
+    props.verdict.inspection_depth === "summary_only" &&
     props.verdict.confidence !== "high"
   const summarySentence =
     props.verdict.findings.find((item) => item.trim().length > 0) ||
@@ -237,6 +242,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const confidenceTone = toneForConfidence(props.verdict.confidence)
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const reviewTone = toneForReview(props.verdict.inspection_depth)
+  const deepReviewLimitedHint =
+    props.verdict.inspection_depth !== "summary_only" && props.verdict.confidence === "low"
+      ? props.verdict.confidence_reason || "Deep review ran, but the visible evidence is still limited."
+      : ""
   const shouldShowLoadingProgress =
     Boolean(props.loadingProgress) && (props.isEvaluating || props.isDeepAnalyzing) && !isPlannerOnlyState
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
@@ -579,6 +588,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   Review: {reviewTone.label}
                 </span>
               </p>
+              {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
             </div>
           </div>
         </div>
@@ -635,7 +645,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                       </span>
                     </span>
                   ) : (
-                    props.verdict.inspection_depth === "summary_only" ? "Deep Analyze" : "Analyze Again"
+                    "Deep Analyze"
                   )}
                 </button>
               ) : null}
@@ -1167,6 +1177,13 @@ const styles = {
     fontSize: 13,
     lineHeight: 1.45,
     color: "#475569"
+  } as CSSProperties,
+  statusHint: {
+    margin: "6px 0 0",
+    fontSize: 13,
+    lineHeight: 1.55,
+    color: "#64748b",
+    maxWidth: 520
   } as CSSProperties,
   metaChip: (bg: string, fg: string, border: string): CSSProperties => ({
     display: "inline-flex",
