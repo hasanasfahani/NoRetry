@@ -27,6 +27,7 @@ function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
   const codeAnswer =
     input.analysis.response_summary.has_code_blocks || input.analysis.response_summary.mentioned_files.length > 0
   const planningGoal = input.planning_goal.trim()
+  const projectHint = [input.project_context.trim(), input.current_state.trim()].filter(Boolean).join(" ")
 
   const levelCandidates: Record<number, ClarificationQuestion[]> = {
     1: [
@@ -52,7 +53,9 @@ function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
         id: "after_level2_scope",
         label: planningGoal
           ? `How should the next prompt move toward: ${planningGoal}?`
-          : `How should the next prompt handle ${issue}?`,
+          : projectHint
+            ? "Which part of the current project situation should the next prompt focus on first?"
+            : `How should the next prompt handle ${issue}?`,
         helper: "Choose how tightly NoRetry should steer the next response.",
         mode: "single",
         options: ["Address it directly", "Ask for proof", "Keep scope very tight", "Retry cleanly", "Other"]
@@ -116,6 +119,7 @@ function buildPrompts(input: AfterNextQuestionRequest) {
     : input.planning_goal
       ? `L1 planning goal: ${input.planning_goal}`
       : ""
+  const contextSummary = [input.project_context.trim(), input.current_state.trim()].filter(Boolean).join("\n\n")
 
   const hasPlanningRoot = Boolean(input.planning_goal.trim()) && input.asked_questions.length === 0
   const targetLevel =
@@ -133,6 +137,8 @@ function buildPrompts(input: AfterNextQuestionRequest) {
   const userPrompt = JSON.stringify({
     submitted_prompt: input.attempt.raw_prompt,
     planning_goal: input.planning_goal,
+    project_context: input.project_context,
+    current_state: input.current_state,
     task_type: input.attempt.intent.task_type,
     verdict_status: input.analysis.status,
     findings: input.analysis.findings.slice(0, 3),
@@ -147,7 +153,8 @@ function buildPrompts(input: AfterNextQuestionRequest) {
     target_level: targetLevel,
     asked_questions: askedLabels,
     answers_so_far: answerPairs,
-    branch_summary: branchSummary
+    branch_summary: branchSummary,
+    context_summary: contextSummary
   })
 
   return { systemPrompt, userPrompt, targetLevel }

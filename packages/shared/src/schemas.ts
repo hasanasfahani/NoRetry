@@ -261,7 +261,9 @@ export const AfterPipelineRequestSchema = z.object({
   attempt: AttemptSchema,
   response_summary: ResponsePreprocessorOutputSchema,
   response_text_fallback: z.string().default(""),
-  deep_analysis: z.boolean().default(false)
+  deep_analysis: z.boolean().default(false),
+  project_context: z.string().max(4000).default(""),
+  current_state: z.string().max(3000).default("")
 })
 
 export const AfterPipelineResponseSchema = AfterAnalysisResultSchema
@@ -273,6 +275,8 @@ export const AfterNextQuestionRequestSchema = z.object({
   question_levels: z.record(z.number().int().min(1).max(8)).default({}),
   answers: z.record(z.string()).default({}),
   planning_goal: z.string().max(240).default(""),
+  project_context: z.string().max(4000).default(""),
+  current_state: z.string().max(3000).default(""),
   current_level: z.number().int().min(1).max(8).default(1),
   request_kind: z.enum(["next_level", "expand_level"]).default("next_level")
 })

@@ -503,21 +503,28 @@ function needsFallbackIntent(intent: AttemptIntent) {
   return intent.task_type === "other" && intent.constraints.length === 0 && intent.acceptance_criteria.length === 0
 }
 
-function buildIntentExtractionPrompts(rawPrompt: string) {
+function buildIntentExtractionPrompts(rawPrompt: string, projectContext = "", currentState = "") {
   return {
     system:
       "Extract intent for an AI debugging loop. Return JSON only with keys: task_type, goal, constraints, acceptance_criteria. Keep it minimal and do not invent detailed constraints.",
-    user: JSON.stringify({ raw_prompt: rawPrompt })
+    user: JSON.stringify({ raw_prompt: rawPrompt, project_context: projectContext, current_state: currentState })
   }
 }
 
-function buildStage1Prompts(payload: AfterPipelineRequest["response_summary"], intent: AttemptIntent) {
+function buildStage1Prompts(
+  payload: AfterPipelineRequest["response_summary"],
+  intent: AttemptIntent,
+  projectContext = "",
+  currentState = ""
+) {
   return {
     system:
       "Summarize what the assistant appears to have done. Return JSON only with keys: assistant_action_summary, claimed_evidence, response_mode, scope_assessment.",
     user: JSON.stringify({
       intent_goal: compressGoal(intent.goal),
       task_type: intent.task_type,
+      project_context: projectContext,
+      current_state: currentState,
       response_summary: {
         response_length: payload.response_length,
         has_code_blocks: payload.has_code_blocks,
@@ -537,7 +544,9 @@ function buildStage1Prompts(payload: AfterPipelineRequest["response_summary"], i
 function buildStage2Prompts(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
-  candidates: EvidenceCandidate[]
+  candidates: EvidenceCandidate[],
+  projectContext = "",
+  currentState = ""
 ) {
   return {
     system:
@@ -548,6 +557,8 @@ function buildStage2Prompts(
         constraints: intent.constraints.slice(0, 4),
         acceptance_criteria: intent.acceptance_criteria.slice(0, 4)
       },
+      project_context: projectContext,
+      current_state: currentState,
       stage_1: stage1,
       candidates: candidates.map((candidate) => ({
         id: candidate.id,
@@ -563,7 +574,9 @@ function buildStage3Prompts(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof EvidenceTargetingSchema.parse>,
-  selectedEvidence: EvidenceCandidate[]
+  selectedEvidence: EvidenceCandidate[],
+  projectContext = "",
+  currentState = ""
 ) {
   return {
     system:
@@ -574,6 +587,8 @@ function buildStage3Prompts(
         constraints: intent.constraints.slice(0, 4),
         acceptance_criteria: intent.acceptance_criteria.slice(0, 4)
       },
+      project_context: projectContext,
+      current_state: currentState,
       stage_1: stage1,
       stage_2: stage2,
       selected_evidence: selectedEvidence.map((candidate) => ({
@@ -590,13 +605,17 @@ function buildStage4Prompts(
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
-  responseSummary: AfterPipelineRequest["response_summary"]
+  responseSummary: AfterPipelineRequest["response_summary"],
+  projectContext = "",
+  currentState = ""
 ) {
   return {
     system:
       "Generate a trustworthy verdict for the AI response. Prefer UNVERIFIED over success when evidence is weak. Return JSON only with keys: status, confidence, findings, issues.",
     user: JSON.stringify({
       intent,
+      project_context: projectContext,
+      current_state: currentState,
       stage_1: stage1,
       stage_2: stage2,
       detail_inspection: detail,
@@ -617,7 +636,9 @@ function buildStage5Prompts(
   optimizedPrompt: string,
   intent: AttemptIntent,
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
-  stage2: ReturnType<typeof Stage2OutputSchema.parse>
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  projectContext = "",
+  currentState = ""
 ) {
   return {
     system:
@@ -625,6 +646,8 @@ function buildStage5Prompts(
     user: JSON.stringify({
       optimized_prompt: optimizedPrompt,
       intent,
+      project_context: projectContext,
+      current_state: currentState,
       verdict,
       missing_criteria: stage2.missing_criteria,
       constraint_risks: stage2.constraint_risks
@@ -851,6 +874,14 @@ function fallbackVerdict(
           : "high"
       : strongAlignedOutcome
         ? "high"
+      : codeHeavyTask &&
+          deepReviewed &&
+          stage2.problem_fit === "correct" &&
+          stage2.addressed_criteria.length > 0 &&
+          !detail.contradictions.length
+        ? hasConcreteEvidence
+          ? "medium"
+          : "low"
       : usedFallbackIntent
         ? "low"
         : detail.inspection_depth === "summary_only"
@@ -974,7 +1005,11 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const elapsed = () => Date.now() - startedAt
 
   if (needsFallbackIntent(intent)) {
-    const prompts = buildIntentExtractionPrompts(parsed.attempt.raw_prompt)
+    const prompts = buildIntentExtractionPrompts(
+      parsed.attempt.raw_prompt,
+      parsed.project_context,
+      parsed.current_state
+    )
     const maxTokens = tokenUsageTotal >= budgetSoftLimit ? 140 : 220
     const extracted = await callStructuredJson(
       prompts.system,
@@ -989,7 +1024,12 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     }
   }
 
-  const stage1Prompts = buildStage1Prompts(parsed.response_summary, intent)
+  const stage1Prompts = buildStage1Prompts(
+    parsed.response_summary,
+    intent,
+    parsed.project_context,
+    parsed.current_state
+  )
   const stage1 = await callStructuredJson(
     stage1Prompts.system,
     stage1Prompts.user,
@@ -1010,7 +1050,13 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   })
 
   if (shouldZoomIn) {
-    const stage2Prompts = buildStage2Prompts(intent, safeStage1, evidenceCandidates)
+    const stage2Prompts = buildStage2Prompts(
+      intent,
+      safeStage1,
+      evidenceCandidates,
+      parsed.project_context,
+      parsed.current_state
+    )
     const stage2Targeting = await callStructuredJson(
       stage2Prompts.system,
       stage2Prompts.user,
@@ -1037,7 +1083,14 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   let detailInspection = fallbackDetailInspection(selectedEvidence, parsed.response_summary)
   if (selectedEvidence.length && elapsed() < stageSoftDeadline) {
-    const stage3Prompts = buildStage3Prompts(intent, safeStage1, targetedEvidence, selectedEvidence)
+    const stage3Prompts = buildStage3Prompts(
+      intent,
+      safeStage1,
+      targetedEvidence,
+      selectedEvidence,
+      parsed.project_context,
+      parsed.current_state
+    )
     const detail = await callStructuredJson(
       stage3Prompts.system,
       stage3Prompts.user,
@@ -1079,7 +1132,15 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   let safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
   if (elapsed() < stageSoftDeadline) {
-    const stage4Prompts = buildStage4Prompts(intent, safeStage1, safeStage2, detailInspection, parsed.response_summary)
+    const stage4Prompts = buildStage4Prompts(
+      intent,
+      safeStage1,
+      safeStage2,
+      detailInspection,
+      parsed.response_summary,
+      parsed.project_context,
+      parsed.current_state
+    )
     const verdict = await callStructuredJson(
       stage4Prompts.system,
       stage4Prompts.user,
@@ -1091,7 +1152,14 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   }
 
   if (elapsed() < stageSoftDeadline) {
-    const stage5Prompts = buildStage5Prompts(parsed.attempt.optimized_prompt, intent, safeVerdict, safeStage2)
+    const stage5Prompts = buildStage5Prompts(
+      parsed.attempt.optimized_prompt,
+      intent,
+      safeVerdict,
+      safeStage2,
+      parsed.project_context,
+      parsed.current_state
+    )
     const nextPromptOutput = await callStructuredJson(
       stage5Prompts.system,
       stage5Prompts.user,

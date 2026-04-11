@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react"
+import { useEffect, useRef, type CSSProperties } from "react"
 import type { AfterAnalysisResult } from "@prompt-optimizer/shared"
 import type { ClarificationQuestion } from "@prompt-optimizer/shared/src/schemas"
 
@@ -6,9 +6,11 @@ type AfterVerdictPanelProps = {
   verdict: AfterAnalysisResult
   isEvaluating: boolean
   isDeepAnalyzing: boolean
+  loadingProgress: { percent: number; label: string } | null
   codeAnalysisMode: "quick" | "deep"
   nextStepStarted: boolean
   planningGoal: string
+  planningGoalNotice: string
   nextQuestionHistory: ClarificationQuestion[]
   nextQuestions: ClarificationQuestion[]
   nextAnswerState: Record<string, string>
@@ -18,9 +20,15 @@ type AfterVerdictPanelProps = {
   isGeneratingNextPrompt: boolean
   nextPromptDraft: string
   nextPromptReady: boolean
+  projectMemoryEnabled: boolean
+  projectMemoryExists: boolean
+  projectMemoryLabel: string
+  projectHandoffDraft: string
+  isSavingProjectMemory: boolean
   suggestedDirectionChips: { id: string; label: string }[]
   activeSuggestionChipId: string | null
   hasUsedSuggestedDirection: boolean
+  recentlyAnsweredQuestionId: string | null
   onRunDeepAnalysis: () => void
   onSelectCodeAnalysisMode: (mode: "quick" | "deep") => void
   onStartNextStep: () => void
@@ -35,6 +43,9 @@ type AfterVerdictPanelProps = {
   onNextPromptDraftChange: (value: string) => void
   onGenerateNextPrompt: () => void
   onSubmitNextPrompt: () => void
+  onProjectHandoffChange: (value: string) => void
+  onCopyProjectContextRequest: () => void
+  onSaveProjectMemory: () => void
   onClose: () => void
 }
 
@@ -53,6 +64,23 @@ function toneForStatus(status: AfterAnalysisResult["status"]) {
   }
 }
 
+function userFacingStatusLabel(status: AfterAnalysisResult["status"]) {
+  switch (status) {
+    case "SUCCESS":
+      return "Looks Good"
+    case "LIKELY_SUCCESS":
+      return "Probably Good"
+    case "PARTIAL":
+      return "Needs More Work"
+    case "FAILED":
+      return "Didn't Work"
+    case "WRONG_DIRECTION":
+      return "Off Track"
+    default:
+      return "Needs Review"
+  }
+}
+
 function toneForConfidence(confidence: AfterAnalysisResult["confidence"]) {
   switch (confidence) {
     case "high":
@@ -61,6 +89,17 @@ function toneForConfidence(confidence: AfterAnalysisResult["confidence"]) {
       return { bg: "#fef3c7", fg: "#b45309", border: "rgba(180,83,9,0.16)" }
     default:
       return { bg: "#e2e8f0", fg: "#475569", border: "rgba(71,85,105,0.16)" }
+  }
+}
+
+function userFacingEvidenceLabel(confidence: AfterAnalysisResult["confidence"]) {
+  switch (confidence) {
+    case "high":
+      return "strong"
+    case "medium":
+      return "moderate"
+    default:
+      return "limited"
   }
 }
 
@@ -153,9 +192,20 @@ function humanizeChecklistLabel(value: string) {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
+function improvementLabel(answeredCount: number, isAddingNextQuestions: boolean, nextPromptReady: boolean) {
+  if (nextPromptReady) return "Prompt ready"
+  if (isAddingNextQuestions) return "Sharpening the next branch"
+  if (answeredCount >= 4) return "Execution path clearer"
+  if (answeredCount >= 3) return "Constraints captured"
+  if (answeredCount >= 2) return "Output clarified"
+  if (answeredCount >= 1) return "Scope narrowed"
+  return "Direction set"
+}
+
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const tone = toneForStatus(props.verdict.status)
+  const statusLabel = userFacingStatusLabel(props.verdict.status)
   const isCodeAnswer =
     props.verdict.response_summary.has_code_blocks || props.verdict.response_summary.mentioned_files.length > 0
   const isInitialChecking =
@@ -163,8 +213,12 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     !props.isDeepAnalyzing &&
     props.verdict.findings.length === 1 &&
     props.verdict.findings[0] === "Checking the latest change."
+  const hasRealReview =
+    props.verdict.response_summary.response_length > 0 ||
+    (props.verdict.acceptance_checklist?.length ?? 0) > 0
   const showDeepAnalyze =
     !isInitialChecking &&
+    hasRealReview &&
     !props.nextStepStarted &&
     !isCodeAnswer &&
     props.verdict.confidence !== "high" &&
@@ -172,12 +226,16 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const summarySentence =
     props.verdict.findings.find((item) => item.trim().length > 0) ||
     "NoRetry reviewed the answer against your request."
+  const isPlannerOnlyState = !hasRealReview && props.nextStepStarted
   const checklistItems = (props.verdict.acceptance_checklist ?? []).map((item) => ({
     label: humanizeChecklistLabel(item.label),
     marker: item.status === "met" ? "✅" : item.status === "missed" ? "🚫" : "(not sure)"
   }))
   const confidenceTone = toneForConfidence(props.verdict.confidence)
+  const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const reviewTone = toneForReview(props.verdict.inspection_depth)
+  const shouldShowLoadingProgress =
+    Boolean(props.loadingProgress) && (props.isEvaluating || props.isDeepAnalyzing) && !isPlannerOnlyState
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
   const activeNextQuestion = visibleQuestions[props.activeNextQuestionIndex] ?? null
   const answeredNextCount = visibleQuestions.filter((question) => {
@@ -188,8 +246,47 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const canGenerateNextPrompt = answeredNextCount > 0 && !props.isGeneratingNextPrompt
   const activeNextQuestionUsesOther =
     activeNextQuestion != null && props.nextAnswerState[activeNextQuestion.id] === otherOption
-  const showStartNextStep = !isInitialChecking && !props.nextStepStarted
+  const showStartNextStep = !isInitialChecking && hasRealReview && !props.nextStepStarted
   const showPlanningGoalEntry = props.nextStepStarted && visibleQuestions.length === 0
+  const hasStructuredPlanningDirection =
+    props.hasUsedSuggestedDirection || /^\s*\d+\.\s/m.test(props.planningGoal)
+  const originalPromptPreview =
+    !hasRealReview && props.planningGoal.trim() ? props.planningGoal.trim() : ""
+  const planningTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const nextStepSectionRef = useRef<HTMLDivElement | null>(null)
+  const nextPromptSectionRef = useRef<HTMLDivElement | null>(null)
+  const questionTabsRef = useRef<HTMLDivElement | null>(null)
+  const improvement = improvementLabel(answeredNextCount, props.isAddingNextQuestions, props.nextPromptReady)
+
+  useEffect(() => {
+    if (!props.planningGoalNotice || !planningTextareaRef.current) return
+
+    planningTextareaRef.current.scrollTop = planningTextareaRef.current.scrollHeight
+    planningTextareaRef.current.focus()
+    planningTextareaRef.current.setSelectionRange(
+      planningTextareaRef.current.value.length,
+      planningTextareaRef.current.value.length
+    )
+    planningTextareaRef.current.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [props.planningGoalNotice, props.planningGoal])
+
+  useEffect(() => {
+    if (!props.nextStepStarted || !nextStepSectionRef.current) return
+
+    nextStepSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [props.nextStepStarted])
+
+  useEffect(() => {
+    if (!props.nextPromptReady || !nextPromptSectionRef.current) return
+
+    nextPromptSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [props.nextPromptReady])
+
+  useEffect(() => {
+    if (!props.isAddingNextQuestions || !questionTabsRef.current) return
+
+    questionTabsRef.current.scrollIntoView({ behavior: "smooth", block: "center" })
+  }, [props.isAddingNextQuestions])
 
   return (
     <>
@@ -209,40 +306,88 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             0%, 100% { transform: scale(0.72); opacity: 0.24; }
             50% { transform: scale(1); opacity: 1; }
           }
+          @keyframes afterAnswerCelebrate {
+            0% { transform: scale(0.96); box-shadow: 0 0 0 0 rgba(99,102,241,0.18); }
+            45% { transform: scale(1.04); box-shadow: 0 0 0 8px rgba(99,102,241,0.12); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(99,102,241,0); }
+          }
+          @keyframes afterRewardFloat {
+            0% { transform: translateY(0) scale(0.88); opacity: 0; }
+            12% { transform: translateY(-4px) scale(1); opacity: 1; }
+            72% { transform: translateY(-24px) scale(1); opacity: 1; }
+            100% { transform: translateY(-34px) scale(0.96); opacity: 0; }
+          }
         `}
       </style>
       <button type="button" style={styles.scrim} onClick={props.onClose} aria-label="Close verdict panel" />
       <section style={styles.panel(tone.border)}>
-        <div style={styles.header}>
-          <div>
-            <p style={styles.eyebrow}>After response</p>
-            <span style={styles.badge(tone.badgeBg, tone.badgeFg)}>{props.verdict.status}</span>
+        <div style={styles.heroSurface}>
+          <div style={styles.header}>
+            <div>
+              <p style={styles.eyebrow}>After response</p>
+            <span style={styles.badge(tone.badgeBg, tone.badgeFg)}>
+              {isPlannerOnlyState ? "No answer yet" : statusLabel}
+            </span>
+            </div>
+            <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
+              x
+            </button>
           </div>
-          <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
-            x
-          </button>
-        </div>
 
-        <div style={styles.block}>
-          <p style={styles.blockTitle}>Analysis Summary</p>
-          <div style={styles.summaryRow}>
-            <p style={styles.summarySentence}>
-              {summarySentence}
-              {props.isEvaluating && !props.isDeepAnalyzing ? (
-                <span style={styles.inlinePulseWrap}>
-                  <span style={styles.pulseBadge}>
-                    <span style={styles.pulseInner}>
-                      <LightningPulseIcon />
+          <div style={styles.block}>
+            <p style={styles.blockTitle}>Analysis Summary</p>
+            {hasRealReview ? (
+              <p style={styles.summaryContext}>Based on your latest submitted prompt and latest visible answer.</p>
+            ) : isPlannerOnlyState ? (
+              <p style={styles.summaryContext}>NoRetry is ready to help shape the next prompt before any answer exists.</p>
+            ) : null}
+            <div style={styles.summaryRow}>
+              <p style={styles.summarySentence}>
+                {summarySentence}
+                {props.isEvaluating && !props.isDeepAnalyzing ? (
+                  <span style={styles.inlinePulseWrap}>
+                    <span style={styles.pulseBadge}>
+                      <span style={styles.pulseInner}>
+                        <LightningPulseIcon />
+                      </span>
                     </span>
                   </span>
+                ) : null}
+              </p>
+            </div>
+            {shouldShowLoadingProgress ? (
+              <div style={styles.loadingProgressWrap}>
+                <div style={styles.loadingProgressMeta}>
+                  <span style={styles.loadingPercent}>{props.loadingProgress?.percent ?? 0}%</span>
+                  <span style={styles.loadingStageLabel}>{props.loadingProgress?.label}</span>
+                </div>
+                <div style={styles.loadingTrack}>
+                  <div
+                    style={styles.loadingTrackFill(props.loadingProgress?.percent ?? 0)}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div style={styles.footer}>
+            <div style={styles.confidenceBlock}>
+              <p style={styles.blockTitle}>Analysis Status</p>
+              <p style={styles.statusMeta}>
+                <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
+                  Evidence: {evidenceLabel}
                 </span>
-              ) : null}
-            </p>
+                <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
+                  Review: {reviewTone.label}
+                </span>
+              </p>
+            </div>
           </div>
         </div>
 
         {checklistItems.length ? (
-          <div style={styles.block}>
+          <div style={styles.subtleSurface}>
+            <p style={styles.criteriaCaption}>Checked against your submitted prompt</p>
             <ul style={styles.list}>
               {checklistItems.map((item) => (
                 <li key={item.label} style={styles.listItem}>
@@ -254,91 +399,139 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 </li>
               ))}
             </ul>
+            <div style={styles.checklistActions}>
+              {isCodeAnswer ? (
+                <div style={styles.modeToggle}>
+                  <button
+                    type="button"
+                    style={styles.modeButton(props.codeAnalysisMode === "quick")}
+                    onClick={() => props.onSelectCodeAnalysisMode("quick")}
+                    disabled={props.isEvaluating || props.isDeepAnalyzing}
+                  >
+                    Quick
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.modeButton(props.codeAnalysisMode === "deep")}
+                    onClick={() => props.onSelectCodeAnalysisMode("deep")}
+                    disabled={props.isEvaluating || props.isDeepAnalyzing}
+                  >
+                    {props.isDeepAnalyzing && props.codeAnalysisMode === "deep" ? "Digging deeper..." : "Deep"}
+                  </button>
+                </div>
+              ) : null}
+              {showDeepAnalyze ? (
+                <button
+                  type="button"
+                  style={styles.deepButton}
+                  onClick={props.onRunDeepAnalysis}
+                  disabled={props.isDeepAnalyzing || props.isEvaluating}
+                >
+                  {props.isDeepAnalyzing ? (
+                    <span style={styles.loadingLabel}>
+                      Digging deeper
+                      <span style={styles.loadingDots} aria-hidden="true">
+                        <span style={styles.loadingDot(0)}>.</span>
+                        <span style={styles.loadingDot(0.2)}>.</span>
+                        <span style={styles.loadingDot(0.4)}>.</span>
+                      </span>
+                    </span>
+                  ) : (
+                    "Deep Analyze"
+                  )}
+                </button>
+              ) : null}
+              {showStartNextStep ? (
+                <button
+                  type="button"
+                  style={styles.copyButton}
+                  onClick={props.onStartNextStep}
+                  disabled={props.isEvaluating || props.isDeepAnalyzing}
+                >
+                  Start Next Step
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
-        <div style={styles.footer}>
-          <div style={styles.confidenceBlock}>
-            <p style={styles.blockTitle}>Analysis Status</p>
-            <p style={styles.statusMeta}>
-              <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
-                Confidence: {props.verdict.confidence}
-              </span>
-              <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
-                Review: {reviewTone.label}
-              </span>
-            </p>
-          </div>
-          <div style={styles.actions}>
-            {isCodeAnswer ? (
-              <div style={styles.modeToggle}>
-                <button
-                  type="button"
-                  style={styles.modeButton(props.codeAnalysisMode === "quick")}
-                  onClick={() => props.onSelectCodeAnalysisMode("quick")}
-                  disabled={props.isEvaluating || props.isDeepAnalyzing}
-                >
-                  Quick
-                </button>
-                <button
-                  type="button"
-                  style={styles.modeButton(props.codeAnalysisMode === "deep")}
-                  onClick={() => props.onSelectCodeAnalysisMode("deep")}
-                  disabled={props.isEvaluating || props.isDeepAnalyzing}
-                >
-                  {props.isDeepAnalyzing && props.codeAnalysisMode === "deep" ? "Digging deeper..." : "Deep"}
-                </button>
-              </div>
-            ) : null}
-            {showDeepAnalyze ? (
-              <button
-                type="button"
-                style={styles.deepButton}
-                onClick={props.onRunDeepAnalysis}
-                disabled={props.isDeepAnalyzing || props.isEvaluating}
-              >
-                {props.isDeepAnalyzing ? (
-                  <span style={styles.loadingLabel}>
-                    Digging deeper
-                    <span style={styles.loadingDots} aria-hidden="true">
-                      <span style={styles.loadingDot(0)}>.</span>
-                      <span style={styles.loadingDot(0.2)}>.</span>
-                      <span style={styles.loadingDot(0.4)}>.</span>
-                    </span>
-                  </span>
-                ) : (
-                  "Deep Analyze"
-                )}
-              </button>
-            ) : null}
-            {showStartNextStep ? (
-              <button
-                type="button"
-                style={styles.copyButton}
-                onClick={props.onStartNextStep}
-                disabled={props.isEvaluating || props.isDeepAnalyzing}
-              >
-                Start Next Step
-              </button>
-            ) : null}
-          </div>
-        </div>
-
         {props.nextStepStarted ? (
-          <div style={styles.nextStepSection}>
+          <div ref={nextStepSectionRef} style={styles.nextStepSection}>
             <div style={styles.questionPanelHeader}>
               <div>
-                <p style={styles.blockTitle}>Plan The Next Step</p>
+                <p style={styles.blockTitle}>{hasRealReview ? "Plan The Next Step" : "Let's Optimize Your Prompt"}</p>
+                {props.projectMemoryEnabled ? (
+                  <div style={styles.contextStatusRow}>
+                    <span style={styles.contextPill(props.projectMemoryExists)}>
+                      {props.projectMemoryExists ? "Using project memory" : "Add project memory"}
+                    </span>
+                    {props.projectMemoryLabel ? <span style={styles.contextMeta}>{props.projectMemoryLabel}</span> : null}
+                  </div>
+                ) : null}
+                {!hasRealReview && originalPromptPreview ? (
+                  <div style={styles.originalPromptCard}>
+                    <p style={styles.originalPromptLabel}>Starting from your original prompt</p>
+                    <p style={styles.originalPromptText}>{originalPromptPreview}</p>
+                  </div>
+                ) : null}
                 <p style={styles.progressCopy}>
                   {visibleQuestions.length ? `${answeredNextCount} of ${visibleQuestions.length} answered` : "Start by describing the next step you want"}
                 </p>
+                {visibleQuestions.length ? (
+                  <p style={styles.progressHint}>Questions build on your latest answer, and earlier edits can reshape the branch.</p>
+                ) : null}
               </div>
             </div>
+
+            {visibleQuestions.length || props.planningGoal.trim() ? (
+              <div style={styles.progressAffirmation}>{improvement}</div>
+            ) : null}
+
+            {props.projectMemoryEnabled ? (
+              <div style={styles.contextCard}>
+                <p style={styles.contextTitle}>Project memory</p>
+                <p style={styles.contextHelper}>
+                  Ask Replit for a structured project handoff, paste the markdown here once, and NoRetry will use it
+                  to stop asking context-blind questions in the middle of the project.
+                </p>
+                <div style={styles.manualAdvanceRow}>
+                  <button
+                    type="button"
+                    style={styles.secondaryButton}
+                    onClick={props.onCopyProjectContextRequest}
+                  >
+                    Copy Replit Context Request
+                  </button>
+                </div>
+                <textarea
+                  style={styles.contextTextarea}
+                  value={props.projectHandoffDraft}
+                  onChange={(event) => props.onProjectHandoffChange(event.currentTarget.value)}
+                  placeholder="# Project Overview&#10;- ...&#10;&#10;# Current State&#10;- ..."
+                />
+                <div style={styles.manualAdvanceRow}>
+                  <button
+                    type="button"
+                    style={styles.secondaryButton}
+                    onClick={props.onSaveProjectMemory}
+                    disabled={
+                      props.isSavingProjectMemory ||
+                      !props.projectHandoffDraft.trim()
+                    }
+                  >
+                    {props.isSavingProjectMemory ? "Saving..." : props.projectMemoryExists ? "Update Project Memory" : "Save Project Memory"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             {showPlanningGoalEntry ? (
               <div style={styles.questionCard}>
                 <p style={styles.questionLabel}>What do you want the next step to be?</p>
-                <p style={styles.questionHelper}>Give NoRetry a short direction so it can build the next decision-tree questions around it.</p>
+                <p style={styles.questionHelper}>
+                  Give NoRetry a short direction so it can build the next decision-tree questions around it.
+                  {props.suggestedDirectionChips.length ? " Or tap a suggested issue below to add it for you." : ""}
+                </p>
                 {props.suggestedDirectionChips.length ? (
                   <div style={styles.suggestionSection}>
                     <p style={styles.suggestionLabel}>Suggested from this review</p>
@@ -367,14 +560,18 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                     </div>
                   </div>
                 ) : null}
+                {props.planningGoalNotice ? (
+                  <div style={styles.planningToast}>{props.planningGoalNotice}</div>
+                ) : null}
                 <textarea
+                  ref={planningTextareaRef}
                   style={styles.planningTextarea}
                   value={props.planningGoal}
                   onChange={(event) => props.onPlanningGoalChange(event.currentTarget.value)}
                   placeholder="Example: Help me debug why the emoji overlay does not appear"
                 />
                 <div style={styles.manualAdvanceRow}>
-                  {props.hasUsedSuggestedDirection ? (
+                  {hasStructuredPlanningDirection ? (
                     <button
                       type="button"
                       style={styles.copyButton}
@@ -399,17 +596,26 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
             {visibleQuestions.length ? (
               <>
-                <div style={styles.questionTabs}>
+                <div ref={questionTabsRef} style={styles.questionTabs}>
                   {visibleQuestions.map((question, index) => (
                     <button
                       key={question.id}
                       type="button"
-                      style={styles.questionTab(index === props.activeNextQuestionIndex, Boolean(props.nextAnswerState[question.id]?.trim()))}
+                      style={styles.questionTab(
+                        index === props.activeNextQuestionIndex,
+                        Boolean(props.nextAnswerState[question.id]?.trim()),
+                        props.recentlyAnsweredQuestionId === question.id
+                      )}
                       onClick={() => props.onNextQuestionIndexChange(index)}
                     >
                       {index + 1}
                     </button>
                   ))}
+                  {props.recentlyAnsweredQuestionId ? (
+                    <div style={styles.floatingReward} aria-hidden="true">
+                      +1
+                    </div>
+                  ) : null}
                   {props.isAddingNextQuestions ? <QuestionTrailLoader /> : null}
                 </div>
 
@@ -424,7 +630,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                           <button
                             key={option}
                             type="button"
-                            style={styles.optionButton(selected)}
+                            style={styles.optionButton(
+                              selected,
+                              props.recentlyAnsweredQuestionId === activeNextQuestion.id && selected
+                            )}
                             onClick={() => props.onNextAnswerChange(activeNextQuestion, option)}
                           >
                             {option}
@@ -470,7 +679,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : null}
 
             {props.nextPromptReady ? (
-              <div style={styles.draftCard}>
+              <div ref={nextPromptSectionRef} style={styles.draftCard}>
                 <p style={styles.blockTitle}>Next Prompt</p>
                 <textarea
                   value={props.nextPromptDraft}
@@ -508,30 +717,45 @@ const styles = {
     top: "50%",
     left: "50%",
     transform: "translate(-50%, -50%)",
-    width: "min(520px, calc(100vw - 32px))",
-    maxHeight: "min(70vh, 680px)",
+    width: "min(620px, calc(100vw - 32px))",
+    maxHeight: "min(76vh, 760px)",
     overflowY: "auto",
     zIndex: 2147483646,
-    padding: 18,
-    borderRadius: 22,
-    background: "rgba(255,255,255,0.98)",
+    padding: 22,
+    borderRadius: 28,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.985) 0%, rgba(248,250,252,0.975) 100%)",
     border: `1px solid ${border}`,
-    boxShadow: "0 24px 64px rgba(15,23,42,0.18)",
-    backdropFilter: "blur(12px)"
+    boxShadow: "0 32px 88px rgba(15,23,42,0.16)",
+    backdropFilter: "blur(14px)"
   }),
+  heroSurface: {
+    padding: 18,
+    borderRadius: 24,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(239,246,255,0.74) 100%)",
+    border: "1px solid rgba(148,163,184,0.12)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)"
+  } as CSSProperties,
+  subtleSurface: {
+    marginTop: 14,
+    padding: 16,
+    borderRadius: 20,
+    background: "rgba(255,255,255,0.72)",
+    border: "1px solid rgba(148,163,184,0.12)"
+  } as CSSProperties,
   header: {
     display: "flex",
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 12,
-    marginBottom: 10
+    marginBottom: 16
   } as CSSProperties,
   eyebrow: {
     margin: 0,
-    fontSize: 11,
+    fontSize: 12,
     textTransform: "uppercase",
-    letterSpacing: "0.08em",
-    color: "#64748b"
+    letterSpacing: "0.12em",
+    color: "#64748b",
+    fontWeight: 700
   } as CSSProperties,
   badge: (bg: string, fg: string): CSSProperties => ({
     display: "inline-flex",
@@ -539,11 +763,12 @@ const styles = {
     borderRadius: 999,
     background: bg,
     color: fg,
-    padding: "6px 10px",
-    fontSize: 11,
+    padding: "8px 14px",
+    fontSize: 13,
     fontWeight: 800,
     letterSpacing: "0.04em",
-    marginTop: 6
+    marginTop: 8,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.45)"
   }),
   closeButton: {
     border: "none",
@@ -555,18 +780,30 @@ const styles = {
     lineHeight: 1
   } as CSSProperties,
   block: {
-    marginBottom: 10
+    marginBottom: 14
   } as CSSProperties,
   blockTitle: {
-    margin: "0 0 6px",
-    fontSize: 12,
+    margin: "0 0 8px",
+    fontSize: 16,
     fontWeight: 800,
     color: "#0f172a"
   } as CSSProperties,
-  summarySentence: {
-    margin: 0,
+  summaryContext: {
+    margin: "0 0 10px",
     fontSize: 12,
     lineHeight: 1.45,
+    color: "#64748b"
+  } as CSSProperties,
+  criteriaCaption: {
+    margin: "0 0 8px",
+    fontSize: 12,
+    fontWeight: 700,
+    color: "#64748b"
+  } as CSSProperties,
+  summarySentence: {
+    margin: 0,
+    fontSize: 16,
+    lineHeight: 1.55,
     color: "#334155",
     flex: 1,
     minWidth: 0
@@ -574,6 +811,47 @@ const styles = {
   summaryRow: {
     display: "block"
   } as CSSProperties,
+  loadingProgressWrap: {
+    marginTop: 12,
+    padding: "10px 12px",
+    borderRadius: 16,
+    background: "rgba(255,255,255,0.72)",
+    border: "1px solid rgba(148,163,184,0.12)"
+  } as CSSProperties,
+  loadingProgressMeta: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 8
+  } as CSSProperties,
+  loadingPercent: {
+    fontSize: 13,
+    fontWeight: 800,
+    color: "#4338ca"
+  } as CSSProperties,
+  loadingStageLabel: {
+    fontSize: 12,
+    lineHeight: 1.4,
+    color: "#64748b",
+    textAlign: "right"
+  } as CSSProperties,
+  loadingTrack: {
+    position: "relative",
+    width: "100%",
+    height: 7,
+    borderRadius: 999,
+    overflow: "hidden",
+    background: "rgba(99,102,241,0.10)"
+  } as CSSProperties,
+  loadingTrackFill: (percent: number): CSSProperties => ({
+    width: `${Math.max(4, Math.min(percent, 100))}%`,
+    height: "100%",
+    borderRadius: 999,
+    background: "linear-gradient(90deg, #818cf8 0%, #4f46e5 100%)",
+    boxShadow: "0 0 18px rgba(79,70,229,0.18)",
+    transition: "width 260ms ease"
+  }),
   pulseBadge: {
     display: "inline-flex",
     width: 28,
@@ -621,8 +899,8 @@ const styles = {
   listItem: {
     display: "flex",
     alignItems: "flex-start",
-    gap: 8,
-    fontSize: 12,
+    gap: 10,
+    fontSize: 14,
     lineHeight: 1.45,
     color: "#334155"
   } as CSSProperties,
@@ -644,7 +922,7 @@ const styles = {
     alignItems: "flex-end",
     justifyContent: "space-between",
     gap: 12,
-    marginTop: 10
+    marginTop: 18
   } as CSSProperties,
   confidenceBlock: {
     display: "flex",
@@ -657,7 +935,7 @@ const styles = {
     display: "flex",
     flexWrap: "wrap",
     gap: 12,
-    fontSize: 12,
+    fontSize: 13,
     lineHeight: 1.45,
     color: "#475569"
   } as CSSProperties,
@@ -668,7 +946,7 @@ const styles = {
     background: bg,
     color: fg,
     border: `1px solid ${border}`,
-    padding: "4px 10px",
+    padding: "6px 12px",
     fontWeight: 700
   }),
   actions: {
@@ -678,13 +956,22 @@ const styles = {
     flexWrap: "wrap",
     justifyContent: "flex-end"
   } as CSSProperties,
+  checklistActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap",
+    marginTop: 16
+  } as CSSProperties,
   nextStepSection: {
-    marginTop: 14,
-    paddingTop: 14,
-    borderTop: "1px solid rgba(148,163,184,0.18)",
+    marginTop: 18,
+    padding: 18,
+    borderRadius: 24,
+    background: "rgba(255,255,255,0.76)",
+    border: "1px solid rgba(148,163,184,0.12)",
     display: "flex",
     flexDirection: "column",
-    gap: 12
+    gap: 14
   } as CSSProperties,
   questionPanelHeader: {
     display: "flex",
@@ -692,17 +979,108 @@ const styles = {
     justifyContent: "space-between",
     gap: 10
   } as CSSProperties,
-  progressCopy: {
-    margin: 0,
+  progressAffirmation: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    background: "linear-gradient(180deg, rgba(99,102,241,0.08) 0%, rgba(79,70,229,0.12) 100%)",
+    color: "#4338ca",
+    border: "1px solid rgba(99,102,241,0.14)",
+    padding: "7px 12px",
+    fontSize: 12,
+    fontWeight: 700
+  } as CSSProperties,
+  contextStatusRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    margin: "8px 0 12px"
+  } as CSSProperties,
+  contextPill: (active: boolean): CSSProperties => ({
+    borderRadius: 999,
+    padding: "6px 10px",
+    fontSize: 11,
+    fontWeight: 700,
+    background: active ? "rgba(34,197,94,0.12)" : "rgba(99,102,241,0.1)",
+    color: active ? "#166534" : "#4338ca",
+    border: active ? "1px solid rgba(34,197,94,0.16)" : "1px solid rgba(99,102,241,0.14)"
+  }),
+  contextMeta: {
     fontSize: 11,
     color: "#64748b"
+  } as CSSProperties,
+  contextCard: {
+    border: "1px solid rgba(148,163,184,0.14)",
+    borderRadius: 18,
+    padding: 16,
+    background: "rgba(255,255,255,0.76)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10
+  } as CSSProperties,
+  contextTitle: {
+    margin: 0,
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#0f172a"
+  } as CSSProperties,
+  contextHelper: {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: 1.55,
+    color: "#64748b"
+  } as CSSProperties,
+  contextTextarea: {
+    width: "100%",
+    minHeight: 84,
+    resize: "vertical",
+    borderRadius: 14,
+    border: "1px solid rgba(148,163,184,0.22)",
+    padding: "12px 14px",
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: "#0f172a",
+    background: "#ffffff"
+  } as CSSProperties,
+  originalPromptCard: {
+    margin: "0 0 12px",
+    padding: "10px 12px",
+    borderRadius: 16,
+    background: "rgba(255,255,255,0.7)",
+    border: "1px solid rgba(148,163,184,0.14)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.5)"
+  } as CSSProperties,
+  originalPromptLabel: {
+    margin: 0,
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: "0.02em",
+    color: "#64748b"
+  } as CSSProperties,
+  originalPromptText: {
+    margin: "6px 0 0",
+    fontSize: 12,
+    lineHeight: 1.55,
+    color: "#334155"
+  } as CSSProperties,
+  progressCopy: {
+    margin: 0,
+    fontSize: 13,
+    color: "#64748b"
+  } as CSSProperties,
+  progressHint: {
+    margin: "4px 0 0",
+    fontSize: 11,
+    lineHeight: 1.45,
+    color: "#94a3b8",
+    maxWidth: 320
   } as CSSProperties,
   secondaryButton: {
     border: "1px solid rgba(99,102,241,0.18)",
     borderRadius: 999,
     background: "rgba(99,102,241,0.08)",
     color: "#4338ca",
-    padding: "8px 12px",
+    padding: "10px 14px",
     fontWeight: 700,
     cursor: "pointer"
   } as CSSProperties,
@@ -710,7 +1088,27 @@ const styles = {
     display: "flex",
     gap: 8,
     flexWrap: "wrap",
-    alignItems: "center"
+    alignItems: "center",
+    position: "relative"
+  } as CSSProperties,
+  floatingReward: {
+    position: "absolute",
+    top: -6,
+    right: 0,
+    width: 36,
+    height: 36,
+    borderRadius: 999,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "linear-gradient(135deg, rgba(34,197,94,0.18) 0%, rgba(99,102,241,0.18) 100%)",
+    color: "#166534",
+    border: "1px solid rgba(34,197,94,0.18)",
+    boxShadow: "0 10px 24px rgba(15,23,42,0.08)",
+    fontSize: 13,
+    fontWeight: 800,
+    pointerEvents: "none",
+    animation: "afterRewardFloat 2s ease-out forwards"
   } as CSSProperties,
   questionTrailLoader: {
     display: "inline-flex",
@@ -728,7 +1126,7 @@ const styles = {
     animationDelay: `${delay}s`,
     boxShadow: "0 0 0 4px rgba(99,102,241,0.08)"
   }),
-  questionTab: (active: boolean, answered: boolean): CSSProperties => ({
+  questionTab: (active: boolean, answered: boolean, celebrating: boolean): CSSProperties => ({
     border: active ? "1px solid rgba(99,102,241,0.25)" : "1px solid rgba(148,163,184,0.18)",
     background: active ? "rgba(99,102,241,0.12)" : answered ? "rgba(220,252,231,0.7)" : "#ffffff",
     color: active ? "#4338ca" : "#334155",
@@ -736,24 +1134,26 @@ const styles = {
     height: 32,
     borderRadius: 999,
     fontWeight: 700,
-    cursor: "pointer"
+    cursor: "pointer",
+    animation: celebrating ? "afterAnswerCelebrate 520ms ease-out" : undefined
   }),
   questionCard: {
-    border: "1px solid rgba(148,163,184,0.18)",
-    borderRadius: 18,
-    padding: 14,
-    background: "rgba(248,250,252,0.92)"
+    border: "1px solid rgba(148,163,184,0.14)",
+    borderRadius: 22,
+    padding: 18,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(248,250,252,0.9) 100%)",
+    boxShadow: "0 12px 30px rgba(15,23,42,0.04)"
   } as CSSProperties,
   questionLabel: {
     margin: 0,
-    fontSize: 13,
+    fontSize: 18,
     fontWeight: 800,
     color: "#0f172a"
   } as CSSProperties,
   questionHelper: {
-    margin: "6px 0 0",
-    fontSize: 11,
-    lineHeight: 1.45,
+    margin: "8px 0 0",
+    fontSize: 13,
+    lineHeight: 1.55,
     color: "#64748b"
   } as CSSProperties,
   suggestionSection: {
@@ -765,7 +1165,7 @@ const styles = {
   } as CSSProperties,
   suggestionLabel: {
     margin: 0,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: 700,
     color: "#475569"
   } as CSSProperties,
@@ -779,8 +1179,8 @@ const styles = {
     borderRadius: 999,
     background: active ? "rgba(99,102,241,0.12)" : "rgba(248,250,252,0.96)",
     color: "#4338ca",
-    padding: "8px 12px",
-    fontSize: 11,
+    padding: "9px 13px",
+    fontSize: 12,
     fontWeight: 700,
     cursor: active ? "default" : "pointer",
     display: "inline-flex",
@@ -789,39 +1189,53 @@ const styles = {
   optionList: {
     display: "flex",
     flexDirection: "column",
-    gap: 8,
-    marginTop: 12
+    gap: 10,
+    marginTop: 14
   } as CSSProperties,
   inlineInput: {
     width: "100%",
-    borderRadius: 12,
+    borderRadius: 14,
     border: "1px solid rgba(148,163,184,0.24)",
-    padding: "10px 12px",
-    fontSize: 12,
+    padding: "12px 14px",
+    fontSize: 14,
     color: "#0f172a",
     background: "#ffffff"
   } as CSSProperties,
   planningTextarea: {
     width: "100%",
-    minHeight: 92,
+    minHeight: 104,
     resize: "vertical",
-    borderRadius: 12,
+    borderRadius: 16,
     border: "1px solid rgba(148,163,184,0.24)",
-    padding: "10px 12px",
-    fontSize: 12,
+    padding: "12px 14px",
+    fontSize: 14,
     lineHeight: 1.5,
     color: "#0f172a",
     background: "#ffffff"
   } as CSSProperties,
-  optionButton: (selected: boolean): CSSProperties => ({
+  planningToast: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    background: "rgba(34,197,94,0.12)",
+    color: "#166534",
+    border: "1px solid rgba(34,197,94,0.16)",
+    padding: "7px 12px",
+    fontSize: 12,
+    fontWeight: 700,
+    marginBottom: 10
+  } as CSSProperties,
+  optionButton: (selected: boolean, celebrating: boolean): CSSProperties => ({
     border: selected ? "1px solid rgba(99,102,241,0.28)" : "1px solid rgba(148,163,184,0.16)",
-    borderRadius: 14,
+    borderRadius: 18,
     background: selected ? "rgba(99,102,241,0.12)" : "#ffffff",
     color: selected ? "#312e81" : "#334155",
-    padding: "10px 12px",
+    padding: "14px 16px",
     textAlign: "left",
     fontWeight: selected ? 700 : 500,
-    cursor: "pointer"
+    cursor: "pointer",
+    fontSize: 15,
+    lineHeight: 1.45,
+    animation: celebrating ? "afterAnswerCelebrate 520ms ease-out" : undefined
   }),
   manualAdvanceRow: {
     display: "flex",
@@ -833,28 +1247,29 @@ const styles = {
     borderRadius: 999,
     background: "#0f172a",
     color: "#ffffff",
-    padding: "12px 16px",
+    padding: "14px 20px",
     fontWeight: 800,
+    fontSize: 15,
     cursor: "pointer",
     alignSelf: "flex-start"
   } as CSSProperties,
   draftCard: {
-    border: "1px solid rgba(148,163,184,0.18)",
-    borderRadius: 18,
-    padding: 14,
-    background: "#ffffff",
+    border: "1px solid rgba(148,163,184,0.14)",
+    borderRadius: 22,
+    padding: 18,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(248,250,252,0.92) 100%)",
     display: "flex",
     flexDirection: "column",
-    gap: 10
+    gap: 12
   } as CSSProperties,
   draftInput: {
     width: "100%",
     minHeight: 140,
     resize: "vertical",
-    borderRadius: 14,
+    borderRadius: 16,
     border: "1px solid rgba(148,163,184,0.24)",
-    padding: 12,
-    fontSize: 12,
+    padding: 14,
+    fontSize: 14,
     lineHeight: 1.5,
     color: "#0f172a",
     background: "#f8fafc"

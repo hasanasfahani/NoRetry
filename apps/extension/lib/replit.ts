@@ -155,15 +155,39 @@ export function readPromptValue(input: HTMLElement) {
   return input.innerText || input.textContent || ""
 }
 
+function setContentEditableValue(input: HTMLElement, nextValue: string) {
+  input.innerHTML = ""
+
+  const lines = nextValue.replace(/\r\n/g, "\n").split("\n")
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      input.appendChild(document.createElement("br"))
+    }
+
+    if (line.length === 0) {
+      input.appendChild(document.createElement("br"))
+      return
+    }
+
+    input.appendChild(document.createTextNode(line))
+  })
+}
+
 export function writePromptValue(input: HTMLElement, nextValue: string) {
   if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
+    const prototype =
+      input instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value")
     descriptor?.set?.call(input, nextValue)
   } else {
-    input.textContent = nextValue
+    setContentEditableValue(input, nextValue)
   }
 
-  input.dispatchEvent(new Event("input", { bubbles: true }))
+  const inputEvent =
+    typeof InputEvent !== "undefined"
+      ? new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" })
+      : new Event("input", { bubbles: true })
+  input.dispatchEvent(inputEvent)
 }
 
 export function collectVisibleOutputSnippet() {
