@@ -61,7 +61,30 @@ export function findPromptInput(): HTMLElement | null {
     }
   }
 
-  return [...candidates.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null
+  const rankedCandidates = [...candidates.entries()].sort((left, right) => right[1] - left[1])
+  if (getPromptSurface() !== "REPLIT") {
+    return rankedCandidates[0]?.[0] ?? null
+  }
+
+  const lowerViewportCandidates = rankedCandidates.filter(([element]) => {
+    const rect = element.getBoundingClientRect()
+    return rect.bottom > window.innerHeight * 0.55
+  })
+
+  if (lowerViewportCandidates.length > 0) {
+    return lowerViewportCandidates.sort((left, right) => {
+      const leftRect = left[0].getBoundingClientRect()
+      const rightRect = right[0].getBoundingClientRect()
+
+      if (Math.abs(rightRect.bottom - leftRect.bottom) > 24) {
+        return rightRect.bottom - leftRect.bottom
+      }
+
+      return right[1] - left[1]
+    })[0][0]
+  }
+
+  return rankedCandidates[0]?.[0] ?? null
 }
 
 export function isPromptLikeElement(element: HTMLElement) {
@@ -106,6 +129,7 @@ function scorePromptElement(element: HTMLElement) {
   const rect = element.getBoundingClientRect()
   const textHint = `${element.getAttribute("aria-label") ?? ""} ${element.getAttribute("placeholder") ?? ""}`.toLowerCase()
   const value = readPromptValue(element).trim()
+  const isReplit = getPromptSurface() === "REPLIT"
 
   let score = 0
 
@@ -120,6 +144,8 @@ function scorePromptElement(element: HTMLElement) {
   if ((element.id || "").toLowerCase() === "prompt-textarea") score += 40
   if (rect.bottom > window.innerHeight * 0.55) score += 14
   if (rect.width > 260) score += 8
+  if (isReplit && rect.bottom > window.innerHeight * 0.72) score += 26
+  if (isReplit && rect.top < window.innerHeight * 0.25) score -= 55
 
   const regionHint = [
     element.closest("header"),

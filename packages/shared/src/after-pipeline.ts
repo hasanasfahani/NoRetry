@@ -48,6 +48,26 @@ function cleanCriterionText(value: string) {
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
 }
 
+function hasMeaningfulCriterionContent(value: string) {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (normalized.length < 8) return false
+
+  const tokens = normalized
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => token.length >= 3)
+
+  if (tokens.length < 2) return false
+  if (["the", "this", "that", "these", "those"].includes(tokens[0]) && tokens.length < 3) return false
+
+  return true
+}
+
 function splitExplicitClauses(source: string) {
   return source
     .replace(/[–—]/g, " - ")
@@ -127,14 +147,20 @@ function extractMinimalCoreTask(prompt: string) {
 function deriveAcceptanceCriteriaFromSubmittedPrompt(prompt: string) {
   const explicitClauses = extractSectionClauses(prompt)
   const outputRules = extractGlobalPromptRules(prompt)
-  const combined = dedupe([...explicitClauses, ...outputRules], 6).map((item) => limitText(item, 72))
+  const combined = dedupe([...explicitClauses, ...outputRules], 6)
+    .filter(hasMeaningfulCriterionContent)
+    .map((item) => limitText(item, 72))
 
   if (combined.length) {
     return combined
   }
 
   const fallbackCoreTask = extractMinimalCoreTask(prompt)
-  return [fallbackCoreTask || `Solve: ${conciseGoal(prompt.trim())}`]
+  if (fallbackCoreTask && hasMeaningfulCriterionContent(fallbackCoreTask)) {
+    return [fallbackCoreTask]
+  }
+
+  return [`Solve: ${conciseGoal(prompt.trim())}`]
 }
 
 export function mapPromptIntentToTaskType(intent: PromptIntent | undefined): UnifiedTaskType {

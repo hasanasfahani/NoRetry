@@ -12,6 +12,11 @@ export type ProjectMemoryRecord = {
   projectLabel: string
   projectContext: string
   currentState: string
+  memoryDepth?: "quick" | "deep"
+  awaitingFreshAnswer?: boolean
+  baselineResponseIdentity?: string
+  baselineResponseText?: string
+  baselineThreadIdentity?: string
   updatedAt: string
 }
 
@@ -58,12 +63,22 @@ export async function saveProjectMemory(input: {
   projectLabel: string
   projectContext: string
   currentState: string
+  memoryDepth?: "quick" | "deep"
+  awaitingFreshAnswer?: boolean
+  baselineResponseIdentity?: string
+  baselineResponseText?: string
+  baselineThreadIdentity?: string
 }) {
   const record: ProjectMemoryRecord = {
     projectKey: input.projectKey,
     projectLabel: input.projectLabel,
     projectContext: input.projectContext.trim(),
     currentState: input.currentState.trim(),
+    memoryDepth: input.memoryDepth,
+    awaitingFreshAnswer: input.awaitingFreshAnswer,
+    baselineResponseIdentity: input.baselineResponseIdentity,
+    baselineResponseText: input.baselineResponseText,
+    baselineThreadIdentity: input.baselineThreadIdentity,
     updatedAt: new Date().toISOString()
   }
 

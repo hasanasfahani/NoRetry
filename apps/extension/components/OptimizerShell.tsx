@@ -11,6 +11,7 @@ import type {
 type OptimizerShellProps = {
   mounted: boolean
   panelOpen: boolean
+  afterPanelOpen: boolean
   promptPreview: string
   beforeResult: AnalyzePromptResponse | null
   isAnalyzingPrompt: boolean
@@ -103,6 +104,10 @@ function CardManIcon({ color }: { color: string }) {
 
 export function OptimizerShell(props: OptimizerShellProps) {
   const otherOption = "Other"
+  const holdPromptFocus = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+  }
+
   const isBusy = props.isAnalyzingPrompt || props.isLoadingQuestions
   const tone = isBusy
     ? { bg: "#eff6ff", fg: "#1d4ed8", border: "rgba(29,78,216,0.18)" }
@@ -234,23 +239,31 @@ export function OptimizerShell(props: OptimizerShellProps) {
           }
         `}
       </style>
-      <div style={styles.badgeStack}>
-        <button type="button" style={styles.badge(tone.bg, tone.fg, tone.border)} onClick={props.panelOpen ? props.onClosePanel : props.onOpenPanel}>
-          <span style={isBusy ? styles.badgeCharge : styles.badgeDot}>
-            {isBusy ? <RunningManIcon /> : null}
-          </span>
-          {!isBusy ? <CardManIcon color={tone.fg} /> : null}
-        </button>
-        <button
+      {!props.panelOpen && !props.afterPanelOpen ? (
+        <div style={styles.badgeStack}>
+          <button
+          type="button"
+          style={styles.badge(tone.bg, tone.fg, tone.border)}
+          onMouseDown={holdPromptFocus}
+          onClick={props.panelOpen ? props.onClosePanel : props.onOpenPanel}
+        >
+            <span style={isBusy ? styles.badgeCharge : styles.badgeDot}>
+              {isBusy ? <RunningManIcon /> : null}
+            </span>
+            {!isBusy ? <CardManIcon color={tone.fg} /> : null}
+          </button>
+          <button
           type="button"
           style={styles.afterBadge(props.isEvaluatingAfterResponse)}
+          onMouseDown={holdPromptFocus}
           onClick={props.onOpenAfterPanel}
           aria-label="Open after-response feedback"
-          title="Check the AI response"
-        >
-          <span style={props.isEvaluatingAfterResponse ? styles.afterBadgeSpin : undefined}>⚡</span>
-        </button>
-      </div>
+            title="Check the AI response"
+          >
+            <span style={props.isEvaluatingAfterResponse ? styles.afterBadgeSpin : undefined}>⚡</span>
+          </button>
+        </div>
+      ) : null}
 
       {props.issueVisible && !props.panelOpen ? (
         <section style={styles.issueCard}>

@@ -52,6 +52,7 @@ import {
 } from "../lib/core/attempt-orchestration"
 import {
   buildProjectHandoffMarkdown,
+  buildReplitDeepContextRequestPrompt,
   parseProjectHandoffMarkdown,
   REPLIT_CONTEXT_REQUEST_PROMPT
 } from "../lib/core/project-context"
@@ -172,6 +173,9 @@ export default function PromptOptimizerApp() {
   const [projectContextDraft, setProjectContextDraft] = useState("")
   const [currentStateDraft, setCurrentStateDraft] = useState("")
   const [projectHandoffDraft, setProjectHandoffDraft] = useState("")
+  const [projectContextSetupActive, setProjectContextSetupActive] = useState(false)
+  const [projectContextReadyActive, setProjectContextReadyActive] = useState(false)
+  const [projectMemoryDepth, setProjectMemoryDepth] = useState<"quick" | "deep">("deep")
   const [hasProjectMemory, setHasProjectMemory] = useState(false)
   const [isSavingProjectMemory, setIsSavingProjectMemory] = useState(false)
   const promptRef = useRef<HTMLElement | null>(null)
@@ -195,6 +199,15 @@ export default function PromptOptimizerApp() {
   const recentAnsweredTimeoutRef = useRef<number | null>(null)
   const afterLoadingIntervalRef = useRef<number | null>(null)
   const pendingContextAnalysisRef = useRef<PendingContextAnalysis | null>(null)
+  const popupOpenRef = useRef(false)
+  const frozenHostPositionRef = useRef<{ top: string; left: string } | null>(null)
+  const popupAnchorPromptRef = useRef<HTMLElement | null>(null)
+  const projectMemoryAwaitingFreshAnswerRef = useRef(false)
+  const projectMemoryBaselineResponseRef = useRef<{
+    identity: string
+    normalizedText: string
+    threadIdentity: string
+  } | null>(null)
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -206,7 +219,10 @@ export default function PromptOptimizerApp() {
       setProjectMemoryLabel("")
       setProjectContextDraft("")
       setCurrentStateDraft("")
+      setProjectMemoryDepth("deep")
       setHasProjectMemory(false)
+      projectMemoryAwaitingFreshAnswerRef.current = false
+      projectMemoryBaselineResponseRef.current = null
       return
     }
 
@@ -216,8 +232,21 @@ export default function PromptOptimizerApp() {
     const record = await getProjectMemory(identity.key)
     setProjectContextDraft(record?.projectContext ?? "")
     setCurrentStateDraft(record?.currentState ?? "")
-    setProjectHandoffDraft(buildProjectHandoffMarkdown(record?.projectContext ?? "", record?.currentState ?? ""))
+    setProjectHandoffDraft(
+      record && (record.projectContext?.trim() || record.currentState?.trim())
+        ? buildProjectHandoffMarkdown(record.projectContext ?? "", record.currentState ?? "")
+        : ""
+    )
+    setProjectMemoryDepth(record?.memoryDepth === "quick" ? "quick" : "deep")
     setHasProjectMemory(Boolean(record && (record.projectContext || record.currentState)))
+    projectMemoryAwaitingFreshAnswerRef.current = Boolean(record?.awaitingFreshAnswer)
+    projectMemoryBaselineResponseRef.current = record
+      ? {
+          identity: record.baselineResponseIdentity ?? "",
+          normalizedText: normalizeAssistantTextForReuse(record.baselineResponseText ?? ""),
+          threadIdentity: record.baselineThreadIdentity ?? ""
+        }
+      : null
   }
 
   useEffect(() => {
@@ -230,6 +259,24 @@ export default function PromptOptimizerApp() {
       afterLoadingIntervalRef.current = null
     }
     setAfterLoadingProgress(null)
+  }
+
+  function computeHostPosition(sourceInput = promptRef.current, sourceSubmit = submitRef.current) {
+    if (!sourceInput) return null
+
+    if (sourceSubmit) {
+      const inputRect = sourceInput.getBoundingClientRect()
+      return {
+        top: `${window.scrollY + inputRect.top - 26}px`,
+        left: `${window.scrollX + inputRect.right - 28}px`
+      }
+    }
+
+    const rect = sourceInput.getBoundingClientRect()
+    return {
+      top: `${window.scrollY + rect.top - 26}px`,
+      left: `${window.scrollX + rect.right - 28}px`
+    }
   }
 
   function startAfterLoadingProgress(mode: "quick" | "deep") {
@@ -279,6 +326,25 @@ export default function PromptOptimizerApp() {
         label: currentStage.label
       })
     }, 240)
+  }
+
+  async function showProjectContextAssimilationStep() {
+    stopAfterLoadingProgress()
+    setAfterVerdict(
+      buildAfterPlaceholder(
+        "Project context received. NoRetry is grounding the review with your newly added information.",
+        [
+          "This gives the next analysis more signal from your architecture, current bug, and latest findings before it judges the earlier answer."
+        ],
+        ""
+      )
+    )
+    setAfterLoadingProgress({
+      percent: 22,
+      label: "Absorbing project context"
+    })
+
+    await new Promise((resolve) => window.setTimeout(resolve, 950))
   }
 
   function getAttemptPlatform(): Attempt["platform"] {
@@ -374,6 +440,7 @@ export default function PromptOptimizerApp() {
     const attemptSource = overrides?.attempt ?? afterAttempt
     const analysisSource = overrides?.analysis ?? afterVerdict
     if (!analysisSource || !attemptSource) return null
+    const compactProjectMemory = getCompactProjectMemory()
 
     const result = await generateAfterNextQuestion(
       buildAfterQuestionRequest({
@@ -383,8 +450,8 @@ export default function PromptOptimizerApp() {
         questionLevels: overrides?.questionLevels ?? afterQuestionLevels,
         answers,
         planningGoal: overrides?.planningGoal ?? afterPlanningGoal,
-        projectContext: projectContextDraft,
-        currentState: currentStateDraft,
+        projectContext: compactProjectMemory.projectContext,
+        currentState: compactProjectMemory.currentState,
         currentLevel,
         requestKind
       })
@@ -475,6 +542,25 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
+  function compactContextForApi(value: string, maxLength: number) {
+    const normalized = value.trim()
+    if (normalized.length <= maxLength) return normalized
+
+    const headLength = Math.max(0, Math.floor(maxLength * 0.62))
+    const tailLength = Math.max(0, maxLength - headLength - 24)
+
+    return `${normalized.slice(0, headLength).trim()}\n\n[...trimmed for size...]\n\n${normalized.slice(-tailLength).trim()}`
+      .slice(0, maxLength)
+      .trim()
+  }
+
+  function getCompactProjectMemory() {
+    return {
+      projectContext: compactContextForApi(projectContextDraft, 4000),
+      currentState: compactContextForApi(currentStateDraft, 3000)
+    }
+  }
+
   async function runAfterEvaluation(
     force = false,
     deepAnalysis = false,
@@ -502,20 +588,36 @@ export default function PromptOptimizerApp() {
     setIsEvaluatingAfterResponse(true)
 
     try {
+      const compactProjectMemory = getCompactProjectMemory()
       const responseSummary = preprocessResponse(text)
       const result = await analyzeAfterAttempt({
         attempt,
         response_summary: responseSummary,
         response_text_fallback: text,
         deep_analysis: deepAnalysis,
-        project_context: projectContextDraft,
-        current_state: currentStateDraft
+        project_context: compactProjectMemory.projectContext,
+        current_state: compactProjectMemory.currentState
       })
       if (requestId !== afterEvaluationRequestIdRef.current) {
         return false
       }
       if (normalizedText !== normalizedLastText) {
         resetAfterNextStepFlow()
+      }
+      projectMemoryAwaitingFreshAnswerRef.current = false
+      projectMemoryBaselineResponseRef.current = null
+      if (projectMemoryKey && projectMemoryLabel && hasProjectMemory) {
+        await saveProjectMemory({
+          projectKey: projectMemoryKey,
+          projectLabel: projectMemoryLabel,
+          projectContext: projectContextDraft,
+          currentState: currentStateDraft,
+          memoryDepth: projectMemoryDepth,
+          awaitingFreshAnswer: false,
+          baselineResponseIdentity: "",
+          baselineResponseText: "",
+          baselineThreadIdentity: ""
+        })
       }
       setAfterAttempt(attempt)
       setAfterVerdict(result)
@@ -557,8 +659,21 @@ export default function PromptOptimizerApp() {
     void loadProjectMemoryForCurrentLocation()
 
     const scan = () => {
+      if (popupOpenRef.current) {
+        positionHost()
+        return
+      }
+
       const input = findPromptInput()
       if (!input) {
+        const fallbackInput = lastFocusedPromptRef.current
+        if (fallbackInput && fallbackInput.isConnected && isPromptLikeElement(fallbackInput)) {
+          promptRef.current = fallbackInput
+          submitRef.current = findSubmitButton(fallbackInput)
+          positionHost()
+          return
+        }
+
         promptRef.current = null
         submitRef.current = null
         positionHost()
@@ -576,6 +691,8 @@ export default function PromptOptimizerApp() {
     }
 
     const handleFocusIn = (event: FocusEvent) => {
+      if (popupOpenRef.current) return
+
       const target = event.target
       if (!(target instanceof HTMLElement) || !isPromptLikeElement(target)) return
 
@@ -611,6 +728,22 @@ export default function PromptOptimizerApp() {
   }, [])
 
   useEffect(() => {
+    popupOpenRef.current = panelOpen || afterPanelOpen
+
+    if (popupOpenRef.current && !frozenHostPositionRef.current) {
+      popupAnchorPromptRef.current = promptRef.current
+      frozenHostPositionRef.current = computeHostPosition()
+    }
+
+    if (!popupOpenRef.current) {
+      frozenHostPositionRef.current = null
+      popupAnchorPromptRef.current = null
+    }
+
+    positionHost()
+  }, [panelOpen, afterPanelOpen])
+
+  useEffect(() => {
     const input = promptRef.current
 
     let debounceId: number | null = null
@@ -631,11 +764,13 @@ export default function PromptOptimizerApp() {
       if (!activeInput) return
 
       const prompt = readPromptValue(activeInput)
+      const previousPromptValue = lastPromptValueRef.current
+      const promptChanged = prompt !== previousPromptValue
       lastPromptValueRef.current = prompt
       setPromptPreview(prompt.slice(0, 220))
       setIssueVisible(false)
       setDiagnosis(null)
-      if (prompt.trim() && afterVerdict) {
+      if (promptChanged && prompt.trim() && afterVerdict) {
         setAfterAttempt(null)
         setAfterVerdict(null)
         setAfterPanelOpen(false)
@@ -735,16 +870,19 @@ export default function PromptOptimizerApp() {
   }, [currentSession, inputBindingVersion])
 
   useEffect(() => {
-    let lastHref = window.location.href
+    let lastThreadIdentity = getCurrentThreadSnapshot().identity
     const intervalId = window.setInterval(() => {
-      if (window.location.href === lastHref) return
+      const currentThreadIdentity = getCurrentThreadSnapshot().identity
+      if (currentThreadIdentity === lastThreadIdentity) return
 
-      lastHref = window.location.href
+      lastThreadIdentity = currentThreadIdentity
       void loadProjectMemoryForCurrentLocation()
       setAfterVerdict(null)
       setAfterAttempt(null)
       setAfterPanelOpen(false)
       resetAfterNextStepFlow()
+      setProjectContextSetupActive(false)
+      setProjectContextReadyActive(false)
       setIsEvaluatingAfterResponse(false)
       setIsDeepAnalyzingAfterResponse(false)
       setHasSubmittedPrompt(false)
@@ -781,8 +919,32 @@ export default function PromptOptimizerApp() {
         ? latestMessageId === lastEvaluatedAssistantMessageIdRef.current
         : normalizedText === normalizedLastText
     const sameDraftPrompt = currentDraftPrompt === savedDraftPrompt
+    const baselineResponse = projectMemoryBaselineResponseRef.current
+    const sameAsProjectMemoryBaseline =
+      Boolean(text) &&
+      Boolean(baselineResponse) &&
+      baselineResponse?.threadIdentity === threadSnapshot.identity &&
+      ((latestMessageId && baselineResponse.identity && latestMessageId === baselineResponse.identity) ||
+        normalizedText === baselineResponse.normalizedText)
+
+    if (hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current && sameAsProjectMemoryBaseline) {
+      setProjectContextSetupActive(false)
+      setProjectContextReadyActive(true)
+      setAfterPanelOpen(true)
+      setAfterVerdict(
+        buildAfterPlaceholder(
+          "Your project memory is saved and ready.",
+          [
+            "Continue with Replit and come back after the next real project answer. NoRetry will start reviewing from that point forward."
+          ],
+          ""
+        )
+      )
+      return
+    }
 
     if (afterVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
+      setProjectContextReadyActive(false)
       setAfterPanelOpen(true)
       return
     }
@@ -799,6 +961,8 @@ export default function PromptOptimizerApp() {
       }
 
       setAfterPanelOpen(true)
+      setProjectContextSetupActive(true)
+      setProjectContextReadyActive(false)
       resetAfterNextStepFlow()
       setAfterVerdict(
         buildAfterPlaceholder(
@@ -810,10 +974,14 @@ export default function PromptOptimizerApp() {
         )
       )
       setAfterAttempt(pendingAttempt)
-      setAfterNextStepStarted(true)
+      setAfterNextStepStarted(false)
       setAfterPlanningGoal("")
+      setProjectMemoryDepth("deep")
       return
     }
+
+    setProjectContextSetupActive(false)
+    setProjectContextReadyActive(false)
 
     if (!text) {
       stopAfterLoadingProgress()
@@ -1348,6 +1516,21 @@ export default function PromptOptimizerApp() {
 
     getActiveSurfaceAdapter().writeDraftPrompt(afterNextPromptDraft.trim())
     const sourcePrompt = promptPreview || getCurrentDraftSnapshot().text
+    if (projectMemoryKey && projectMemoryLabel && hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current) {
+      projectMemoryAwaitingFreshAnswerRef.current = false
+      projectMemoryBaselineResponseRef.current = null
+      await saveProjectMemory({
+        projectKey: projectMemoryKey,
+        projectLabel: projectMemoryLabel,
+        projectContext: projectContextDraft,
+        currentState: currentStateDraft,
+        memoryDepth: projectMemoryDepth,
+        awaitingFreshAnswer: false,
+        baselineResponseIdentity: "",
+        baselineResponseText: "",
+        baselineThreadIdentity: ""
+      })
+    }
     await saveDraftAttempt(sourcePrompt, afterNextPromptDraft.trim())
     setAfterPanelOpen(false)
   }
@@ -1358,62 +1541,51 @@ export default function PromptOptimizerApp() {
     if (!(parsed.projectContext.trim() || parsed.currentState.trim())) return
     setIsSavingProjectMemory(true)
     try {
+      const currentAssistant = getCurrentAssistantResponseText()
+      const currentThreadIdentity = getCurrentThreadSnapshot().identity
       await saveProjectMemory({
         projectKey: projectMemoryKey,
         projectLabel: projectMemoryLabel,
         projectContext: parsed.projectContext,
-        currentState: parsed.currentState
+        currentState: parsed.currentState,
+        memoryDepth: projectMemoryDepth,
+        awaitingFreshAnswer: true,
+        baselineResponseIdentity: currentAssistant.identity,
+        baselineResponseText: currentAssistant.text,
+        baselineThreadIdentity: currentThreadIdentity
       })
       setProjectContextDraft(parsed.projectContext)
       setCurrentStateDraft(parsed.currentState)
       setProjectHandoffDraft(buildProjectHandoffMarkdown(parsed.projectContext, parsed.currentState))
       setHasProjectMemory(Boolean(parsed.projectContext.trim() || parsed.currentState.trim()))
+      setProjectContextSetupActive(false)
+      projectMemoryAwaitingFreshAnswerRef.current = true
+      projectMemoryBaselineResponseRef.current = {
+        identity: currentAssistant.identity,
+        normalizedText: normalizeAssistantTextForReuse(currentAssistant.text),
+        threadIdentity: currentThreadIdentity
+      }
       showPlanningGoalNotice("Project memory saved")
 
-      if (pendingContextAnalysisRef.current) {
-        const preservedTarget = pendingContextAnalysisRef.current
-        pendingContextAnalysisRef.current = null
-        resetAfterNextStepFlow()
-        setAfterPanelOpen(true)
-        setAfterVerdict(
-          buildAfterPlaceholder(
-            "Context loaded. Returning to your latest project answer now."
-          )
-        )
-        setIsEvaluatingAfterResponse(true)
-        startAfterLoadingProgress("quick")
-        try {
-          const opened = await runAfterEvaluation(true, false, preservedTarget)
-          if (!opened) {
-            setAfterVerdict(
-              buildAfterPlaceholder(
-                "NoRetry could not return to the earlier project answer yet.",
-                ["Try clicking the thunder again after the Replit thread fully settles."],
-                ""
-              )
-            )
-          }
-        } catch {
-          setAfterVerdict(
-            buildAfterPlaceholder(
-              "NoRetry could not review the preserved project answer yet.",
-              ["Try clicking the thunder again now that project context is saved."],
-              ""
-            )
-          )
-        } finally {
-          stopAfterLoadingProgress()
-          setIsEvaluatingAfterResponse(false)
-        }
-      }
+      pendingContextAnalysisRef.current = null
+      resetAfterNextStepFlow()
+      setAfterPanelOpen(true)
+      setIsEvaluatingAfterResponse(false)
+      await showProjectContextAssimilationStep()
+      stopAfterLoadingProgress()
+      setProjectContextReadyActive(true)
     } finally {
       setIsSavingProjectMemory(false)
     }
   }
 
   async function handleCopyProjectContextRequest() {
-    await navigator.clipboard.writeText(REPLIT_CONTEXT_REQUEST_PROMPT)
-    showPlanningGoalNotice("Context request copied")
+    await navigator.clipboard.writeText(
+      projectMemoryDepth === "deep"
+        ? buildReplitDeepContextRequestPrompt(projectMemoryLabel || "project")
+        : REPLIT_CONTEXT_REQUEST_PROMPT
+    )
+    showPlanningGoalNotice(projectMemoryDepth === "deep" ? "Deep context request copied" : "Quick context request copied")
   }
 
   async function handleSubmit() {
@@ -1433,6 +1605,21 @@ export default function PromptOptimizerApp() {
       intent: beforeResult?.intent ?? "OTHER",
       now
     })
+    if (projectMemoryKey && projectMemoryLabel && hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current) {
+      projectMemoryAwaitingFreshAnswerRef.current = false
+      projectMemoryBaselineResponseRef.current = null
+      await saveProjectMemory({
+        projectKey: projectMemoryKey,
+        projectLabel: projectMemoryLabel,
+        projectContext: projectContextDraft,
+        currentState: currentStateDraft,
+        memoryDepth: projectMemoryDepth,
+        awaitingFreshAnswer: false,
+        baselineResponseIdentity: "",
+        baselineResponseText: "",
+        baselineThreadIdentity: ""
+      })
+    }
     const activeAttempt = await getActiveAttempt()
     if (activeAttempt) {
       await markAttemptSubmitted(
@@ -1894,13 +2081,24 @@ export default function PromptOptimizerApp() {
     const submitButton = submitRef.current
     if (!host) return
 
-    if (!input) {
-      host.style.position = "fixed"
-      host.style.top = "16px"
-      host.style.right = "16px"
-      host.style.left = "auto"
+    if (popupOpenRef.current && frozenHostPositionRef.current) {
+      host.style.position = "absolute"
+      host.style.top = frozenHostPositionRef.current.top
+      host.style.left = frozenHostPositionRef.current.left
+      host.style.right = "auto"
+      host.style.opacity = "1"
+      host.style.pointerEvents = "auto"
       return
     }
+
+    if (!input) {
+      host.style.opacity = "0"
+      host.style.pointerEvents = "none"
+      return
+    }
+
+    host.style.opacity = "1"
+    host.style.pointerEvents = "auto"
 
     if (submitButton) {
       const inputRect = input.getBoundingClientRect()
@@ -1925,6 +2123,7 @@ export default function PromptOptimizerApp() {
       <OptimizerShell
         mounted={mounted}
         panelOpen={panelOpen}
+        afterPanelOpen={afterPanelOpen}
         promptPreview={promptPreview}
         beforeResult={beforeResult}
         isAnalyzingPrompt={isAnalyzingPrompt}
@@ -1996,9 +2195,12 @@ export default function PromptOptimizerApp() {
           isGeneratingNextPrompt={isGeneratingAfterNextPrompt}
           nextPromptDraft={afterNextPromptDraft}
           nextPromptReady={afterNextPromptReady}
+          projectContextSetupActive={projectContextSetupActive}
+          projectContextReadyActive={projectContextReadyActive}
           projectMemoryEnabled={isReplitSurface()}
           projectMemoryExists={hasProjectMemory}
           projectMemoryLabel={projectMemoryLabel}
+          projectMemoryDepth={projectMemoryDepth}
           projectHandoffDraft={projectHandoffDraft}
           isSavingProjectMemory={isSavingProjectMemory}
           onRunDeepAnalysis={() => void handleRunDeepAnalysis()}
@@ -2016,9 +2218,14 @@ export default function PromptOptimizerApp() {
           onGenerateNextPrompt={() => void handleGenerateAfterNextPrompt()}
           onSubmitNextPrompt={() => void handleSubmitAfterNextPrompt()}
           onProjectHandoffChange={setProjectHandoffDraft}
+          onProjectMemoryDepthChange={setProjectMemoryDepth}
           onCopyProjectContextRequest={() => void handleCopyProjectContextRequest()}
           onSaveProjectMemory={() => void handleSaveProjectMemory()}
-          onClose={() => setAfterPanelOpen(false)}
+          onClose={() => {
+            setAfterPanelOpen(false)
+            setProjectContextSetupActive(false)
+            setProjectContextReadyActive(false)
+          }}
         />
       ) : null}
     </>

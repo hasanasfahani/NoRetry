@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react"
 import type { AfterAnalysisResult } from "@prompt-optimizer/shared"
 import type { ClarificationQuestion } from "@prompt-optimizer/shared/src/schemas"
 
@@ -20,9 +20,12 @@ type AfterVerdictPanelProps = {
   isGeneratingNextPrompt: boolean
   nextPromptDraft: string
   nextPromptReady: boolean
+  projectContextSetupActive: boolean
+  projectContextReadyActive: boolean
   projectMemoryEnabled: boolean
   projectMemoryExists: boolean
   projectMemoryLabel: string
+  projectMemoryDepth: "quick" | "deep"
   projectHandoffDraft: string
   isSavingProjectMemory: boolean
   suggestedDirectionChips: { id: string; label: string }[]
@@ -44,6 +47,7 @@ type AfterVerdictPanelProps = {
   onGenerateNextPrompt: () => void
   onSubmitNextPrompt: () => void
   onProjectHandoffChange: (value: string) => void
+  onProjectMemoryDepthChange: (value: "quick" | "deep") => void
   onCopyProjectContextRequest: () => void
   onSaveProjectMemory: () => void
   onClose: () => void
@@ -221,8 +225,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     hasRealReview &&
     !props.nextStepStarted &&
     !isCodeAnswer &&
-    props.verdict.confidence !== "high" &&
-    props.verdict.inspection_depth === "summary_only"
+    props.verdict.confidence !== "high"
   const summarySentence =
     props.verdict.findings.find((item) => item.trim().length > 0) ||
     "NoRetry reviewed the answer against your request."
@@ -256,7 +259,22 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const nextStepSectionRef = useRef<HTMLDivElement | null>(null)
   const nextPromptSectionRef = useRef<HTMLDivElement | null>(null)
   const questionTabsRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [isDragActive, setIsDragActive] = useState(false)
   const improvement = improvementLabel(answeredNextCount, props.isAddingNextQuestions, props.nextPromptReady)
+
+  async function readHandoffFile(file: File | null) {
+    if (!file) return
+    const text = await file.text()
+    props.onProjectHandoffChange(text)
+  }
+
+  async function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    setIsDragActive(false)
+    const file = event.dataTransfer.files?.[0] ?? null
+    await readHandoffFile(file)
+  }
 
   useEffect(() => {
     if (!props.planningGoalNotice || !planningTextareaRef.current) return
@@ -292,6 +310,16 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     <>
       <style>
         {`
+          [data-after-panel] button:not(:disabled) {
+            transition: transform 140ms ease, box-shadow 160ms ease, filter 160ms ease, opacity 160ms ease;
+          }
+          [data-after-panel] button:not(:disabled):hover {
+            filter: brightness(0.99);
+          }
+          [data-after-panel] button:not(:disabled):active {
+            transform: translateY(1px) scale(0.985);
+            box-shadow: inset 0 1px 2px rgba(15,23,42,0.12);
+          }
           @keyframes afterVerdictPulse {
             0% { transform: scale(0.9); opacity: 0.72; box-shadow: 0 0 0 0 rgba(99,102,241,0.28); }
             50% { transform: scale(1.06); opacity: 1; box-shadow: 0 0 0 7px rgba(99,102,241,0.08); }
@@ -320,7 +348,177 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
         `}
       </style>
       <button type="button" style={styles.scrim} onClick={props.onClose} aria-label="Close verdict panel" />
-      <section style={styles.panel(tone.border)}>
+      <section data-after-panel="true" style={styles.panel(tone.border)}>
+        {props.projectContextSetupActive ? (
+          <div style={styles.contextSetupSurface}>
+            <div style={styles.header}>
+              <div>
+                <p style={styles.eyebrow}>After response</p>
+                <span style={styles.badge("#ede9fe", "#6d28d9")}>Add Project Context</span>
+              </div>
+              <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
+                x
+              </button>
+            </div>
+
+            <div style={styles.contextSetupIntro}>
+              <p style={styles.contextSetupTitle}>Let’s ground this review before we judge your latest project answer.</p>
+              <p style={styles.contextSetupBody}>
+                Paste a structured Replit handoff once, and NoRetry will immediately return to your latest project answer
+                and review it with the missing context.
+              </p>
+              <div style={styles.contextStatusRow}>
+                <span style={styles.contextPill(props.projectMemoryExists)}>
+                  {props.projectMemoryExists
+                    ? props.projectMemoryDepth === "deep"
+                      ? "Deep project memory ready"
+                      : "Quick project memory ready"
+                    : "Context needed first"}
+                </span>
+                {props.projectMemoryLabel ? <span style={styles.contextMeta}>{props.projectMemoryLabel}</span> : null}
+              </div>
+            </div>
+
+            <div style={styles.contextChoiceRow}>
+              <div
+                style={styles.contextChoiceButton(props.projectMemoryDepth === "quick")}
+                onClick={() => props.onProjectMemoryDepthChange("quick")}
+              >
+                <span style={styles.contextChoiceTitle}>Quick handoff</span>
+                <span style={styles.contextChoiceBody}>Fastest setup. Great for getting unstuck quickly.</span>
+                <button
+                  type="button"
+                  style={styles.contextChoiceAction}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    props.onProjectMemoryDepthChange("quick")
+                    props.onCopyProjectContextRequest()
+                  }}
+                >
+                  Copy Request
+                </button>
+              </div>
+              <div
+                style={styles.contextChoiceButton(props.projectMemoryDepth === "deep")}
+                onClick={() => props.onProjectMemoryDepthChange("deep")}
+              >
+                <span style={styles.contextChoiceTitle}>Deep handoff</span>
+                <span style={styles.contextChoiceBody}>Richer project understanding for complex ongoing work.</span>
+                <button
+                  type="button"
+                  style={styles.contextChoiceAction}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    props.onProjectMemoryDepthChange("deep")
+                    props.onCopyProjectContextRequest()
+                  }}
+                >
+                  Copy Request
+                </button>
+              </div>
+            </div>
+
+            <div style={styles.contextCard}>
+              <p style={styles.contextHelper}>
+                {props.projectMemoryDepth === "deep"
+                  ? "Copy the deep handoff request, ask Replit for a richer markdown file, then paste or drop that .md here. After you save it, NoRetry will resume the original review automatically."
+                  : "Copy the quick handoff request, paste it into Replit, then paste the returned markdown handoff here. After you save it, NoRetry will resume the original review automatically."}
+              </p>
+              <div
+                style={styles.dropZone(isDragActive)}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  setIsDragActive(true)
+                }}
+                onDragLeave={() => setIsDragActive(false)}
+                onDrop={(event) => void handleDrop(event)}
+              >
+                <p style={styles.dropZoneTitle}>
+                  {props.projectMemoryDepth === "deep" ? "Drop the Replit .md handoff here" : "Paste the Replit handoff below"}
+                </p>
+                <p style={styles.dropZoneBody}>
+                  {props.projectMemoryDepth === "deep"
+                    ? "You can drag a markdown file here or paste its contents below."
+                    : "You can also drag a markdown file here if Replit gives you one."}
+                </p>
+                <button
+                  type="button"
+                  style={styles.ghostButton}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  Choose .md File
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".md,text/markdown,.txt"
+                  style={styles.hiddenFileInput}
+                  onChange={(event) => void readHandoffFile(event.currentTarget.files?.[0] ?? null)}
+                />
+              </div>
+              <div style={styles.orDivider}>
+                <span style={styles.orDividerLine} />
+                <span style={styles.orDividerLabel}>Or Paste it Here</span>
+                <span style={styles.orDividerLine} />
+              </div>
+              <textarea
+                style={styles.contextTextarea}
+                value={props.projectHandoffDraft}
+                onChange={(event) => props.onProjectHandoffChange(event.currentTarget.value)}
+                placeholder="Paste the Replit handoff here"
+              />
+              <div style={styles.manualAdvanceRow}>
+                <button
+                  type="button"
+                  style={styles.secondaryButton}
+                  onClick={props.onSaveProjectMemory}
+                  disabled={props.isSavingProjectMemory || !props.projectHandoffDraft.trim()}
+                >
+                  {props.isSavingProjectMemory ? "Saving..." : props.projectMemoryExists ? "Update Project Memory" : "Save Project Memory"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : props.projectContextReadyActive ? (
+          <div style={styles.contextSetupSurface}>
+            <div style={styles.header}>
+              <div>
+                <p style={styles.eyebrow}>After response</p>
+                <span style={styles.badge("#dcfce7", "#166534")}>Project Memory Ready</span>
+              </div>
+              <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
+                x
+              </button>
+            </div>
+
+            <div style={styles.contextSetupIntro}>
+              <p style={styles.contextSetupTitle}>Your project context is now saved and ready.</p>
+              <p style={styles.contextSetupBody}>
+                NoRetry has absorbed the background for this project. Continue working with Replit, and open AFTER on the
+                next real project answer when you want a cleaner, better-grounded review.
+              </p>
+              <div style={styles.contextStatusRow}>
+                <span style={styles.contextPill(true)}>
+                  {props.projectMemoryDepth === "deep" ? "Deep project memory saved" : "Quick project memory saved"}
+                </span>
+                {props.projectMemoryLabel ? <span style={styles.contextMeta}>{props.projectMemoryLabel}</span> : null}
+              </div>
+            </div>
+
+            <div style={styles.contextCard}>
+              <p style={styles.contextHelper}>
+                The next AFTER review will start from this point forward, using the project memory you just created
+                instead of trying to retroactively judge the earlier setup exchange.
+              </p>
+              <div style={styles.manualAdvanceRow}>
+                <button type="button" style={styles.copyButton} onClick={props.onClose}>
+                  Got It
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
         <div style={styles.heroSurface}>
           <div style={styles.header}>
             <div>
@@ -437,7 +635,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                       </span>
                     </span>
                   ) : (
-                    "Deep Analyze"
+                    props.verdict.inspection_depth === "summary_only" ? "Deep Analyze" : "Analyze Again"
                   )}
                 </button>
               ) : null}
@@ -463,7 +661,11 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 {props.projectMemoryEnabled ? (
                   <div style={styles.contextStatusRow}>
                     <span style={styles.contextPill(props.projectMemoryExists)}>
-                      {props.projectMemoryExists ? "Using project memory" : "Add project memory"}
+                      {props.projectMemoryExists
+                        ? props.projectMemoryDepth === "deep"
+                          ? "Using deep project memory"
+                          : "Using quick project memory"
+                        : "Add project memory"}
                     </span>
                     {props.projectMemoryLabel ? <span style={styles.contextMeta}>{props.projectMemoryLabel}</span> : null}
                   </div>
@@ -485,44 +687,6 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
             {visibleQuestions.length || props.planningGoal.trim() ? (
               <div style={styles.progressAffirmation}>{improvement}</div>
-            ) : null}
-
-            {props.projectMemoryEnabled ? (
-              <div style={styles.contextCard}>
-                <p style={styles.contextTitle}>Project memory</p>
-                <p style={styles.contextHelper}>
-                  Ask Replit for a structured project handoff, paste it here once, and NoRetry will use it before
-                  reviewing your earlier project answer so the first analysis is not taken out of context.
-                </p>
-                <div style={styles.manualAdvanceRow}>
-                  <button
-                    type="button"
-                    style={styles.secondaryButton}
-                    onClick={props.onCopyProjectContextRequest}
-                  >
-                    Copy Replit Context Request
-                  </button>
-                </div>
-                <textarea
-                  style={styles.contextTextarea}
-                  value={props.projectHandoffDraft}
-                  onChange={(event) => props.onProjectHandoffChange(event.currentTarget.value)}
-                  placeholder="# Project Overview&#10;- ...&#10;&#10;# Current State&#10;- ..."
-                />
-                <div style={styles.manualAdvanceRow}>
-                  <button
-                    type="button"
-                    style={styles.secondaryButton}
-                    onClick={props.onSaveProjectMemory}
-                    disabled={
-                      props.isSavingProjectMemory ||
-                      !props.projectHandoffDraft.trim()
-                    }
-                  >
-                    {props.isSavingProjectMemory ? "Saving..." : props.projectMemoryExists ? "Update Project Memory" : "Save Project Memory"}
-                  </button>
-                </div>
-              </div>
             ) : null}
 
             {showPlanningGoalEntry ? (
@@ -698,6 +862,8 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : null}
           </div>
         ) : null}
+          </>
+        )}
       </section>
     </>
   )
@@ -734,6 +900,69 @@ const styles = {
     background: "linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(239,246,255,0.74) 100%)",
     border: "1px solid rgba(148,163,184,0.12)",
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)"
+  } as CSSProperties,
+  contextSetupSurface: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 16
+  } as CSSProperties,
+  contextSetupIntro: {
+    padding: 18,
+    borderRadius: 24,
+    background: "linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(245,243,255,0.82) 100%)",
+    border: "1px solid rgba(148,163,184,0.12)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)"
+  } as CSSProperties,
+  contextSetupTitle: {
+    margin: 0,
+    fontSize: 20,
+    lineHeight: 1.35,
+    fontWeight: 800,
+    color: "#0f172a"
+  } as CSSProperties,
+  contextSetupBody: {
+    margin: "10px 0 0",
+    fontSize: 14,
+    lineHeight: 1.6,
+    color: "#475569"
+  } as CSSProperties,
+  contextChoiceRow: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 12
+  } as CSSProperties,
+  contextChoiceButton: (active: boolean): CSSProperties => ({
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 6,
+    padding: 14,
+    borderRadius: 18,
+    border: active ? "1px solid rgba(99,102,241,0.28)" : "1px solid rgba(148,163,184,0.16)",
+    background: active ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.8)",
+    cursor: "pointer",
+    textAlign: "left"
+  }),
+  contextChoiceTitle: {
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#0f172a"
+  } as CSSProperties,
+  contextChoiceBody: {
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#64748b"
+  } as CSSProperties,
+  contextChoiceAction: {
+    marginTop: 8,
+    border: "1px solid rgba(99,102,241,0.2)",
+    borderRadius: 999,
+    background: "rgba(99,102,241,0.08)",
+    color: "#4338ca",
+    padding: "8px 12px",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer"
   } as CSSProperties,
   subtleSurface: {
     marginTop: 14,
@@ -1041,6 +1270,57 @@ const styles = {
     lineHeight: 1.5,
     color: "#0f172a",
     background: "#ffffff"
+  } as CSSProperties,
+  dropZone: (active: boolean): CSSProperties => ({
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 8,
+    padding: 14,
+    borderRadius: 16,
+    border: active ? "1px solid rgba(99,102,241,0.26)" : "1px dashed rgba(148,163,184,0.28)",
+    background: active ? "rgba(99,102,241,0.06)" : "rgba(248,250,252,0.9)"
+  }),
+  dropZoneTitle: {
+    margin: 0,
+    fontSize: 13,
+    fontWeight: 800,
+    color: "#0f172a"
+  } as CSSProperties,
+  dropZoneBody: {
+    margin: 0,
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#64748b"
+  } as CSSProperties,
+  ghostButton: {
+    border: "1px solid rgba(148,163,184,0.18)",
+    borderRadius: 999,
+    background: "#ffffff",
+    color: "#334155",
+    padding: "8px 12px",
+    fontWeight: 700,
+    cursor: "pointer"
+  } as CSSProperties,
+  hiddenFileInput: {
+    display: "none"
+  } as CSSProperties,
+  orDivider: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10
+  } as CSSProperties,
+  orDividerLine: {
+    flex: 1,
+    height: 1,
+    background: "rgba(148,163,184,0.22)"
+  } as CSSProperties,
+  orDividerLabel: {
+    fontSize: 11,
+    fontWeight: 800,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    color: "#94a3b8"
   } as CSSProperties,
   originalPromptCard: {
     margin: "0 0 12px",

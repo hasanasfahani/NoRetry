@@ -19,6 +19,83 @@ function isVisibleElement(element: HTMLElement) {
   return rect.width > 0 && rect.height > 0
 }
 
+function isEditorLikeElement(element: HTMLElement) {
+  return Boolean(
+    element.closest(
+      [
+        ".cm-editor",
+        ".monaco-editor",
+        ".view-lines",
+        "[data-testid*='editor']",
+        "[class*='CodeMirror']",
+        "[class*='monaco']",
+        "[class*='editor']",
+        "[data-file-path]",
+        "[data-testid*='file']",
+        "[class*='file-tree']",
+        "[class*='workspace']"
+      ].join(",")
+    )
+  )
+}
+
+function findConversationContainer(promptInput: HTMLElement | null) {
+  if (!promptInput) return null
+
+  return (
+    promptInput.closest<HTMLElement>(
+      [
+        "[data-testid*='chat' i]",
+        "[data-testid*='thread' i]",
+        "[data-testid*='conversation' i]",
+        "[class*='chat' i]",
+        "[class*='thread' i]",
+        "[class*='conversation' i]",
+        "[class*='agent' i]",
+        "section",
+        "article",
+        "main"
+      ].join(",")
+    ) ?? null
+  )
+}
+
+function horizontalOverlapRatio(a: DOMRect, b: DOMRect) {
+  const overlap = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))
+  const width = Math.min(a.width, b.width)
+  if (width <= 0) return 0
+  return overlap / width
+}
+
+function compareAssistantCandidates(
+  left: HTMLElement,
+  right: HTMLElement,
+  promptRect: DOMRect | null,
+  conversationContainer: HTMLElement | null,
+  candidateScores: Map<HTMLElement, number>
+) {
+  const leftRect = left.getBoundingClientRect()
+  const rightRect = right.getBoundingClientRect()
+  const leftInConversation = Boolean(conversationContainer) && conversationContainer.contains(left)
+  const rightInConversation = Boolean(conversationContainer) && conversationContainer.contains(right)
+
+  if (leftInConversation !== rightInConversation) {
+    return rightInConversation ? 1 : -1
+  }
+
+  const leftAligned = promptRect != null && horizontalOverlapRatio(leftRect, promptRect) > 0.45
+  const rightAligned = promptRect != null && horizontalOverlapRatio(rightRect, promptRect) > 0.45
+  if (leftAligned !== rightAligned) {
+    return rightAligned ? 1 : -1
+  }
+
+  if (Math.abs(rightRect.bottom - leftRect.bottom) > 32) {
+    return rightRect.bottom - leftRect.bottom
+  }
+
+  return (candidateScores.get(right) ?? 0) - (candidateScores.get(left) ?? 0)
+}
+
 function readRichText(node: HTMLElement | null) {
   if (!node) return ""
 
@@ -114,6 +191,8 @@ function collectAssistantCandidates() {
 
   const promptInput = findPromptInput()
   const promptValue = promptInput ? readPromptValue(promptInput).trim() : ""
+  const promptRect = promptInput?.getBoundingClientRect() ?? null
+  const conversationContainer = findConversationContainer(promptInput)
   const candidates = new Map<HTMLElement, number>()
 
   for (const selector of selectors) {
@@ -122,6 +201,7 @@ function collectAssistantCandidates() {
       if (!isVisibleElement(element)) continue
       if (element.closest("#prompt-optimizer-root")) continue
       if (promptInput && (element === promptInput || element.contains(promptInput))) continue
+      if (isEditorLikeElement(element)) continue
 
       const text = readRichText(element)
       if (!text || text.length < 16) continue
@@ -136,6 +216,17 @@ function collectAssistantCandidates() {
         (sum, child) => sum + (((child as HTMLElement).innerText || "").trim().length || 0),
         0
       )
+      const horizontallyAlignedWithPrompt =
+        promptRect != null &&
+        horizontalOverlapRatio(rect, promptRect) > 0.45
+      const belowPrompt = promptRect != null && rect.top >= promptRect.top - 12
+      const inConversationContainer =
+        Boolean(conversationContainer) &&
+        (conversationContainer === element || conversationContainer.contains(element) || element.contains(conversationContainer))
+      const oversizedRegion =
+        promptRect != null &&
+        (rect.width > Math.max(promptRect.width * 1.9, window.innerWidth * 0.68) ||
+          rect.height > window.innerHeight * 0.72)
 
       if (hint.includes("assistant")) score += 400
       if (hint.includes("response")) score += 260
@@ -155,14 +246,21 @@ function collectAssistantCandidates() {
       if (rect.bottom > window.innerHeight * 0.3) score += 40
       if (rect.top < window.innerHeight * 0.2 && rect.bottom < window.innerHeight * 0.45) score -= 80
       if (text.length < 30 && !element.querySelector("pre, code")) score -= 80
+      if (inConversationContainer) score += 180
+      if (horizontallyAlignedWithPrompt) score += 120
+      if (belowPrompt) score -= 120
+      if (!horizontallyAlignedWithPrompt && promptRect) score -= 140
+      if (oversizedRegion) score -= 220
+      if (rect.left < window.innerWidth * 0.18) score -= 90
+      if (rect.left < window.innerWidth * 0.28 && rect.width < window.innerWidth * 0.45) score -= 70
 
       candidates.set(element, Math.max(candidates.get(element) ?? 0, score))
     }
   }
 
-  const ranked = [...candidates.entries()]
-    .sort((left, right) => right[1] - left[1])
-    .map(([element]) => element)
+  const ranked = [...candidates.keys()].sort((left, right) =>
+    compareAssistantCandidates(left, right, promptRect, conversationContainer, candidates)
+  )
 
   if (ranked.length) return ranked
 
@@ -220,7 +318,11 @@ export const replitSurfaceAdapter: SurfaceAdapter = {
     return createEmptyUserPromptSnapshot()
   },
   getThread() {
-    return createThreadSnapshot(window.location.href)
+    const url = new URL(window.location.href)
+    const segments = url.pathname.split("/").filter(Boolean)
+    const stablePath = segments.slice(0, 3).join("/")
+    const identity = `${url.origin}/${stablePath || ""}`
+    return createThreadSnapshot(window.location.href, identity)
   },
   getPanelMountContext() {
     return createPanelMountContext(findPromptInput())
