@@ -343,6 +343,50 @@ function normalizeCriterionLabel(value: string) {
   return normalized
 }
 
+function isGenericDisplayCriterion(value: string) {
+  const normalized = normalizeForMatch(normalizeCriterionLabel(value))
+  return (
+    !normalized ||
+    normalized === "solve the requested task" ||
+    normalized === "solve the user s latest request" ||
+    normalized === "the user s latest request" ||
+    /^solve\b/.test(normalized)
+  )
+}
+
+function canonicalAcceptanceCriteria(intent: AttemptIntent, baselineCriteria: string[] = []) {
+  const preferredBaseline = dedupe(
+    baselineCriteria
+      .map((item) => normalizeCriterionLabel(item))
+      .filter(Boolean),
+    6
+  )
+
+  if (preferredBaseline.some((item) => !isGenericDisplayCriterion(item))) {
+    return preferredBaseline
+  }
+
+  const fromIntent = dedupe(
+    intent.acceptance_criteria
+      .map((item) => normalizeCriterionLabel(item))
+      .filter(Boolean),
+    6
+  )
+
+  if (fromIntent.some((item) => !isGenericDisplayCriterion(item))) {
+    return fromIntent
+  }
+
+  return fromIntent.length ? fromIntent : [normalizeCriterionLabel(`Solve: ${intent.goal}`)]
+}
+
+function summarizeChecklistLabels(labels: string[], limit = 2) {
+  return labels
+    .slice(0, limit)
+    .map((label) => conciseGoal(label, 90))
+    .join(" • ")
+}
+
 function responseIsMostlyCode(responseText: string) {
   const stripped = normalizeWhitespace(
     responseText
@@ -374,14 +418,6 @@ function quickCriterionSatisfied(criterion: string, responseSummary: AfterPipeli
 
   const matched = tokens.filter((token) => haystack.includes(token))
   return matched.length >= Math.min(2, tokens.length) || matched.length / tokens.length >= 0.66
-}
-
-function issueMentionsCriterion(criterion: string, issues: string[]) {
-  const criterionTokens = extractMeaningfulTokens(criterion).slice(0, 6)
-  if (!criterionTokens.length) return false
-  const issueHaystack = normalizeForMatch(issues.join(" "))
-  const matched = criterionTokens.filter((token) => issueHaystack.includes(token))
-  return matched.length >= Math.min(2, criterionTokens.length)
 }
 
 function extractCodeBlocks(rawResponse: string) {
@@ -1078,18 +1114,21 @@ function buildAcceptanceChecklist(
   intent: AttemptIntent,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
-  responseSummary: AfterPipelineRequest["response_summary"]
+  responseSummary: AfterPipelineRequest["response_summary"],
+  baselineCriteria: string[] = [],
+  deepAnalysisRequested = false
 ) {
+  const checklistCriteria = canonicalAcceptanceCriteria(intent, baselineCriteria)
   const addressedKeys = new Set(stage2.addressed_criteria.map((item) => normalizeForMatch(item)))
-  const issuePool = [...stage2.missing_criteria, ...stage2.constraint_risks, ...detail.unresolved_risks]
+  const binaryDecisionRequired = deepAnalysisRequested || detail.inspection_depth !== "summary_only"
 
-  return intent.acceptance_criteria.slice(0, 6).map((criterion) =>
+  return checklistCriteria.slice(0, 6).map((criterion) =>
     AcceptanceChecklistItemSchema.parse({
       label: limitText(normalizeCriterionLabel(criterion), 72),
       status:
         addressedKeys.has(normalizeForMatch(criterion)) || quickCriterionSatisfied(criterion, responseSummary)
           ? "met"
-          : detail.inspection_depth !== "summary_only" && issueMentionsCriterion(criterion, issuePool)
+          : binaryDecisionRequired
             ? "missed"
             : "not_sure"
     })
@@ -1123,6 +1162,13 @@ function reconcileVerdictWithChecklist(
       "The answer shows meaningful progress against the request, but NoRetry still found gaps or weak evidence in the overall review.",
       ...verdict.findings.slice(1)
     ].slice(0, 3)
+  }
+
+  if (detail.inspection_depth !== "summary_only" && confidence === "low") {
+    confidence = "medium"
+    if (!confidenceReason) {
+      confidenceReason = "Deep review resolved the checklist against targeted evidence, even though some requirements still need work."
+    }
   }
 
   return VerdictOutputSchema.parse({
@@ -1376,6 +1422,46 @@ function buildDeepReviewPrimaryFinding(
   return `Deep review inspected the visible answer for proof that it satisfied: ${conciseGoal(intent.goal)}.`
 }
 
+function buildChecklistDrivenPrimaryFinding(
+  checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
+  intent: AttemptIntent,
+  deepAnalysisRequested: boolean
+) {
+  const concreteMissed = checklist
+    .filter((item) => item.status === "missed" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const concreteUnresolved = checklist
+    .filter((item) => item.status === "not_sure" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const concreteMet = checklist
+    .filter((item) => item.status === "met" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+
+  if (deepAnalysisRequested && concreteMissed.length) {
+    return `Deep review still could not confirm: ${conciseGoal(concreteMissed[0], 240)}.`
+  }
+
+  if (!deepAnalysisRequested && concreteMissed.length) {
+    return `The answer mentions progress, but it still does not clearly show: ${conciseGoal(concreteMissed[0], 240)}.`
+  }
+
+  if (!deepAnalysisRequested && concreteUnresolved.length) {
+    return `The answer mentions progress, but it still does not clearly show: ${conciseGoal(concreteUnresolved[0], 240)}.`
+  }
+
+  if (deepAnalysisRequested && concreteMet.length) {
+    return `Deep review found direct visible support for: ${summarizeChecklistLabels(concreteMet)}.`
+  }
+
+  if (concreteMet.length) {
+    return `The answer appears aligned with the goal and visibly covers: ${summarizeChecklistLabels(concreteMet)}.`
+  }
+
+  return deepAnalysisRequested
+    ? `Deep review inspected the visible answer for proof that it satisfied: ${conciseGoal(intent.goal)}.`
+    : `The answer appears aligned with the goal: ${conciseGoal(intent.goal)}.`
+}
+
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const parsed = input
   const changedFiles = summarizeChangedFiles(parsed.changed_file_paths_summary ?? [])
@@ -1583,8 +1669,25 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     safeNextPrompt = nextPromptOutput ?? safeNextPrompt
   }
 
-  const acceptanceChecklist = buildAcceptanceChecklist(intent, safeStage2, detailInspection, parsed.response_summary)
+  const acceptanceChecklist = buildAcceptanceChecklist(
+    intent,
+    safeStage2,
+    detailInspection,
+    parsed.response_summary,
+    parsed.baseline_acceptance_criteria,
+    deepAnalysisRequested
+  )
   safeVerdict = reconcileVerdictWithChecklist(safeVerdict, acceptanceChecklist, safeStage2, detailInspection)
+
+  const checklistDrivenPrimaryFinding = buildChecklistDrivenPrimaryFinding(
+    acceptanceChecklist,
+    intent,
+    deepAnalysisRequested
+  )
+  safeVerdict = VerdictOutputSchema.parse({
+    ...safeVerdict,
+    findings: dedupe([checklistDrivenPrimaryFinding, ...safeVerdict.findings], 3)
+  })
 
   if (deepAnalysisRequested && detailInspection.inspection_depth !== "summary_only") {
     const deepPrimaryFinding = buildDeepReviewPrimaryFinding(intent, safeStage2, detailInspection)

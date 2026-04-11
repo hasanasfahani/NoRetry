@@ -576,6 +576,13 @@ export default function PromptOptimizerApp() {
     )
   }
 
+  function canonicalChecklistLabels(result: AfterAnalysisResult | null) {
+    return (result?.acceptance_checklist ?? [])
+      .map((item) => item.label.trim())
+      .filter((label) => label && !isGenericChecklistLabel(label))
+      .slice(0, 6)
+  }
+
   function specificityScore(result: AfterAnalysisResult | null) {
     if (!result) return 0
 
@@ -745,22 +752,27 @@ export default function PromptOptimizerApp() {
       const compactProjectMemory = getCompactProjectMemory()
       const responseSummary = preprocessResponse(text)
       const changedFiles = collectChangedFilesSummary()
-      const rawResult = await analyzeAfterAttempt({
-        attempt,
-        response_summary: responseSummary,
-        response_text_fallback: text,
-        deep_analysis: deepAnalysis,
-        project_context: compactProjectMemory.projectContext,
-        current_state: compactProjectMemory.currentState,
-        error_summary: collectVisibleErrorSummary(),
-        changed_file_paths_summary: changedFiles
-      })
       const cachedReviews = sameAnalyzedTarget ? afterReviewCacheRef.current : null
       const baselineVerdict = sameAnalyzedTarget
         ? deepAnalysis
           ? cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
           : cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
         : null
+      const baselineAcceptanceCriteria =
+        sameAnalyzedTarget
+          ? canonicalChecklistLabels(afterReviewCacheRef.current?.quick ?? baselineVerdict ?? afterVerdict)
+          : []
+      const rawResult = await analyzeAfterAttempt({
+        attempt,
+        response_summary: responseSummary,
+        response_text_fallback: text,
+        deep_analysis: deepAnalysis,
+        baseline_acceptance_criteria: baselineAcceptanceCriteria,
+        project_context: compactProjectMemory.projectContext,
+        current_state: compactProjectMemory.currentState,
+        error_summary: collectVisibleErrorSummary(),
+        changed_file_paths_summary: changedFiles
+      })
       const result = baselineVerdict
         ? preserveStrongerReviewContext(rawResult, baselineVerdict)
         : rawResult

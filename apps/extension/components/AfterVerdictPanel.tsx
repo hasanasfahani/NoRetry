@@ -248,8 +248,21 @@ function isMeaningfulDeepAnalysisNote(value: string) {
   return true
 }
 
+function needsExpansionControl(value: string, threshold = 220) {
+  const trimmed = value.trim()
+  return trimmed.length > threshold || trimmed.includes("…")
+}
+
+function collapseForPreview(value: string, threshold = 220) {
+  const trimmed = value.trim()
+  if (trimmed.length <= threshold) return trimmed
+  return `${trimmed.slice(0, threshold - 1).trimEnd()}…`
+}
+
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
+  const [summaryExpanded, setSummaryExpanded] = useState(false)
+  const [expandedChecklistLabels, setExpandedChecklistLabels] = useState<Record<string, boolean>>({})
   const tone = toneForStatus(props.verdict.status)
   const statusLabel = userFacingStatusLabel(props.verdict.status)
   const isInitialChecking =
@@ -299,6 +312,11 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
       : activeReviewMode === "deep" && deepReviewEvidenceItems.length
       ? `Deep review inspected: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
       : ""
+  const shouldShowDeepReviewEvidenceHint =
+    Boolean(deepReviewEvidenceHint) &&
+    !summarySentence.toLowerCase().includes(deepReviewEvidenceHint.toLowerCase().replace(/^deep review (found|inspected):\s*/i, ""))
+  const summaryNeedsExpand = needsExpansionControl(summarySentence)
+  const displayedSummarySentence = summaryExpanded ? summarySentence : collapseForPreview(summarySentence)
   const shouldShowLoadingProgress =
     Boolean(props.loadingProgress) && (props.isEvaluating || props.isDeepAnalyzing) && !isPlannerOnlyState
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
@@ -349,6 +367,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     )
     planningTextareaRef.current.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [props.planningGoalNotice, props.planningGoal])
+
+  useEffect(() => {
+    setSummaryExpanded(false)
+  }, [summarySentence])
 
   useEffect(() => {
     if (!props.nextStepStarted || !nextStepSectionRef.current) return
@@ -603,7 +625,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : null}
             <div style={styles.summaryRow}>
               <p style={styles.summarySentence}>
-                {summarySentence}
+                {displayedSummarySentence}
                 {props.isEvaluating && !props.isDeepAnalyzing ? (
                   <span style={styles.inlinePulseWrap}>
                     <span style={styles.pulseBadge}>
@@ -615,6 +637,15 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 ) : null}
               </p>
             </div>
+            {summaryNeedsExpand ? (
+              <button
+                type="button"
+                style={styles.expandButton}
+                onClick={() => setSummaryExpanded((current) => !current)}
+              >
+                {summaryExpanded ? "See less" : "See more"}
+              </button>
+            ) : null}
             {shouldShowLoadingProgress ? (
               <div style={styles.loadingProgressWrap}>
                 <div style={styles.loadingProgressMeta}>
@@ -641,7 +672,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   Review: {reviewTone.label}
                 </span>
               </p>
-              {deepReviewEvidenceHint ? <p style={styles.statusHint}>{deepReviewEvidenceHint}</p> : null}
+              {shouldShowDeepReviewEvidenceHint ? <p style={styles.statusHint}>{deepReviewEvidenceHint}</p> : null}
               {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
             </div>
           </div>
@@ -655,8 +686,24 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 <li key={item.label} style={styles.listItem}>
                   <span style={styles.leadingBullet}>•</span>
                   <span style={styles.listText}>
-                    {item.label}
+                    {expandedChecklistLabels[item.label] || !needsExpansionControl(item.label, 110)
+                      ? item.label
+                      : collapseForPreview(item.label, 110)}
                     <span style={styles.inlineMarker}> {item.marker}</span>
+                    {needsExpansionControl(item.label, 110) ? (
+                      <button
+                        type="button"
+                        style={styles.inlineExpandButton}
+                        onClick={() =>
+                          setExpandedChecklistLabels((current) => ({
+                            ...current,
+                            [item.label]: !current[item.label]
+                          }))
+                        }
+                      >
+                        {expandedChecklistLabels[item.label] ? "See less" : "See more"}
+                      </button>
+                    ) : null}
                   </span>
                 </li>
               ))}
@@ -1083,6 +1130,17 @@ const styles = {
   summaryRow: {
     display: "block"
   } as CSSProperties,
+  expandButton: {
+    marginTop: 8,
+    alignSelf: "flex-start",
+    border: "none",
+    background: "transparent",
+    color: "#4338ca",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+    padding: 0
+  } as CSSProperties,
   loadingProgressWrap: {
     marginTop: 12,
     padding: "10px 12px",
@@ -1188,6 +1246,16 @@ const styles = {
     color: "#334155",
     fontWeight: 700,
     whiteSpace: "nowrap"
+  } as CSSProperties,
+  inlineExpandButton: {
+    marginLeft: 8,
+    border: "none",
+    background: "transparent",
+    color: "#4338ca",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+    padding: 0
   } as CSSProperties,
   footer: {
     display: "flex",

@@ -264,6 +264,7 @@ export const AfterPipelineRequestSchema = z.object({
   response_summary: ResponsePreprocessorOutputSchema,
   response_text_fallback: z.string().default(""),
   deep_analysis: z.boolean().default(false),
+  baseline_acceptance_criteria: z.array(z.string().max(120)).max(6).default([]),
   project_context: z.string().max(4000).default(""),
   current_state: z.string().max(3000).default(""),
   error_summary: z.string().max(300).nullable().optional(),
