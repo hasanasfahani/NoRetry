@@ -598,13 +598,16 @@ export default function PromptOptimizerApp() {
     try {
       const compactProjectMemory = getCompactProjectMemory()
       const responseSummary = preprocessResponse(text)
+      const changedFiles = collectChangedFilesSummary()
       const result = await analyzeAfterAttempt({
         attempt,
         response_summary: responseSummary,
         response_text_fallback: text,
         deep_analysis: deepAnalysis,
         project_context: compactProjectMemory.projectContext,
-        current_state: compactProjectMemory.currentState
+        current_state: compactProjectMemory.currentState,
+        error_summary: collectVisibleErrorSummary(),
+        changed_file_paths_summary: changedFiles
       })
       if (requestId !== afterEvaluationRequestIdRef.current) {
         return false

@@ -137,6 +137,18 @@ function responseFocusSnippet(responseSummary: AfterPipelineRequest["response_su
   return conciseGoal(snippet || "the visible answer")
 }
 
+function summarizeChangedFiles(changedFiles: string[]) {
+  const normalized = dedupe(
+    changedFiles
+      .map((item) => normalizeWhitespace(item))
+      .filter(Boolean)
+      .map((item) => limitText(item, 80)),
+    3
+  )
+
+  return normalized
+}
+
 function summarizeVisibleAnswer(responseSummary: AfterPipelineRequest["response_summary"]) {
   const snippet = responseFocusSnippet(responseSummary)
   const compact = snippet.replace(/\s+/g, " ").trim()
@@ -543,7 +555,9 @@ function buildStage1Prompts(
   payload: AfterPipelineRequest["response_summary"],
   intent: AttemptIntent,
   projectContext = "",
-  currentState = ""
+  currentState = "",
+  changedFiles: string[] = [],
+  errorSummary = ""
 ) {
   return {
     system:
@@ -553,6 +567,8 @@ function buildStage1Prompts(
       task_type: intent.task_type,
       project_context: projectContext,
       current_state: currentState,
+      changed_file_paths_summary: summarizeChangedFiles(changedFiles),
+      error_summary: errorSummary,
       response_summary: {
         response_length: payload.response_length,
         has_code_blocks: payload.has_code_blocks,
@@ -574,7 +590,9 @@ function buildStage2Prompts(
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   candidates: EvidenceCandidate[],
   projectContext = "",
-  currentState = ""
+  currentState = "",
+  changedFiles: string[] = [],
+  errorSummary = ""
 ) {
   return {
     system:
@@ -587,6 +605,8 @@ function buildStage2Prompts(
       },
       project_context: projectContext,
       current_state: currentState,
+      changed_file_paths_summary: summarizeChangedFiles(changedFiles),
+      error_summary: errorSummary,
       stage_1: stage1,
       candidates: candidates.map((candidate) => ({
         id: candidate.id,
@@ -604,7 +624,9 @@ function buildStage3Prompts(
   stage2: ReturnType<typeof EvidenceTargetingSchema.parse>,
   selectedEvidence: EvidenceCandidate[],
   projectContext = "",
-  currentState = ""
+  currentState = "",
+  changedFiles: string[] = [],
+  errorSummary = ""
 ) {
   return {
     system:
@@ -617,6 +639,8 @@ function buildStage3Prompts(
       },
       project_context: projectContext,
       current_state: currentState,
+      changed_file_paths_summary: summarizeChangedFiles(changedFiles),
+      error_summary: errorSummary,
       stage_1: stage1,
       stage_2: stage2,
       selected_evidence: selectedEvidence.map((candidate) => ({
@@ -635,7 +659,9 @@ function buildStage4Prompts(
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
   projectContext = "",
-  currentState = ""
+  currentState = "",
+  changedFiles: string[] = [],
+  errorSummary = ""
 ) {
   return {
     system:
@@ -644,6 +670,8 @@ function buildStage4Prompts(
       intent,
       project_context: projectContext,
       current_state: currentState,
+      changed_file_paths_summary: summarizeChangedFiles(changedFiles),
+      error_summary: errorSummary,
       stage_1: stage1,
       stage_2: stage2,
       detail_inspection: detail,
@@ -666,7 +694,9 @@ function buildStage5Prompts(
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   projectContext = "",
-  currentState = ""
+  currentState = "",
+  changedFiles: string[] = [],
+  errorSummary = ""
 ) {
   return {
     system:
@@ -676,6 +706,8 @@ function buildStage5Prompts(
       intent,
       project_context: projectContext,
       current_state: currentState,
+      changed_file_paths_summary: summarizeChangedFiles(changedFiles),
+      error_summary: errorSummary,
       verdict,
       missing_criteria: stage2.missing_criteria,
       constraint_risks: stage2.constraint_risks
@@ -683,7 +715,11 @@ function buildStage5Prompts(
   }
 }
 
-function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"]) {
+function fallbackStage1(
+  responseSummary: AfterPipelineRequest["response_summary"],
+  changedFiles: string[] = [],
+  errorSummary = ""
+) {
   const responseMode =
     responseSummary.has_code_blocks || responseSummary.mentioned_files.length
       ? "implemented"
@@ -700,9 +736,10 @@ function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"
         ? "moderate"
         : "narrow"
 
+  const visibleFileHints = summarizeChangedFiles([...changedFiles, ...responseSummary.mentioned_files])
   const evidenceSummary =
-    responseSummary.mentioned_files.length > 0
-      ? `The answer claims changes in ${responseSummary.mentioned_files.slice(0, 2).join(", ")}.`
+    visibleFileHints.length > 0
+      ? `The answer claims changes in ${visibleFileHints.join(", ")}${errorSummary ? ` to address ${limitText(errorSummary, 120)}` : ""}.`
       : responseSummary.success_signals[0]
         ? limitText(responseSummary.success_signals[0], 220)
         : summarizeVisibleAnswer(responseSummary)
@@ -1033,6 +1070,8 @@ function fallbackNextPrompt(
 
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const parsed = input
+  const changedFiles = summarizeChangedFiles(parsed.changed_file_paths_summary ?? [])
+  const errorSummary = parsed.error_summary?.trim() ?? ""
   const deepAnalysisRequested = parsed.deep_analysis ?? false
   const budgetSoftLimit = deepAnalysisRequested ? 2800 : 1800
   const stageSoftDeadline = deepAnalysisRequested ? AFTER_DEEP_STAGE_SOFT_DEADLINE_MS : AFTER_STAGE_SOFT_DEADLINE_MS
@@ -1066,7 +1105,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     parsed.response_summary,
     intent,
     parsed.project_context,
-    parsed.current_state
+    parsed.current_state,
+    changedFiles,
+    errorSummary
   )
   const stage1 = await callStructuredJson(
     stage1Prompts.system,
@@ -1075,7 +1116,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 120 : 180
   )
   tokenUsageTotal += estimateTokensFromText(stage1Prompts.system, stage1Prompts.user)
-  const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary)
+  const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary, changedFiles, errorSummary)
 
   const rawResponse = parsed.response_text_fallback || parsed.response_summary.response_text
   const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary)
@@ -1093,7 +1134,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       safeStage1,
       evidenceCandidates,
       parsed.project_context,
-      parsed.current_state
+      parsed.current_state,
+      changedFiles,
+      errorSummary
     )
     const stage2Targeting = await callStructuredJson(
       stage2Prompts.system,
@@ -1127,7 +1170,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       targetedEvidence,
       selectedEvidence,
       parsed.project_context,
-      parsed.current_state
+      parsed.current_state,
+      changedFiles,
+      errorSummary
     )
     const detail = await callStructuredJson(
       stage3Prompts.system,
@@ -1154,7 +1199,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
         success_signals: parsed.response_summary.success_signals,
         failure_signals: parsed.response_summary.failure_signals,
         uncertainty_signals: parsed.response_summary.uncertainty_signals
-      }
+      },
+      changed_file_paths_summary: changedFiles,
+      error_summary: errorSummary
     })
   }
   const stage4Alignment = await callStructuredJson(
@@ -1185,7 +1232,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       detailInspection,
       parsed.response_summary,
       parsed.project_context,
-      parsed.current_state
+      parsed.current_state,
+      changedFiles,
+      errorSummary
     )
     const verdict = await callStructuredJson(
       stage4Prompts.system,
@@ -1204,7 +1253,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       safeVerdict,
       safeStage2,
       parsed.project_context,
-      parsed.current_state
+      parsed.current_state,
+      changedFiles,
+      errorSummary
     )
     const nextPromptOutput = await callStructuredJson(
       stage5Prompts.system,

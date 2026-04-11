@@ -263,7 +263,9 @@ export const AfterPipelineRequestSchema = z.object({
   response_text_fallback: z.string().default(""),
   deep_analysis: z.boolean().default(false),
   project_context: z.string().max(4000).default(""),
-  current_state: z.string().max(3000).default("")
+  current_state: z.string().max(3000).default(""),
+  error_summary: z.string().max(300).nullable().optional(),
+  changed_file_paths_summary: z.array(z.string().max(180)).max(20).default([])
 })
 
 export const AfterPipelineResponseSchema = AfterAnalysisResultSchema
