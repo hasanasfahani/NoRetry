@@ -195,6 +195,9 @@ function humanizeChecklistLabel(value: string) {
       .trim()
       .replace(/^./, (char) => char.toUpperCase())
   }
+  if (/\s/.test(trimmed) && !trimmed.includes("_")) {
+    return trimmed.replace(/\s+/g, " ").replace(/^./, (char) => char.toUpperCase())
+  }
   return value
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase())

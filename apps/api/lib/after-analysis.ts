@@ -505,14 +505,36 @@ function estimateTokensFromText(...parts: string[]) {
   return Math.max(1, Math.ceil(chars / 4))
 }
 
+function hasGenericAcceptanceCriterion(criterion: string) {
+  const normalized = normalizeForMatch(criterion)
+  return (
+    !normalized ||
+    normalized === "solve the requested task" ||
+    normalized === "solve the user s latest request" ||
+    /^solve\s+(the|this|that)\b/.test(normalized)
+  )
+}
+
 function needsFallbackIntent(intent: AttemptIntent) {
-  return intent.task_type === "other" && intent.constraints.length === 0 && intent.acceptance_criteria.length === 0
+  if (intent.task_type === "other" && intent.constraints.length === 0 && intent.acceptance_criteria.length === 0) {
+    return true
+  }
+
+  const goalTokens = extractMeaningfulTokens(intent.goal)
+  const weakCriteria =
+    intent.acceptance_criteria.length === 0 ||
+    intent.acceptance_criteria.every((criterion) => hasGenericAcceptanceCriterion(criterion))
+
+  return (
+    intent.task_type === "other" &&
+    (weakCriteria || goalTokens.length < 3)
+  )
 }
 
 function buildIntentExtractionPrompts(rawPrompt: string, projectContext = "", currentState = "") {
   return {
     system:
-      "Extract intent for an AI debugging loop. Return JSON only with keys: task_type, goal, constraints, acceptance_criteria. Keep it minimal and do not invent detailed constraints.",
+      "Extract intent for an AI debugging loop. Return JSON only with keys: task_type, goal, constraints, acceptance_criteria. Use the project context and current state to infer the user's real requirement when the raw prompt is short or ambiguous. Acceptance criteria must be concrete and user-facing, not generic placeholders like 'solve the request'. Keep it minimal and do not invent detailed constraints.",
     user: JSON.stringify({ raw_prompt: rawPrompt, project_context: projectContext, current_state: currentState })
   }
 }
@@ -525,7 +547,7 @@ function buildStage1Prompts(
 ) {
   return {
     system:
-      "Summarize what the assistant appears to have done. Return JSON only with keys: assistant_action_summary, claimed_evidence, response_mode, scope_assessment.",
+      "Summarize what the assistant appears to have done in one concrete sentence. Use the saved goal, project context, and current state to describe the actual claimed changes or claimed fix. Avoid parroting filler like 'three things were changed' without naming what changed. Return JSON only with keys: assistant_action_summary, claimed_evidence, response_mode, scope_assessment.",
     user: JSON.stringify({
       intent_goal: compressGoal(intent.goal),
       task_type: intent.task_type,
@@ -678,7 +700,13 @@ function fallbackStage1(responseSummary: AfterPipelineRequest["response_summary"
         ? "moderate"
         : "narrow"
 
-  const summarySource = summarizeVisibleAnswer(responseSummary)
+  const evidenceSummary =
+    responseSummary.mentioned_files.length > 0
+      ? `The answer claims changes in ${responseSummary.mentioned_files.slice(0, 2).join(", ")}.`
+      : responseSummary.success_signals[0]
+        ? limitText(responseSummary.success_signals[0], 220)
+        : summarizeVisibleAnswer(responseSummary)
+  const summarySource = evidenceSummary
 
   return Stage1OutputSchema.parse({
     assistant_action_summary: summarySource.slice(0, 220),
@@ -938,6 +966,8 @@ function fallbackVerdict(
       ? `The answer appears to address ${responseFocusSnippet(responseSummary)} instead of ${intent.goal.trim()}.`
       : !codeHeavyTask && deepReviewed && detail.evidence_strength === "weak"
         ? "NoRetry ran a deeper review, but the visible evidence is still too limited to confirm the request is fully satisfied."
+      : stage2.problem_fit === "correct" && stage2.missing_criteria.length
+        ? `The answer mentions progress, but it still does not clearly show: ${normalizeCriterionLabel(stage2.missing_criteria[0])}.`
       : stage2.problem_fit === "correct" && !stage2.missing_criteria.length
         ? `The answer appears aligned with the goal: ${intent.goal.trim()}.`
         : stage2.problem_fit === "correct"
@@ -1111,12 +1141,20 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   const alignmentPrompts = {
     system:
-      "Compare the assistant response to the intended goal. Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.",
+      "Compare the assistant response to the intended goal. Use the saved project context and current debugging state so the judgment stays grounded in the user's real situation. Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.",
     user: JSON.stringify({
       intent,
+      project_context: parsed.project_context,
+      current_state: parsed.current_state,
       stage_1: safeStage1,
       detail_inspection: detailInspection,
-      response_excerpts: buildResponseExcerpts(parsed.response_summary)
+      response_excerpts: buildResponseExcerpts(parsed.response_summary),
+      response_summary: {
+        mentioned_files: parsed.response_summary.mentioned_files,
+        success_signals: parsed.response_summary.success_signals,
+        failure_signals: parsed.response_summary.failure_signals,
+        uncertainty_signals: parsed.response_summary.uncertainty_signals
+      }
     })
   }
   const stage4Alignment = await callStructuredJson(

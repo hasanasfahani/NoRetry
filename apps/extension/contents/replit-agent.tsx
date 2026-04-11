@@ -925,6 +925,13 @@ export default function PromptOptimizerApp() {
     const sameChat = threadSnapshot.identity === lastEvaluatedChatHrefRef.current
     const currentDraftPrompt = draftSnapshot.text.trim()
     const savedDraftPrompt = afterPlanningGoal.trim() || afterAttempt?.raw_prompt.trim() || ""
+    const initialResponseSummary = text ? preprocessResponse(text) : null
+    const shouldStartWithDeepReview =
+      codeAnalysisMode === "deep" &&
+      Boolean(
+        initialResponseSummary &&
+          (initialResponseSummary.has_code_blocks || initialResponseSummary.mentioned_files.length > 0)
+      )
     const sameMessage =
       latestMessageId && lastEvaluatedAssistantMessageIdRef.current
         ? latestMessageId === lastEvaluatedAssistantMessageIdRef.current
@@ -1071,10 +1078,10 @@ export default function PromptOptimizerApp() {
       buildAfterPlaceholder("Checking the latest change.")
     )
     setIsEvaluatingAfterResponse(true)
-    startAfterLoadingProgress(codeAnalysisMode === "deep" ? "deep" : "quick")
+    startAfterLoadingProgress(shouldStartWithDeepReview ? "deep" : "quick")
 
     try {
-      const opened = await runAfterEvaluation(true, codeAnalysisMode === "deep")
+      const opened = await runAfterEvaluation(true, shouldStartWithDeepReview)
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
