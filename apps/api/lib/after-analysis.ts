@@ -172,8 +172,12 @@ function hasWeakGoal(goal: string) {
 function mergeIntentWithProjectMemory(
   intent: AttemptIntent,
   projectContext: string,
-  currentState: string
+  currentState: string,
+  options?: {
+    aggressive?: boolean
+  }
 ): AttemptIntent {
+  const aggressive = options?.aggressive ?? false
   const currentGoalHint =
     extractPrefixedLine(currentState, ["working on", "current goal", "goal", "what i am working on"]) ||
     extractPrefixedLine(projectContext, ["user-facing goal", "definition of done", "goal"])
@@ -187,18 +191,26 @@ function mergeIntentWithProjectMemory(
     (line) => /must|non-negotiable|do not|keep|without|visible|works|survive|no /i.test(line)
   )
 
-  const mergedGoal = hasWeakGoal(intent.goal) && currentGoalHint ? currentGoalHint : intent.goal
-  const mergedConstraints = dedupe([...intent.constraints, ...constraintsFromContext], 6)
+  const weakGoal = hasWeakGoal(intent.goal)
+  const weakCriteria =
+    intent.acceptance_criteria.length === 0 ||
+    intent.acceptance_criteria.every((criterion) => hasGenericAcceptanceCriterion(criterion))
+
+  const mergedGoal = weakGoal && currentGoalHint ? currentGoalHint : intent.goal
+  const mergedConstraints =
+    aggressive || intent.constraints.length === 0
+      ? dedupe([...intent.constraints, ...constraintsFromContext], 6)
+      : intent.constraints
 
   const contextCriteria = dedupe([...definitionOfDone, ...userIntentToPreserve], 6).filter((item) =>
     extractMeaningfulTokens(item).length >= 3
   )
 
-  const mergedAcceptance =
-    intent.acceptance_criteria.length === 0 ||
-    intent.acceptance_criteria.every((criterion) => hasGenericAcceptanceCriterion(criterion))
-      ? dedupe([...contextCriteria, ...intent.acceptance_criteria], 6)
-      : dedupe([...intent.acceptance_criteria, ...contextCriteria], 6)
+  const mergedAcceptance = weakCriteria
+    ? dedupe([...contextCriteria, ...intent.acceptance_criteria], 6)
+    : aggressive
+      ? dedupe([...intent.acceptance_criteria, ...contextCriteria], 6)
+      : intent.acceptance_criteria
 
   return {
     ...intent,
@@ -1270,7 +1282,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     }
   }
 
-  intent = mergeIntentWithProjectMemory(intent, parsed.project_context, parsed.current_state)
+  intent = mergeIntentWithProjectMemory(intent, parsed.project_context, parsed.current_state, {
+    aggressive: deepAnalysisRequested
+  })
 
   const stage1Prompts = buildStage1Prompts(
     parsed.response_summary,
