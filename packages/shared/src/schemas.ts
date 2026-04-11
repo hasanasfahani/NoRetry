@@ -168,7 +168,7 @@ export const VerdictOutputSchema = z.object({
 })
 
 export const AcceptanceChecklistItemSchema = z.object({
-  label: z.string().max(120),
+  label: z.string().max(240),
   status: z.enum(["met", "not_sure", "missed"])
 })
 
@@ -264,7 +264,7 @@ export const AfterPipelineRequestSchema = z.object({
   response_summary: ResponsePreprocessorOutputSchema,
   response_text_fallback: z.string().default(""),
   deep_analysis: z.boolean().default(false),
-  baseline_acceptance_criteria: z.array(z.string().max(120)).max(6).default([]),
+  baseline_acceptance_criteria: z.array(z.string().max(240)).max(6).default([]),
   project_context: z.string().max(4000).default(""),
   current_state: z.string().max(3000).default(""),
   error_summary: z.string().max(300).nullable().optional(),

@@ -286,10 +286,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const activeReviewMode = props.displayedReviewMode
   const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
-  const deepReviewLimitedHint =
-    activeReviewMode === "deep" && props.verdict.confidence === "low"
-      ? props.verdict.confidence_reason || "Deep review ran, but the visible evidence is still limited."
-      : ""
+  const deepReviewLimitedHint = ""
   const deepReviewEvidenceItems =
     activeReviewMode === "deep"
       ? Array.from(
@@ -313,6 +310,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
       ? `Deep review inspected: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
       : ""
   const shouldShowDeepReviewEvidenceHint =
+    activeReviewMode !== "deep" &&
     Boolean(deepReviewEvidenceHint) &&
     !summarySentence.toLowerCase().includes(deepReviewEvidenceHint.toLowerCase().replace(/^deep review (found|inspected):\s*/i, ""))
   const summaryNeedsExpand = needsExpansionControl(summarySentence)

@@ -1124,7 +1124,7 @@ function buildAcceptanceChecklist(
 
   return checklistCriteria.slice(0, 6).map((criterion) =>
     AcceptanceChecklistItemSchema.parse({
-      label: limitText(normalizeCriterionLabel(criterion), 72),
+      label: normalizeCriterionLabel(criterion),
       status:
         addressedKeys.has(normalizeForMatch(criterion)) || quickCriterionSatisfied(criterion, responseSummary)
           ? "met"
@@ -1139,10 +1139,12 @@ function reconcileVerdictWithChecklist(
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
   checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
-  detail: ReturnType<typeof DetailInspectionSchema.parse>
+  detail: ReturnType<typeof DetailInspectionSchema.parse>,
+  deepAnalysisRequested = false
 ) {
   const metCount = checklist.filter((item) => item.status === "met").length
   const missedCount = checklist.filter((item) => item.status === "missed").length
+  const unresolvedCount = checklist.filter((item) => item.status === "not_sure").length
   const allKnownCriteriaMet = checklist.length > 0 && metCount === checklist.length
   const hasUnresolvedStageRisks = stage2.missing_criteria.length > 0 || stage2.constraint_risks.length > 0
 
@@ -1168,6 +1170,13 @@ function reconcileVerdictWithChecklist(
     confidence = "medium"
     if (!confidenceReason) {
       confidenceReason = "Deep review resolved the checklist against targeted evidence, even though some requirements still need work."
+    }
+  }
+
+  if (deepAnalysisRequested && unresolvedCount === 0 && confidence === "low") {
+    confidence = "medium"
+    if (!confidenceReason) {
+      confidenceReason = "Deep review resolved every checklist item to a yes-or-no answer."
     }
   }
 
@@ -1438,15 +1447,15 @@ function buildChecklistDrivenPrimaryFinding(
     .map((item) => item.label)
 
   if (deepAnalysisRequested && concreteMissed.length) {
-    return `Deep review still could not confirm: ${conciseGoal(concreteMissed[0], 240)}.`
+    return `Deep review still could not confirm: ${concreteMissed[0]}.`
   }
 
   if (!deepAnalysisRequested && concreteMissed.length) {
-    return `The answer mentions progress, but it still does not clearly show: ${conciseGoal(concreteMissed[0], 240)}.`
+    return `The answer mentions progress, but it still does not clearly show: ${concreteMissed[0]}.`
   }
 
   if (!deepAnalysisRequested && concreteUnresolved.length) {
-    return `The answer mentions progress, but it still does not clearly show: ${conciseGoal(concreteUnresolved[0], 240)}.`
+    return `The answer mentions progress, but it still does not clearly show: ${concreteUnresolved[0]}.`
   }
 
   if (deepAnalysisRequested && concreteMet.length) {
@@ -1677,7 +1686,13 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     parsed.baseline_acceptance_criteria,
     deepAnalysisRequested
   )
-  safeVerdict = reconcileVerdictWithChecklist(safeVerdict, acceptanceChecklist, safeStage2, detailInspection)
+  safeVerdict = reconcileVerdictWithChecklist(
+    safeVerdict,
+    acceptanceChecklist,
+    safeStage2,
+    detailInspection,
+    deepAnalysisRequested
+  )
 
   const checklistDrivenPrimaryFinding = buildChecklistDrivenPrimaryFinding(
     acceptanceChecklist,
