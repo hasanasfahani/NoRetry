@@ -249,6 +249,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     props.verdict.inspection_depth !== "summary_only" && props.verdict.confidence === "low"
       ? props.verdict.confidence_reason || "Deep review ran, but the visible evidence is still limited."
       : ""
+  const deepReviewEvidenceHint =
+    props.verdict.inspection_depth !== "summary_only" && props.verdict.stage_1.claimed_evidence.length
+      ? `Deep review inspected: ${props.verdict.stage_1.claimed_evidence.slice(0, 2).join(" • ")}`
+      : ""
   const shouldShowLoadingProgress =
     Boolean(props.loadingProgress) && (props.isEvaluating || props.isDeepAnalyzing) && !isPlannerOnlyState
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
@@ -591,6 +595,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   Review: {reviewTone.label}
                 </span>
               </p>
+              {deepReviewEvidenceHint ? <p style={styles.statusHint}>{deepReviewEvidenceHint}</p> : null}
               {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
             </div>
           </div>

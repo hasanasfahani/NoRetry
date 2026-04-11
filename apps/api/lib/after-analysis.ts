@@ -160,6 +160,26 @@ function summarizeVisibleAnswer(responseSummary: AfterPipelineRequest["response_
   return `The answer appears focused on: ${compact}`
 }
 
+function summarizeChangeClaims(responseSummary: AfterPipelineRequest["response_summary"]) {
+  return dedupe(
+    responseSummary.change_claims
+      .map((claim) => normalizeWhitespace(claim))
+      .filter(Boolean)
+      .map((claim) => limitText(claim, 140)),
+    3
+  )
+}
+
+function summarizeValidationSignals(responseSummary: AfterPipelineRequest["response_summary"]) {
+  return dedupe(
+    responseSummary.validation_signals
+      .map((signal) => normalizeWhitespace(signal))
+      .filter(Boolean)
+      .map((signal) => limitText(signal, 140)),
+    3
+  )
+}
+
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim()
 }
@@ -260,7 +280,9 @@ function candidateMatchesIntent(candidate: string, intent: AttemptIntent) {
 function buildEvidenceCandidates(
   rawResponse: string,
   intent: AttemptIntent,
-  responseSummary: AfterPipelineRequest["response_summary"]
+  responseSummary: AfterPipelineRequest["response_summary"],
+  changedFiles: string[] = [],
+  errorSummary = ""
 ) {
   const candidates: EvidenceCandidate[] = []
   const seen = new Set<string>()
@@ -282,6 +304,15 @@ function buildEvidenceCandidates(
         excerpt: limitText(sentence, EVIDENCE_EXCERPT_LIMIT)
       })
     )
+
+  responseSummary.change_claims.slice(0, 3).forEach((claim, index) =>
+    addCandidate({
+      id: `change-claim-${index + 1}`,
+      type: "claim",
+      label: `Claimed change ${index + 1}`,
+      excerpt: limitText(claim, EVIDENCE_EXCERPT_LIMIT)
+    })
+  )
 
   extractCodeBlocks(rawResponse)
     .slice(0, 3)
@@ -319,6 +350,24 @@ function buildEvidenceCandidates(
     })
   )
 
+  changedFiles.slice(0, 3).forEach((file, index) =>
+    addCandidate({
+      id: `changed-file-${index + 1}`,
+      type: "file",
+      label: `Changed file hint ${index + 1}`,
+      excerpt: file
+    })
+  )
+
+  if (errorSummary) {
+    addCandidate({
+      id: "error-summary",
+      type: "constraint",
+      label: "Visible error summary",
+      excerpt: limitText(errorSummary, EVIDENCE_EXCERPT_LIMIT)
+    })
+  }
+
   intent.constraints
     .filter((constraint) => constraintMentioned(constraint, responseSummary) || candidateMatchesIntent(constraint, intent))
     .slice(0, 2)
@@ -342,6 +391,8 @@ function shouldInspectDetails(intent: AttemptIntent, responseSummary: AfterPipel
     codeHeavyTask ||
     responseSummary.has_code_blocks ||
     responseSummary.mentioned_files.length > 0 ||
+    responseSummary.change_claims.length > 0 ||
+    responseSummary.validation_signals.length > 0 ||
     responseSummary.success_signals.length > 0 ||
     hasStrictIntent ||
     stage1.response_mode === "uncertain"
@@ -573,6 +624,8 @@ function buildStage1Prompts(
         response_length: payload.response_length,
         has_code_blocks: payload.has_code_blocks,
         mentioned_files: payload.mentioned_files,
+        change_claims: summarizeChangeClaims(payload),
+        validation_signals: summarizeValidationSignals(payload),
         certainty_signals: payload.certainty_signals,
         uncertainty_signals: payload.uncertainty_signals,
         success_signals: payload.success_signals,
@@ -588,6 +641,7 @@ function buildStage1Prompts(
 function buildStage2Prompts(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
+  responseSummary: AfterPipelineRequest["response_summary"],
   candidates: EvidenceCandidate[],
   projectContext = "",
   currentState = "",
@@ -596,7 +650,7 @@ function buildStage2Prompts(
 ) {
   return {
     system:
-      "Choose which raw answer excerpts deserve closer inspection. Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.",
+      "Choose which raw answer excerpts deserve closer inspection. Prioritize evidence that can confirm or refute the claimed fix against the saved goal, current debugging state, repeated bugs, and visible error summary. Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.",
     user: JSON.stringify({
       intent: {
         goal: compressGoal(intent.goal),
@@ -608,6 +662,8 @@ function buildStage2Prompts(
       changed_file_paths_summary: summarizeChangedFiles(changedFiles),
       error_summary: errorSummary,
       stage_1: stage1,
+      visible_change_claims: summarizeChangeClaims(responseSummary),
+      visible_validation_signals: summarizeValidationSignals(responseSummary),
       candidates: candidates.map((candidate) => ({
         id: candidate.id,
         type: candidate.type,
@@ -622,6 +678,7 @@ function buildStage3Prompts(
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof EvidenceTargetingSchema.parse>,
+  responseSummary: AfterPipelineRequest["response_summary"],
   selectedEvidence: EvidenceCandidate[],
   projectContext = "",
   currentState = "",
@@ -630,7 +687,7 @@ function buildStage3Prompts(
 ) {
   return {
     system:
-      "Inspect the selected raw answer excerpts and decide whether they support the assistant's claims. Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.",
+      "Inspect the selected raw answer excerpts and decide whether they support the assistant's claims. Use the project context, current debugging state, repeated bugs, and the current visible error summary to distinguish a real fix from a partial or drifting change. Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.",
     user: JSON.stringify({
       intent: {
         goal: compressGoal(intent.goal),
@@ -641,6 +698,8 @@ function buildStage3Prompts(
       current_state: currentState,
       changed_file_paths_summary: summarizeChangedFiles(changedFiles),
       error_summary: errorSummary,
+      visible_change_claims: summarizeChangeClaims(responseSummary),
+      visible_validation_signals: summarizeValidationSignals(responseSummary),
       stage_1: stage1,
       stage_2: stage2,
       selected_evidence: selectedEvidence.map((candidate) => ({
@@ -665,7 +724,7 @@ function buildStage4Prompts(
 ) {
   return {
     system:
-      "Generate a trustworthy verdict for the AI response. Prefer UNVERIFIED over success when evidence is weak. Return JSON only with keys: status, confidence, findings, issues.",
+      "Generate a trustworthy verdict for the AI response. Prefer UNVERIFIED over success when evidence is weak. Use the project context, current debugging state, changed file hints, and visible error summary to judge whether the answer really resolves the user's debugging situation instead of only sounding plausible. Return JSON only with keys: status, confidence, findings, issues.",
     user: JSON.stringify({
       intent,
       project_context: projectContext,
@@ -679,6 +738,8 @@ function buildStage4Prompts(
         response_length: responseSummary.response_length,
         has_code_blocks: responseSummary.has_code_blocks,
         mentioned_files: responseSummary.mentioned_files,
+        change_claims: summarizeChangeClaims(responseSummary),
+        validation_signals: summarizeValidationSignals(responseSummary),
         certainty_signals: responseSummary.certainty_signals,
         uncertainty_signals: responseSummary.uncertainty_signals,
         success_signals: responseSummary.success_signals,
@@ -740,6 +801,8 @@ function fallbackStage1(
   const evidenceSummary =
     visibleFileHints.length > 0
       ? `The answer claims changes in ${visibleFileHints.join(", ")}${errorSummary ? ` to address ${limitText(errorSummary, 120)}` : ""}.`
+      : responseSummary.change_claims[0]
+        ? limitText(responseSummary.change_claims[0], 220)
       : responseSummary.success_signals[0]
         ? limitText(responseSummary.success_signals[0], 220)
         : summarizeVisibleAnswer(responseSummary)
@@ -750,6 +813,8 @@ function fallbackStage1(
     claimed_evidence: dedupe(
       [
         ...responseSummary.success_signals,
+        ...responseSummary.change_claims,
+        ...responseSummary.validation_signals,
         ...responseSummary.mentioned_files,
         ...(responseSummary.has_code_blocks ? ["Included code blocks"] : [])
       ],
@@ -1119,7 +1184,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary, changedFiles, errorSummary)
 
   const rawResponse = parsed.response_text_fallback || parsed.response_summary.response_text
-  const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary)
+  const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary, changedFiles, errorSummary)
   const shouldZoomIn = deepAnalysisRequested && evidenceCandidates.length > 0
 
   let targetedEvidence = EvidenceTargetingSchema.parse({
@@ -1132,6 +1197,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     const stage2Prompts = buildStage2Prompts(
       intent,
       safeStage1,
+      parsed.response_summary,
       evidenceCandidates,
       parsed.project_context,
       parsed.current_state,
@@ -1168,6 +1234,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       intent,
       safeStage1,
       targetedEvidence,
+      parsed.response_summary,
       selectedEvidence,
       parsed.project_context,
       parsed.current_state,
@@ -1196,6 +1263,8 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       response_excerpts: buildResponseExcerpts(parsed.response_summary),
       response_summary: {
         mentioned_files: parsed.response_summary.mentioned_files,
+        change_claims: summarizeChangeClaims(parsed.response_summary),
+        validation_signals: summarizeValidationSignals(parsed.response_summary),
         success_signals: parsed.response_summary.success_signals,
         failure_signals: parsed.response_summary.failure_signals,
         uncertainty_signals: parsed.response_summary.uncertainty_signals

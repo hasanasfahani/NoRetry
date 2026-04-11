@@ -11,6 +11,10 @@ const CERTAINTY_REGEX = /\b(done|implemented|fixed|resolved|validated|confirmed|
 const UNCERTAINTY_REGEX = /\b(maybe|might|should|could|try|possibly|perhaps|likely)\b/gi
 const SUCCESS_REGEX = /\b(fixed|resolved|done|implemented|working|completed|validated)\b/gi
 const FAILURE_REGEX = /\b(error|failed|failure|broken|exception|traceback|unable|cannot|can't|doesn't work)\b/gi
+const CHANGE_CLAIM_REGEX =
+  /\b(i\s+(?:changed|updated|fixed|added|removed|moved|reworked|patched|persisted|guarded|hooked|rewired)|(?:changed|updated|fixed|added|removed|moved|reworked|patched|persisted|guarded|hooked|rewired)\s+(?:the|this|that|these)|(?:three|two|several)\s+things\s+were\s+changed)\b/i
+const VALIDATION_SIGNAL_REGEX =
+  /\b(test(?:ed|ing)?|verified|validated|confirmed|no console errors|survive(?:s|d)? spa navigation|works offline|manual reload|reloaded|retested|passed)\b/i
 
 function dedupe(items: string[], limit = 6) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
@@ -164,6 +168,18 @@ function deriveAcceptanceCriteriaFromSubmittedPrompt(prompt: string) {
   return [`Solve: ${fallbackGoal}`]
 }
 
+function extractClaimSentences(normalized: string, matcher: RegExp, limit: number) {
+  return dedupe(
+    normalized
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean)
+      .filter((sentence) => matcher.test(sentence))
+      .map((sentence) => limitText(sentence, 180)),
+    limit
+  )
+}
+
 export function mapPromptIntentToTaskType(intent: PromptIntent | undefined): UnifiedTaskType {
   switch (intent) {
     case "DEBUG":
@@ -258,6 +274,8 @@ export function preprocessResponse(responseText: string): ResponsePreprocessorOu
     key_paragraphs: signalParagraphs.length ? signalParagraphs.map((part) => limitText(part, 320)) : paragraphs.slice(0, 2).map((part) => limitText(part, 320)),
     has_code_blocks: /```/.test(normalized),
     mentioned_files: dedupe(normalized.match(FILE_REGEX) ?? [], 20),
+    change_claims: extractClaimSentences(normalized, CHANGE_CLAIM_REGEX, 4),
+    validation_signals: extractClaimSentences(normalized, VALIDATION_SIGNAL_REGEX, 4),
     certainty_signals: dedupe(normalized.match(CERTAINTY_REGEX) ?? [], 6),
     uncertainty_signals: dedupe(normalized.match(UNCERTAINTY_REGEX) ?? [], 6),
     success_signals: dedupe(normalized.match(SUCCESS_REGEX) ?? [], 6),

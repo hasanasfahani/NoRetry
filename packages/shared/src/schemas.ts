@@ -136,6 +136,8 @@ export const ResponsePreprocessorOutputSchema = z.object({
   key_paragraphs: z.array(z.string()).max(2).default([]),
   has_code_blocks: z.boolean(),
   mentioned_files: z.array(z.string()).max(20).default([]),
+  change_claims: z.array(z.string()).max(4).default([]),
+  validation_signals: z.array(z.string()).max(4).default([]),
   certainty_signals: z.array(z.string()).max(6).default([]),
   uncertainty_signals: z.array(z.string()).max(6).default([]),
   success_signals: z.array(z.string()).max(6).default([]),
