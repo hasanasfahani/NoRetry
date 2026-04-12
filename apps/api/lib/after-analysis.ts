@@ -1885,6 +1885,14 @@ function buildDecisionPresentation(params: {
 
   return {
     decision,
+    popupState:
+      decision === "Safe to proceed"
+        ? "SAFE_TO_PROCEED"
+        : decision === "Needs refinement"
+          ? "NEEDS_REFINEMENT"
+          : decision === "Likely wrong direction"
+            ? "WRONG_DIRECTION"
+            : "NOT_ENOUGH_PROOF",
     recommendedAction,
     whyBullets: dedupe(whyBullets, 3).slice(0, 3),
     nextAction,
@@ -3785,6 +3793,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
+    popup_state: decisionPresentation.popupState,
     confidence_label: decisionPresentation.confidenceLabel,
     confidence_reason: safeVerdict.confidence_reason,
     confidence_reasons: decisionPresentation.confidenceReasons,

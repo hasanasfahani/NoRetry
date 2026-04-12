@@ -425,6 +425,8 @@ async function main() {
       )
       assert(Boolean(quick.decision), `[${fixture.id}] quick decision is missing`)
       assert(Boolean(deep.decision), `[${fixture.id}] deep decision is missing`)
+      assert(Boolean(quick.popup_state), `[${fixture.id}] quick popup state is missing`)
+      assert(Boolean(deep.popup_state), `[${fixture.id}] deep popup state is missing`)
       assert(Boolean(quick.recommended_action), `[${fixture.id}] quick recommended action is missing`)
       assert(Boolean(deep.recommended_action), `[${fixture.id}] deep recommended action is missing`)
       assert(deep.why_bullets.length > 0, `[${fixture.id}] deep why bullets are missing`)
@@ -447,6 +449,16 @@ async function main() {
               ? deep.recommended_action === "RESTART_WITH_PROMPT"
               : deep.recommended_action === "VALIDATE_FIRST",
         `[${fixture.id}] deep recommended action drifted from decision ${deep.decision}`
+      )
+      assert(
+        deep.decision === "Safe to proceed"
+          ? deep.popup_state === "SAFE_TO_PROCEED"
+          : deep.decision === "Needs refinement"
+            ? deep.popup_state === "NEEDS_REFINEMENT"
+            : deep.decision === "Likely wrong direction"
+              ? deep.popup_state === "WRONG_DIRECTION"
+              : deep.popup_state === "NOT_ENOUGH_PROOF",
+        `[${fixture.id}] deep popup state drifted from decision ${deep.decision}`
       )
       assert(
         !(

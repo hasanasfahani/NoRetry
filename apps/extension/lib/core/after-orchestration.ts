@@ -1,5 +1,6 @@
 import type {
   AfterAnalysisResult,
+  AfterPipelineResponse,
   Attempt,
   AttemptIntent,
   AfterNextQuestionRequest,
@@ -7,28 +8,80 @@ import type {
   PromptIntent
 } from "@prompt-optimizer/shared"
 
+type AfterPlaceholderState = AfterPipelineResponse["popup_state"]
+
+type AfterPlaceholderOptions = {
+  popupState?: AfterPlaceholderState
+  whyBullets?: string[]
+  confidenceReasons?: string[]
+  checkedArtifacts?: string[]
+  uncheckedArtifacts?: string[]
+  blockedOrUnprovenItems?: string[]
+  nextAction?: string
+  recommendedAction?: AfterAnalysisResult["recommended_action"]
+  promptStrategy?: AfterAnalysisResult["prompt_strategy"]
+  nextPromptExplanation?: string
+  expectedOutcome?: string
+}
+
 export function buildAfterPlaceholder(
   finding: string,
   issues: string[] = [],
-  nextPrompt = ""
+  nextPrompt = "",
+  options: AfterPlaceholderOptions = {}
 ): AfterAnalysisResult {
+  const popupState = options.popupState ?? "ANALYSIS_READY"
+  const recommendedAction =
+    options.recommendedAction ??
+    (popupState === "SAFE_TO_PROCEED"
+      ? "PROCEED"
+      : popupState === "WRONG_DIRECTION"
+        ? "RESTART_WITH_PROMPT"
+        : popupState === "NEEDS_REFINEMENT"
+          ? "SEND_PROMPT"
+          : "VALIDATE_FIRST")
+  const nextAction =
+    options.nextAction ??
+    (popupState === "RESPONSE_STILL_STREAMING"
+      ? "Wait until the response finishes, then re-run analysis."
+      : popupState === "ANALYSIS_RAN_TOO_EARLY"
+        ? "Re-run analysis after the response finishes."
+        : popupState === "ANALYSIS_FAILED_INTERNAL"
+          ? "Retry analysis after the response settles."
+          : nextPrompt
+            ? "Send this prompt before continuing."
+            : recommendedAction === "PROCEED"
+              ? "Continue, no changes needed."
+              : "Validate this before proceeding.")
+  const whyBullets =
+    options.whyBullets ??
+    [issues[0] || finding].filter(Boolean).slice(0, 3)
+  const confidenceReasons =
+    options.confidenceReasons ??
+    issues.slice(0, 3)
+  const checkedArtifacts = options.checkedArtifacts ?? []
+  const uncheckedArtifacts = options.uncheckedArtifacts ?? []
+  const blockedOrUnprovenItems = options.blockedOrUnprovenItems ?? issues.slice(0, 6)
+  const promptStrategy = options.promptStrategy ?? (nextPrompt ? "narrow_scope" : "validate")
+
   return {
     status: "UNVERIFIED",
     confidence: "low",
+    popup_state: popupState,
     confidence_label: "Low",
-    confidence_reason: issues[0] || "",
-    confidence_reasons: issues.slice(0, 3),
+    confidence_reason: confidenceReasons[0] || issues[0] || finding,
+    confidence_reasons: confidenceReasons,
     inspection_depth: "summary_only",
     decision: "Not enough proof",
-    recommended_action: "VALIDATE_FIRST",
-    why_bullets: [issues[0] || finding].filter(Boolean).slice(0, 3),
-    next_action: nextPrompt ? "Refine the next retry before you send it." : "Wait for a real answer, then analyze again.",
+    recommended_action: recommendedAction,
+    why_bullets: whyBullets,
+    next_action: nextAction,
     findings: [finding],
     issues,
     next_prompt: nextPrompt,
-    prompt_strategy: "narrow_scope",
-    next_prompt_explanation: nextPrompt ? "This prompt narrows the next move before you retry." : "",
-    expected_outcome: nextPrompt ? "The assistant should respond with a narrower, less risky next step." : "",
+    prompt_strategy: promptStrategy,
+    next_prompt_explanation: nextPrompt ? options.nextPromptExplanation ?? "This prompt narrows the next move before you retry." : "",
+    expected_outcome: nextPrompt ? options.expectedOutcome ?? "The assistant should respond with a narrower, less risky next step." : "",
     stage_1: {
       assistant_action_summary: finding,
       claimed_evidence: [],
@@ -45,19 +98,21 @@ export function buildAfterPlaceholder(
     verdict: {
       status: "UNVERIFIED",
       confidence: "low",
-      confidence_reason: issues[0] || "",
+      confidence_reason: confidenceReasons[0] || issues[0] || finding,
       findings: [finding],
       issues
     },
     next_prompt_output: {
       next_prompt: nextPrompt,
-      prompt_strategy: "narrow_scope"
+      prompt_strategy: promptStrategy,
+      next_prompt_explanation: nextPrompt ? options.nextPromptExplanation ?? "This prompt narrows the next move before you retry." : "",
+      expected_outcome: nextPrompt ? options.expectedOutcome ?? "The assistant should respond with a narrower, less risky next step." : ""
     },
     acceptance_checklist: [],
     checked_artifact_types: [],
-    checked_artifacts: [],
-    unchecked_artifacts: [],
-    blocked_or_unproven_items: issues.slice(0, 6),
+    checked_artifacts: checkedArtifacts,
+    unchecked_artifacts: uncheckedArtifacts,
+    blocked_or_unproven_items: blockedOrUnprovenItems,
     deep_criterion_verifications: [],
     contradiction_count: 0,
     review_contract: {

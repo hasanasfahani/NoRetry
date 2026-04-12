@@ -24,6 +24,16 @@ export const AfterDecisionSchema = z.enum([
   "Likely wrong direction",
   "Not enough proof"
 ])
+export const AfterPopupStateSchema = z.enum([
+  "RESPONSE_STILL_STREAMING",
+  "ANALYSIS_RAN_TOO_EARLY",
+  "ANALYSIS_READY",
+  "ANALYSIS_FAILED_INTERNAL",
+  "NOT_ENOUGH_PROOF",
+  "NEEDS_REFINEMENT",
+  "WRONG_DIRECTION",
+  "SAFE_TO_PROCEED"
+])
 export const RecommendedActionSchema = z.enum([
   "PROCEED",
   "SEND_PROMPT",
@@ -286,6 +296,7 @@ export const HelpfulFeedbackSchema = z.object({
 export const AfterAnalysisResultSchema = z.object({
   status: VerdictStatusSchema,
   confidence: AfterConfidenceSchema,
+  popup_state: AfterPopupStateSchema.default("ANALYSIS_READY"),
   confidence_label: z.enum(["Low", "Medium", "High"]).default("Low"),
   confidence_reason: z.string().max(180).default(""),
   confidence_reasons: z.array(z.string().max(180)).max(3).default([]),

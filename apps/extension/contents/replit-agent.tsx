@@ -235,6 +235,9 @@ export default function PromptOptimizerApp() {
   const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
   const lastAfterDecisionLogKeyRef = useRef("")
+  const lastObservedAssistantTextRef = useRef("")
+  const lastObservedAssistantIdentityRef = useRef("")
+  const lastAssistantResponseMutationAtRef = useRef(0)
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -576,8 +579,185 @@ export default function PromptOptimizerApp() {
     }
   }
 
+  function wait(ms: number) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms))
+  }
+
   function normalizeAssistantTextForReuse(value: string) {
     return value.replace(/\s+/g, " ").trim()
+  }
+
+  function recordAssistantResponseMutationSnapshot() {
+    const snapshot = getCurrentAssistantSnapshot()
+    const normalizedText = normalizeAssistantTextForReuse(snapshot.text)
+    if (!snapshot.exists && !normalizedText) return
+
+    if (
+      snapshot.identity !== lastObservedAssistantIdentityRef.current ||
+      normalizedText !== lastObservedAssistantTextRef.current
+    ) {
+      lastObservedAssistantIdentityRef.current = snapshot.identity
+      lastObservedAssistantTextRef.current = normalizedText
+      lastAssistantResponseMutationAtRef.current = Date.now()
+    }
+  }
+
+  function hasVisibleGenerationIndicator(node: HTMLElement | null) {
+    const selectors = [
+      "[aria-busy='true']",
+      "[role='status']",
+      "[data-testid*='thinking' i]",
+      "[data-testid*='generating' i]",
+      "[class*='thinking' i]",
+      "[class*='generating' i]",
+      "[class*='loading' i]",
+      "button",
+      "span",
+      "div"
+    ]
+    const pattern = /\b(thinking|generating|working|streaming|writing|stop generating|continue generating|still responding)\b/i
+
+    const elements = node
+      ? [node, ...Array.from(node.querySelectorAll<HTMLElement>(selectors.join(",")))]
+      : Array.from(document.querySelectorAll<HTMLElement>(selectors.join(",")))
+
+    return elements.some((element) => {
+      if (!(element instanceof HTMLElement)) return false
+      const text = element.innerText.trim()
+      return Boolean(text && pattern.test(text))
+    })
+  }
+
+  function buildStreamingOrEarlyVerdict(
+    popupState: "RESPONSE_STILL_STREAMING" | "ANALYSIS_RAN_TOO_EARLY"
+  ) {
+    const isStreaming = popupState === "RESPONSE_STILL_STREAMING"
+    return buildAfterPlaceholder(
+      isStreaming
+        ? "This response is still changing, so the review would be unreliable."
+        : "The review started before the final answer had fully settled.",
+      [],
+      "",
+      {
+        popupState,
+        whyBullets: isStreaming
+          ? [
+              "The assistant response is still updating on the page.",
+              "The final answer was not available to verify yet."
+            ]
+          : [
+              "The response changed while the review was starting.",
+              "The final assistant output was not fully captured yet."
+            ],
+        confidenceReasons: isStreaming
+          ? [
+              "This judgment is based on partial response text, not a completed answer.",
+              "No stable final output was available for verification."
+            ]
+          : [
+              "The review began before the response had stabilized.",
+              "Any verdict now would be based on incomplete evidence."
+            ],
+        checkedArtifacts: ["partial response text"],
+        uncheckedArtifacts: ["final assistant response", "complete code blocks", "runtime behavior"],
+        blockedOrUnprovenItems: ["Final assistant response not captured yet"],
+        nextAction: isStreaming
+          ? "Wait until the response finishes, then re-run analysis."
+          : "Re-run analysis after the response finishes.",
+        recommendedAction: "VALIDATE_FIRST"
+      }
+    )
+  }
+
+  function buildInternalAnalysisFailureVerdict(
+    stage: "quick" | "deep" | "switch",
+    nextPrompt = ""
+  ) {
+    return buildAfterPlaceholder(
+      "We couldn’t complete the review this time due to an internal issue.",
+      [],
+      "",
+      {
+        popupState: "ANALYSIS_FAILED_INTERNAL",
+        whyBullets: [
+          "The review did not finish cleanly, so this result is not trustworthy yet.",
+          "Retry after the response settles so NoRetry can capture a complete answer."
+        ],
+        confidenceReasons: [
+          "No trustworthy verdict was produced.",
+          "This state came from an internal review failure, not from confirmed evidence."
+        ],
+        checkedArtifacts: nextPrompt ? ["captured response text"] : [],
+        uncheckedArtifacts: ["final assistant response", "code blocks", "runtime behavior"],
+        blockedOrUnprovenItems: ["Trusted review not completed"],
+        nextAction:
+          stage === "deep"
+            ? "Retry deep analysis after the response settles."
+            : "Retry analysis after the response settles.",
+        recommendedAction: "VALIDATE_FIRST"
+      }
+    )
+  }
+
+  function logHiddenInternalError(stage: "quick" | "deep" | "switch", error: unknown) {
+    const rawMessage = error instanceof Error ? error.message : String(error)
+    const lowered = rawMessage.toLowerCase()
+    const errorCode = /400/.test(rawMessage)
+      ? "BAD_REQUEST"
+      : /500/.test(rawMessage)
+        ? "SERVER_ERROR"
+        : "UNKNOWN"
+    const errorType = lowered.includes("too_big")
+      ? "validation_too_big"
+      : lowered.includes("zod")
+        ? "validation_error"
+        : lowered.includes("abort")
+          ? "aborted_request"
+          : "internal_error"
+
+    recordDeepArtifactEvent({
+      eventType: "internal_error_hidden_from_user",
+      status: "failed",
+      detail: JSON.stringify({
+        error_code: errorCode,
+        error_type: errorType,
+        request_stage: stage,
+        raw_error_message: rawMessage.slice(0, 800)
+      })
+    })
+  }
+
+  async function assessAssistantResponseReadiness() {
+    const initial = getCurrentAssistantSnapshot()
+    const initialText = normalizeAssistantTextForReuse(initial.text)
+    if (!initialText) return { ready: true as const }
+
+    const visibleIndicator = hasVisibleGenerationIndicator(initial.node)
+    const recentMutation = Date.now() - lastAssistantResponseMutationAtRef.current < 1200
+
+    await wait(850)
+
+    const followUp = getCurrentAssistantSnapshot()
+    const followUpText = normalizeAssistantTextForReuse(followUp.text)
+    const changed =
+      followUp.identity !== initial.identity ||
+      followUpText !== initialText
+
+    if (visibleIndicator) {
+      return {
+        ready: false as const,
+        popupState: "RESPONSE_STILL_STREAMING" as const
+      }
+    }
+
+    if (changed || recentMutation) {
+      return {
+        ready: false as const,
+        popupState: "ANALYSIS_RAN_TOO_EARLY" as const
+      }
+    }
+
+    return { ready: true as const }
   }
 
   function buildArtifactSignature(artifactContext: ArtifactContext | null | undefined) {
@@ -619,22 +799,61 @@ export default function PromptOptimizerApp() {
   }
 
   function recordAfterExperienceEvent(input: {
-    eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt_success"
+    eventType:
+      | "decision_shown"
+      | "prompt_copy_clicked"
+      | "proof_details_expanded"
+      | "feedback_helpful_yes"
+      | "feedback_helpful_no"
+      | "feedback_next_prompt_success_yes"
+      | "feedback_next_prompt_success_no"
+      | "next_prompt_hidden_due_to_state"
+      | "analysis_blocked_streaming"
+      | "analysis_blocked_early"
+      | "internal_error_hidden_from_user"
     helpful?: boolean
     nextPromptSuccess?: boolean
+    verdictOverride?: AfterAnalysisResult | null
+    attemptOverride?: Attempt | null
+    errorCode?: string
+    errorType?: string
+    requestStage?: string
+    rawErrorMessage?: string
   }) {
-    if (!afterAttempt || !afterVerdict) return
+    const verdict = input.verdictOverride ?? afterVerdict
+    const attempt = input.attemptOverride ?? afterAttempt
+    if (!attempt || !verdict) return
     void appendAfterExperienceEvent({
       eventType: input.eventType,
-      attemptId: afterAttempt.attempt_id,
-      decision: afterVerdict.decision,
-      recommendedAction: afterVerdict.recommended_action,
-      confidence: afterVerdict.confidence,
-      promptStrategy: afterVerdict.prompt_strategy,
+      attemptId: attempt.attempt_id,
+      decision: verdict.decision,
+      recommendedAction: verdict.recommended_action,
+      confidence: verdict.confidence,
+      promptStrategy: verdict.prompt_strategy,
+      popupState: verdict.popup_state,
       reviewMode: afterDisplayedReviewMode,
       userFeedbackHelpful: input.helpful,
-      userFeedbackNextPromptSuccess: input.nextPromptSuccess
+      userFeedbackNextPromptSuccess: input.nextPromptSuccess,
+      errorCode: input.errorCode,
+      errorType: input.errorType,
+      requestStage: input.requestStage,
+      rawErrorMessage: input.rawErrorMessage
     })
+  }
+
+  function shouldHideNextPromptForVerdict(verdict: AfterAnalysisResult | null) {
+    if (!verdict) return false
+    if (verdict.recommended_action === "PROCEED") return true
+    if (
+      verdict.popup_state === "RESPONSE_STILL_STREAMING" ||
+      verdict.popup_state === "ANALYSIS_RAN_TOO_EARLY" ||
+      verdict.popup_state === "ANALYSIS_FAILED_INTERNAL"
+    ) {
+      return true
+    }
+    const trimmed = verdict.next_prompt.trim()
+    if (!trimmed) return true
+    return /^analyze your last answer again\b/i.test(trimmed) || /^tell me exactly what you changed\b/i.test(trimmed)
   }
 
   function isGenericChecklistLabel(label: string) {
@@ -1059,6 +1278,7 @@ export default function PromptOptimizerApp() {
     const logKey = [
       afterAttempt.attempt_id,
       afterDisplayedReviewMode,
+      afterVerdict.popup_state,
       afterVerdict.decision,
       afterVerdict.prompt_strategy,
       afterVerdict.confidence
@@ -1066,6 +1286,9 @@ export default function PromptOptimizerApp() {
     if (lastAfterDecisionLogKeyRef.current === logKey) return
     lastAfterDecisionLogKeyRef.current = logKey
     recordAfterExperienceEvent({ eventType: "decision_shown" })
+    if (shouldHideNextPromptForVerdict(afterVerdict)) {
+      recordAfterExperienceEvent({ eventType: "next_prompt_hidden_due_to_state" })
+    }
   }, [afterPanelOpen, afterVerdict, afterAttempt, afterDisplayedReviewMode])
 
   useEffect(() => {
@@ -1081,6 +1304,7 @@ export default function PromptOptimizerApp() {
     void loadProjectMemoryForCurrentLocation()
 
     const scan = () => {
+      recordAssistantResponseMutationSnapshot()
       const currentThreadIdentity = getCurrentThreadSnapshot().identity
       if (lastThreadIdentityRef.current && lastThreadIdentityRef.current !== currentThreadIdentity) {
         pendingNavigationRef.current = currentThreadIdentity
@@ -1458,6 +1682,11 @@ export default function PromptOptimizerApp() {
     const currentDraftPrompt = draftSnapshot.text.trim()
     const savedDraftPrompt = afterPlanningGoal.trim() || afterAttempt?.raw_prompt.trim() || ""
     const shouldStartWithDeepReview = false
+    const canReuseOpenVerdict =
+      Boolean(afterVerdict) &&
+      !["RESPONSE_STILL_STREAMING", "ANALYSIS_RAN_TOO_EARLY", "ANALYSIS_FAILED_INTERNAL"].includes(
+        afterVerdict?.popup_state ?? "ANALYSIS_READY"
+      )
     const sameMessage =
       latestMessageId && lastEvaluatedAssistantMessageIdRef.current
         ? latestMessageId === lastEvaluatedAssistantMessageIdRef.current
@@ -1491,7 +1720,7 @@ export default function PromptOptimizerApp() {
       return
     }
 
-    if (afterVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
+    if (canReuseOpenVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
       setProjectContextReadyActive(false)
       setAfterPanelOpen(true)
       return
@@ -1616,6 +1845,37 @@ export default function PromptOptimizerApp() {
       return
     }
 
+    const readiness = await assessAssistantResponseReadiness()
+    if (!readiness.ready) {
+      const blockedVerdict = buildStreamingOrEarlyVerdict(readiness.popupState)
+      const timingAttempt = await ensureSubmittedAttempt()
+      setAfterPanelOpen(true)
+      resetAfterNextStepFlow()
+      setAfterDisplayedReviewMode("quick")
+      setAfterVerdict(blockedVerdict)
+      setAfterAttempt(timingAttempt)
+      recordDeepArtifactEvent({
+        eventType:
+          readiness.popupState === "RESPONSE_STILL_STREAMING"
+            ? "analysis_blocked_streaming"
+            : "analysis_blocked_early",
+        status: "observed",
+        detail:
+          readiness.popupState === "RESPONSE_STILL_STREAMING"
+            ? "Analysis was blocked because the assistant response was still generating."
+            : "Analysis was blocked because the response changed before it settled."
+      })
+      recordAfterExperienceEvent({
+        eventType:
+          readiness.popupState === "RESPONSE_STILL_STREAMING"
+            ? "analysis_blocked_streaming"
+            : "analysis_blocked_early",
+        attemptOverride: timingAttempt,
+        verdictOverride: blockedVerdict
+      })
+      return
+    }
+
     setAfterPanelOpen(true)
     resetAfterNextStepFlow()
     setAfterAttempt(null)
@@ -1630,21 +1890,29 @@ export default function PromptOptimizerApp() {
       const opened = await runAfterEvaluation(true, shouldStartWithDeepReview)
       if (!opened) {
         setAfterVerdict(
-          buildAfterPlaceholder(
-            "NoRetry could not capture the latest AI answer yet.",
-            ["Wait for the answer to finish, then click the thunder again."],
-            "Please restate your final result, list the concrete changes you made, and verify whether the original request is now fully satisfied."
-          )
+          buildStreamingOrEarlyVerdict("ANALYSIS_RAN_TOO_EARLY")
         )
       }
     } catch (error) {
+      logHiddenInternalError(shouldStartWithDeepReview ? "deep" : "quick", error)
+      const internalVerdict = buildInternalAnalysisFailureVerdict(shouldStartWithDeepReview ? "deep" : "quick", text)
       setAfterVerdict(
-        buildAfterPlaceholder(
-          error instanceof Error ? error.message : "NoRetry hit a problem while analyzing the latest answer.",
-          ["Try clicking the thunder again after the response fully settles."],
-          "Analyze your last answer again. Tell me exactly what you changed, what remains missing, and give me the next focused prompt to continue."
-        )
+        internalVerdict
       )
+      recordAfterExperienceEvent({
+        eventType: "internal_error_hidden_from_user",
+        verdictOverride: internalVerdict,
+        attemptOverride: afterAttempt,
+        errorCode: error instanceof Error && /400/.test(error.message) ? "BAD_REQUEST" : "UNKNOWN",
+        errorType:
+          error instanceof Error && /too_big/i.test(error.message)
+            ? "validation_too_big"
+            : error instanceof Error && /abort/i.test(error.message)
+              ? "aborted_request"
+              : "internal_error",
+        requestStage: shouldStartWithDeepReview ? "deep" : "quick",
+        rawErrorMessage: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800)
+      })
     } finally {
       stopAfterLoadingProgress()
       setIsEvaluatingAfterResponse(false)
@@ -1660,6 +1928,34 @@ export default function PromptOptimizerApp() {
     })
 
     const targetOverride = buildCurrentAfterTargetOverride()
+    if (!targetOverride) {
+      const readiness = await assessAssistantResponseReadiness()
+      if (!readiness.ready) {
+        const blockedVerdict = buildStreamingOrEarlyVerdict(readiness.popupState)
+        setAfterDisplayedReviewMode("quick")
+        setAfterVerdict(blockedVerdict)
+        recordDeepArtifactEvent({
+          eventType:
+            readiness.popupState === "RESPONSE_STILL_STREAMING"
+              ? "analysis_blocked_streaming"
+              : "analysis_blocked_early",
+          status: "observed",
+          detail:
+            readiness.popupState === "RESPONSE_STILL_STREAMING"
+              ? "Deep analysis was blocked because the assistant response was still generating."
+              : "Deep analysis was blocked because the response changed before it settled."
+        })
+        recordAfterExperienceEvent({
+          eventType:
+            readiness.popupState === "RESPONSE_STILL_STREAMING"
+              ? "analysis_blocked_streaming"
+              : "analysis_blocked_early",
+          verdictOverride: blockedVerdict
+        })
+        return
+      }
+    }
+
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
       const artifactSignature = buildArtifactSignature(
@@ -1689,21 +1985,28 @@ export default function PromptOptimizerApp() {
       const opened = await runAfterEvaluation(true, true, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
-          buildAfterPlaceholder(
-            "NoRetry could not re-open the latest AI answer for a deeper review.",
-            ["Wait for the answer to finish, then try Deep Analyze again."],
-            afterVerdict.next_prompt
-          )
+          buildStreamingOrEarlyVerdict("ANALYSIS_RAN_TOO_EARLY")
         )
       }
     } catch (error) {
+      logHiddenInternalError("deep", error)
+      const internalVerdict = buildInternalAnalysisFailureVerdict("deep", afterVerdict.next_prompt)
       setAfterVerdict(
-        buildAfterPlaceholder(
-          error instanceof Error ? error.message : "NoRetry could not complete a deeper review.",
-          ["Try Deep Analyze again after the response fully settles."],
-          afterVerdict.next_prompt
-        )
+        internalVerdict
       )
+      recordAfterExperienceEvent({
+        eventType: "internal_error_hidden_from_user",
+        verdictOverride: internalVerdict,
+        errorCode: error instanceof Error && /400/.test(error.message) ? "BAD_REQUEST" : "UNKNOWN",
+        errorType:
+          error instanceof Error && /too_big/i.test(error.message)
+            ? "validation_too_big"
+            : error instanceof Error && /abort/i.test(error.message)
+              ? "aborted_request"
+              : "internal_error",
+        requestStage: "deep",
+        rawErrorMessage: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800)
+      })
     } finally {
       stopAfterLoadingProgress()
       setIsDeepAnalyzingAfterResponse(false)
@@ -1758,21 +2061,28 @@ export default function PromptOptimizerApp() {
       const opened = await runAfterEvaluation(true, false, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
-          buildAfterPlaceholder(
-            "NoRetry could not reopen the latest AI answer for a quick review.",
-            ["Try switching analysis mode again after the answer fully settles."],
-            afterVerdict.next_prompt
-          )
+          buildStreamingOrEarlyVerdict("ANALYSIS_RAN_TOO_EARLY")
         )
       }
     } catch (error) {
+      logHiddenInternalError("switch", error)
+      const internalVerdict = buildInternalAnalysisFailureVerdict("switch", afterVerdict.next_prompt)
       setAfterVerdict(
-        buildAfterPlaceholder(
-          error instanceof Error ? error.message : "NoRetry could not switch back to quick review.",
-          ["Try switching analysis mode again after the answer fully settles."],
-          afterVerdict.next_prompt
-        )
+        internalVerdict
       )
+      recordAfterExperienceEvent({
+        eventType: "internal_error_hidden_from_user",
+        verdictOverride: internalVerdict,
+        errorCode: error instanceof Error && /400/.test(error.message) ? "BAD_REQUEST" : "UNKNOWN",
+        errorType:
+          error instanceof Error && /too_big/i.test(error.message)
+            ? "validation_too_big"
+            : error instanceof Error && /abort/i.test(error.message)
+              ? "aborted_request"
+              : "internal_error",
+        requestStage: "switch",
+        rawErrorMessage: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800)
+      })
     } finally {
       stopAfterLoadingProgress()
       setIsEvaluatingAfterResponse(false)
@@ -1783,11 +2093,11 @@ export default function PromptOptimizerApp() {
     if (!afterVerdict?.next_prompt?.trim()) return
     await navigator.clipboard.writeText(afterVerdict.next_prompt.trim())
     setAfterPromptActionTaken(true)
-    recordAfterExperienceEvent({ eventType: "copy_next_prompt" })
+    recordAfterExperienceEvent({ eventType: "prompt_copy_clicked" })
   }
 
   function handleAfterProofDetailsExpanded() {
-    recordAfterExperienceEvent({ eventType: "popup_expanded" })
+    recordAfterExperienceEvent({ eventType: "proof_details_expanded" })
   }
 
   function handleAfterHelpfulFeedback(helpful: boolean) {
@@ -1801,7 +2111,7 @@ export default function PromptOptimizerApp() {
         }
       })
     }
-    recordAfterExperienceEvent({ eventType: "feedback_helpful", helpful })
+    recordAfterExperienceEvent({ eventType: helpful ? "feedback_helpful_yes" : "feedback_helpful_no", helpful })
   }
 
   function handleAfterNextPromptSuccessFeedback(success: boolean) {
@@ -1817,7 +2127,7 @@ export default function PromptOptimizerApp() {
       })
     }
     recordAfterExperienceEvent({
-      eventType: "feedback_next_prompt_success",
+      eventType: success ? "feedback_next_prompt_success_yes" : "feedback_next_prompt_success_no",
       helpful: afterHelpfulFeedback ?? undefined,
       nextPromptSuccess: success
     })

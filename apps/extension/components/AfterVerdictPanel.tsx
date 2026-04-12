@@ -128,6 +128,19 @@ function toneForDecision(decision: AfterAnalysisResult["decision"]) {
   }
 }
 
+function toneForPopupState(
+  popupState: AfterAnalysisResult["popup_state"],
+  decision: AfterAnalysisResult["decision"]
+) {
+  if (popupState === "ANALYSIS_FAILED_INTERNAL") {
+    return { bg: "#fee2e2", fg: "#b91c1c", border: "rgba(185,28,28,0.16)" }
+  }
+  if (popupState === "RESPONSE_STILL_STREAMING" || popupState === "ANALYSIS_RAN_TOO_EARLY") {
+    return { bg: "#e0e7ff", fg: "#4338ca", border: "rgba(67,56,202,0.16)" }
+  }
+  return toneForDecision(decision)
+}
+
 function promptStrategyLabel(strategy: AfterAnalysisResult["prompt_strategy"]) {
   switch (strategy) {
     case "validate":
@@ -169,17 +182,74 @@ function recommendedActionLabel(action: AfterAnalysisResult["recommended_action"
   }
 }
 
-function decisionSupportLabel(decision: AfterAnalysisResult["decision"]) {
-  switch (decision) {
-    case "Needs refinement":
-      return "Stop here and tighten the next move before you retry."
-    case "Likely wrong direction":
-      return "Stop here and reset the assistant back to the requested scope."
-    case "Not enough proof":
-      return "This looks plausible, but you still need proof before continuing."
+function popupStateLabel(
+  popupState: AfterAnalysisResult["popup_state"],
+  decision: AfterAnalysisResult["decision"]
+) {
+  switch (popupState) {
+    case "RESPONSE_STILL_STREAMING":
+      return "Response still generating"
+    case "ANALYSIS_RAN_TOO_EARLY":
+      return "Analysis ran too early"
+    case "ANALYSIS_FAILED_INTERNAL":
+      return "Analysis failed"
+    case "SAFE_TO_PROCEED":
+      return "Safe to proceed"
+    case "NEEDS_REFINEMENT":
+      return "Needs refinement"
+    case "WRONG_DIRECTION":
+      return "Likely wrong direction"
+    case "NOT_ENOUGH_PROOF":
+      return "Not enough proof"
     default:
-      return "This looks safe enough to continue without another broad retry."
+      return decision
   }
+}
+
+function isPromptAllowedForState(popupState: AfterAnalysisResult["popup_state"]) {
+  return ![
+    "RESPONSE_STILL_STREAMING",
+    "ANALYSIS_RAN_TOO_EARLY",
+    "ANALYSIS_FAILED_INTERNAL"
+  ].includes(popupState)
+}
+
+function normalizeBulletKey(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim()
+}
+
+function collectUniqueSectionItems(items: string[], usedKeys: Set<string>, limit: number) {
+  const unique: string[] = []
+
+  for (const item of items) {
+    const trimmed = sanitizeUserFacingAfterText(item)
+    if (!trimmed) continue
+    const key = normalizeBulletKey(trimmed)
+    if (!key || usedKeys.has(key)) continue
+    usedKeys.add(key)
+    unique.push(trimmed)
+    if (unique.length >= limit) break
+  }
+
+  return unique
+}
+
+function isMeaningfulRecommendedPrompt(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  if (/^analyze your last answer again\b/i.test(trimmed)) return false
+  if (/^tell me exactly what you changed\b/i.test(trimmed)) return false
+  if (trimmed.length < 32) return false
+  return true
+}
+
+function sanitizeUserFacingAfterText(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return trimmed
+  if (/^request failed with \d+/i.test(trimmed) || /"code"\s*:\s*"too_big"/i.test(trimmed)) {
+    return "We couldn’t complete the review this time. Retry after the response settles."
+  }
+  return trimmed
 }
 
 function toneForReview(depth: AfterAnalysisResult["inspection_depth"]) {
@@ -340,7 +410,8 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const [expandedChecklistLabels, setExpandedChecklistLabels] = useState<Record<string, boolean>>({})
   const tone = toneForStatus(props.verdict.status)
   const statusLabel = userFacingStatusLabel(props.verdict.status)
-  const decisionTone = toneForDecision(props.verdict.decision)
+  const popupState = props.verdict.popup_state ?? "ANALYSIS_READY"
+  const decisionTone = toneForPopupState(popupState, props.verdict.decision)
   const isInitialChecking =
     props.isEvaluating &&
     !props.isDeepAnalyzing &&
@@ -351,7 +422,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     (props.verdict.acceptance_checklist?.length ?? 0) > 0
   const showModeToggle = !isInitialChecking && hasRealReview && !props.nextStepStarted
   const summarySentence =
-    props.verdict.findings.find((item) => item.trim().length > 0) ||
+    sanitizeUserFacingAfterText(props.verdict.findings.find((item) => item.trim().length > 0) || "") ||
     "NoRetry reviewed the answer against your request."
   const isPlannerOnlyState = !hasRealReview && props.nextStepStarted
   const checklistItems = (props.verdict.acceptance_checklist ?? []).map((item) => ({
@@ -369,20 +440,29 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const activeReviewMode = props.displayedReviewMode
   const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
-  const promptStrategyDisplayLabel = promptStrategyLabel(props.verdict.prompt_strategy)
-  const decisionLabel = props.verdict.decision ?? "Not enough proof"
+  const decisionLabel = popupStateLabel(popupState, props.verdict.decision ?? "Not enough proof")
   const recommendedAction = props.verdict.recommended_action ?? "VALIDATE_FIRST"
   const recommendedActionText = recommendedActionLabel(recommendedAction)
   const confidenceLabel = props.verdict.confidence_label ?? confidenceTitle(props.verdict.confidence)
-  const confidenceReasons = props.verdict.confidence_reasons ?? []
-  const whyBullets = props.verdict.why_bullets ?? []
+  const promptAllowedByState = isPromptAllowedForState(popupState)
+  const promptVisibleByContent = isMeaningfulRecommendedPrompt(props.verdict.next_prompt ?? "")
+  const showPromptAsPrimaryAction = promptAllowedByState && promptVisibleByContent && recommendedAction !== "PROCEED"
+  const promptStrategyDisplayLabel = showPromptAsPrimaryAction ? promptStrategyLabel(props.verdict.prompt_strategy) : ""
   const checkedArtifacts = props.verdict.checked_artifacts ?? []
   const uncheckedArtifacts = props.verdict.unchecked_artifacts ?? []
   const blockedOrUnprovenItems = props.verdict.blocked_or_unproven_items ?? []
   const nextPromptExplanation = props.verdict.next_prompt_explanation ?? ""
   const expectedOutcome = props.verdict.expected_outcome ?? ""
-  const decisionSupportText = decisionSupportLabel(decisionLabel)
-  const showPromptAsPrimaryAction = recommendedAction !== "PROCEED"
+  const summaryNeedsExpand = needsExpansionControl(summarySentence)
+  const displayedSummarySentence = summaryExpanded ? summarySentence : collapseForPreview(summarySentence)
+  const usedSectionKeys = new Set<string>([normalizeBulletKey(summarySentence)])
+  const whyBullets = collectUniqueSectionItems(
+    props.verdict.why_bullets?.length ? props.verdict.why_bullets : [summarySentence],
+    usedSectionKeys,
+    2
+  )
+  const dedupedBlockedOrUnprovenItems = collectUniqueSectionItems(blockedOrUnprovenItems, usedSectionKeys, 4)
+  const confidenceReasons = collectUniqueSectionItems(props.verdict.confidence_reasons ?? [], usedSectionKeys, 3)
   const deepReviewLimitedHint = ""
   const deepReviewEvidenceItems =
     activeReviewMode === "deep"
@@ -415,8 +495,13 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     activeReviewMode !== "deep" &&
     Boolean(deepReviewEvidenceHint) &&
     !summarySentence.toLowerCase().includes(deepReviewEvidenceHint.toLowerCase().replace(/^deep review (found|inspected):\s*/i, ""))
-  const summaryNeedsExpand = needsExpansionControl(summarySentence)
-  const displayedSummarySentence = summaryExpanded ? summarySentence : collapseForPreview(summarySentence)
+  const showProofDetailsSummary = popupState === "ANALYSIS_READY" || ["NOT_ENOUGH_PROOF", "NEEDS_REFINEMENT", "WRONG_DIRECTION", "SAFE_TO_PROCEED"].includes(popupState)
+  const checkedArtifactsText = checkedArtifacts.length ? checkedArtifacts.join(", ") : "no stable evidence captured yet"
+  const uncheckedArtifactsText = uncheckedArtifacts.length
+    ? uncheckedArtifacts.join(", ")
+    : popupState === "RESPONSE_STILL_STREAMING" || popupState === "ANALYSIS_RAN_TOO_EARLY"
+      ? "final assistant response, complete code blocks, runtime behavior"
+      : "no major missing proof was identified in this view"
   const shouldShowLoadingProgress =
     Boolean(props.loadingProgress) && (props.isEvaluating || props.isDeepAnalyzing) && !isPlannerOnlyState
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
@@ -717,7 +802,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               {!isPlannerOnlyState ? (
                 <>
                   <p style={styles.recommendedActionLine}>👉 Recommended: {recommendedActionText}</p>
-                  <p style={styles.recommendedActionSupport}>{decisionSupportText}</p>
+                  <p style={styles.recommendedActionSupport}>{displayedSummarySentence}</p>
                 </>
               ) : null}
             </div>
@@ -735,9 +820,11 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
                   Review: {reviewTone.label}
                 </span>
-                <span style={styles.metaChip("#eff6ff", "#1d4ed8", "rgba(29,78,216,0.16)")}>
-                  Strategy: {promptStrategyDisplayLabel}
-                </span>
+                {showPromptAsPrimaryAction ? (
+                  <span style={styles.metaChip("#eff6ff", "#1d4ed8", "rgba(29,78,216,0.16)")}>
+                    Strategy: {promptStrategyDisplayLabel}
+                  </span>
+                ) : null}
               </p>
               {confidenceReasons.length ? (
                 <p style={styles.statusHint}>{confidenceReasons[0]}</p>
@@ -754,14 +841,16 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : isPlannerOnlyState ? (
               <p style={styles.summaryContext}>NoRetry is ready to help shape the next prompt before any answer exists.</p>
             ) : null}
-            <ul style={styles.decisionBullets}>
-              {(whyBullets.length ? whyBullets : [displayedSummarySentence]).slice(0, 3).map((item) => (
-                <li key={item} style={styles.decisionBulletItem}>
-                  <span style={styles.leadingBullet}>•</span>
-                  <span style={styles.listText}>{item}</span>
-                </li>
-              ))}
-            </ul>
+            {whyBullets.length ? (
+              <ul style={styles.decisionBullets}>
+                {whyBullets.map((item) => (
+                  <li key={item} style={styles.decisionBulletItem}>
+                    <span style={styles.leadingBullet}>•</span>
+                    <span style={styles.listText}>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             {shouldShowLoadingProgress ? (
               <div style={styles.loadingProgressWrap}>
                 <div style={styles.loadingProgressMeta}>
@@ -777,6 +866,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : null}
           </div>
 
+          {showPromptAsPrimaryAction ? (
           <div style={styles.nextActionCard}>
             <div style={styles.nextActionHeader}>
               <div>
@@ -808,16 +898,14 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               </div>
             )}
             <div style={styles.checklistActions}>
-              {showPromptAsPrimaryAction ? (
-                <button
-                  type="button"
-                  style={styles.copyButton}
-                  onClick={props.onCopyNextPrompt}
-                  disabled={!props.verdict.next_prompt.trim()}
-                >
-                  Copy Recommended Prompt
-                </button>
-              ) : null}
+              <button
+                type="button"
+                style={styles.copyButton}
+                onClick={props.onCopyNextPrompt}
+                disabled={!props.verdict.next_prompt.trim()}
+              >
+                Copy Recommended Prompt
+              </button>
               {showStartNextStep ? (
                 <button
                   type="button"
@@ -830,6 +918,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               ) : null}
             </div>
           </div>
+          ) : null}
         </div>
 
         <div style={styles.subtleSurface}>
@@ -849,18 +938,18 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <div style={styles.detailsBlock}>
                 <p style={styles.criteriaCaption}>Proof checked</p>
                 <p style={styles.criteriaNote}>
-                  Checked: {checkedArtifacts.length ? checkedArtifacts.join(", ") : "response only"}
+                  Checked: {checkedArtifactsText}
                 </p>
                 <p style={styles.criteriaNote}>
-                  Not checked: {uncheckedArtifacts.length ? uncheckedArtifacts.join(", ") : "nothing important was left unchecked in this view"}
+                  Not checked: {uncheckedArtifactsText}
                 </p>
               </div>
 
-              {blockedOrUnprovenItems.length ? (
+              {dedupedBlockedOrUnprovenItems.length ? (
                 <div style={styles.detailsBlock}>
                   <p style={styles.criteriaCaption}>Still blocked or unproven</p>
                   <ul style={styles.list}>
-                    {blockedOrUnprovenItems.map((item) => (
+                    {dedupedBlockedOrUnprovenItems.map((item) => (
                       <li key={item} style={styles.listItem}>
                         <span style={styles.leadingBullet}>•</span>
                         <span style={styles.listText}>{item}</span>
@@ -870,17 +959,19 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 </div>
               ) : null}
 
-              <div style={styles.detailsBlock}>
-                <p style={styles.criteriaCaption}>Why confidence is {confidenceLabel.toLowerCase()}</p>
-                <ul style={styles.list}>
-                  {confidenceReasons.map((item) => (
-                    <li key={item} style={styles.listItem}>
-                      <span style={styles.leadingBullet}>•</span>
-                      <span style={styles.listText}>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              {confidenceReasons.length ? (
+                <div style={styles.detailsBlock}>
+                  <p style={styles.criteriaCaption}>Why confidence is {confidenceLabel.toLowerCase()}</p>
+                  <ul style={styles.list}>
+                    {confidenceReasons.map((item) => (
+                      <li key={item} style={styles.listItem}>
+                        <span style={styles.leadingBullet}>•</span>
+                        <span style={styles.listText}>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
 
               {checklistItems.length ? (
                 <div style={styles.detailsBlock}>
@@ -921,6 +1012,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 </div>
               ) : null}
 
+              {showProofDetailsSummary ? (
               <div style={styles.detailsBlock}>
                 <p style={styles.criteriaCaption}>Analysis summary</p>
                 <p style={styles.summarySentence}>
@@ -948,6 +1040,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
                 <p style={styles.statusHint}>Evidence level: {evidenceLabel}. Quick label: {statusLabel}.</p>
               </div>
+              ) : null}
             </>
           ) : null}
 

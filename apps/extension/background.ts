@@ -261,6 +261,14 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
   return AfterAnalysisResultSchema.parse({
     status: verdict.status,
     confidence: verdict.confidence,
+    popup_state:
+      verdict.status === "WRONG_DIRECTION"
+        ? "WRONG_DIRECTION"
+        : verdict.status === "UNVERIFIED"
+          ? "NOT_ENOUGH_PROOF"
+          : verdict.status === "PARTIAL" || verdict.status === "FAILED"
+            ? "NEEDS_REFINEMENT"
+            : "SAFE_TO_PROCEED",
     confidence_label:
       verdict.confidence === "high" ? "High" : verdict.confidence === "medium" ? "Medium" : "Low",
     confidence_reason: verdict.confidence_reason,
