@@ -202,12 +202,20 @@ async function main() {
           `[${fixture.id}] deep success still reports missing criteria: ${JSON.stringify(deep.stage_2.missing_criteria)}`
         )
         assert(
+          deep.stage_2.problem_fit === "correct",
+          `[${fixture.id}] deep success should have correct problem_fit, got ${deep.stage_2.problem_fit}`
+        )
+        assert(
           deep.next_prompt_output.prompt_strategy === "validate",
           `[${fixture.id}] deep success should produce a validate next prompt, got ${deep.next_prompt_output.prompt_strategy}`
         )
         assert(
           deep.findings.every((item) => !/could not|does not clearly show|remain unverified/i.test(item)),
           `[${fixture.id}] deep success still contains unresolved-language findings: ${JSON.stringify(deep.findings)}`
+        )
+        assert(
+          deep.stage_2.analysis_notes.every((item) => !/could not|does not clearly show|remain unverified/i.test(item)),
+          `[${fixture.id}] deep success still contains unresolved-language stage_2 notes: ${JSON.stringify(deep.stage_2.analysis_notes)}`
         )
       }
     } catch (error) {
