@@ -1,4 +1,4 @@
-import type { AfterAnalysisResult, SessionSummary } from "@prompt-optimizer/shared/src/schemas"
+import type { AfterAnalysisResult, SessionSummary } from "@prompt-optimizer/shared"
 import { Storage } from "@plasmohq/storage"
 
 const storage = new Storage({ area: "local" })
@@ -27,6 +27,7 @@ export type AfterReviewCacheRecord = {
   normalizedText: string
   quick: AfterAnalysisResult | null
   deep: AfterAnalysisResult | null
+  deepArtifactSignature?: string
   updatedAt: string
 }
 
@@ -138,6 +139,7 @@ export async function saveAfterReviewCache(input: {
   normalizedText: string
   quick: AfterAnalysisResult | null
   deep: AfterAnalysisResult | null
+  deepArtifactSignature?: string
 }) {
   const record: AfterReviewCacheRecord = {
     threadIdentity: input.threadIdentity,
@@ -145,6 +147,7 @@ export async function saveAfterReviewCache(input: {
     normalizedText: input.normalizedText,
     quick: input.quick,
     deep: input.deep,
+    deepArtifactSignature: input.deepArtifactSignature,
     updatedAt: new Date().toISOString()
   }
 

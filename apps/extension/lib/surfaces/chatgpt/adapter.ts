@@ -1,5 +1,6 @@
 import {
   createEmptyAssistantResponseSnapshot,
+  createEmptyArtifactContext,
   createEmptyDraftPromptSnapshot,
   createEmptyUserPromptSnapshot,
   createPanelMountContext,
@@ -76,5 +77,23 @@ export const chatGptSurfaceAdapter: SurfaceAdapter = {
   },
   getPanelMountContext() {
     return createPanelMountContext(findPromptInput())
+  },
+  collectDeepArtifacts(input) {
+    return input.responseText.trim()
+      ? {
+          mode: "passive",
+          surface: "chatgpt",
+          artifacts: [
+            {
+              type: "response_text",
+              source: "surface_adapter",
+              captured_at: new Date().toISOString(),
+              surface_scope: "latest_assistant_response",
+              content: input.responseText.trim(),
+              metadata: {}
+            }
+          ]
+        }
+      : createEmptyArtifactContext("chatgpt")
   }
 }

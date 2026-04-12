@@ -272,6 +272,9 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
     verdict,
     next_prompt_output: nextPromptOutput,
     acceptance_checklist: [],
+    checked_artifact_types: [],
+    deep_criterion_verifications: [],
+    contradiction_count: 0,
     review_contract: {
       version: "v1",
       target_signature: "",

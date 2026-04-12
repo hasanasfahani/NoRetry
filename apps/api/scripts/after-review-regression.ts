@@ -15,6 +15,11 @@ type RegressionFixture = {
   projectContext: string
   currentState: string
   responseText: string
+  deepArtifactPreset?:
+    | "replit_success"
+    | "replit_partial"
+    | "replit_blocked_ui"
+    | "replit_dom_contradiction"
   expectedCriteria: string[]
   expectedQuickStatus: AfterAnalysisResult["status"]
   expectedDeepStatus: AfterAnalysisResult["status"]
@@ -22,6 +27,9 @@ type RegressionFixture = {
   expectedDeepConfidence: AfterAnalysisResult["confidence"]
   expectedSources: Array<NonNullable<ChecklistItem["source"]>>
   expectedLayers: Array<NonNullable<ChecklistItem["layer"]>>
+  expectedCheckedArtifactTypes?: Array<AfterAnalysisResult["checked_artifact_types"][number]>
+  expectedBlockedCriteria?: string[]
+  minDeepContradictions?: number
 }
 
 const __filename = fileURLToPath(import.meta.url)
@@ -67,6 +75,110 @@ async function loadFixtures() {
   return JSON.parse(raw) as RegressionFixture[]
 }
 
+function buildReplitArtifactContext(
+  preset: RegressionFixture["deepArtifactPreset"],
+  responseText: string
+): AfterPipelineRequest["artifact_context"] | undefined {
+  if (!preset) return undefined
+
+  const capturedAt = new Date("2026-04-12T00:00:10.000Z").toISOString()
+  const domObservation = (
+    probeId: string,
+    target: string,
+    observed: boolean,
+    details: string,
+    confidence = observed ? 0.85 : 0.35
+  ) => ({
+    type: "dom_observations" as const,
+    source: "regression_dom_probe",
+    captured_at: capturedAt,
+    surface_scope: "replit_dom",
+    content: `${probeId}: ${observed ? "observed" : "not_observed"} - ${details}`,
+    metadata: {
+      probe_id: probeId,
+      target,
+      observed,
+      confidence,
+      details
+    }
+  })
+
+  const runtimeSignal = (content: string) => ({
+    type: "visible_runtime_signals" as const,
+    source: "regression_runtime",
+    captured_at: capturedAt,
+    surface_scope: "replit_runtime",
+    content,
+    metadata: {}
+  })
+
+  const responseArtifact = {
+    type: "response_text" as const,
+    source: "regression_response",
+    captured_at: capturedAt,
+    surface_scope: "assistant_response",
+    content: responseText,
+    metadata: {}
+  }
+
+  const successDom = [
+    domObservation("prompt_textarea_found", "prompt_textarea", true, "Found the Replit prompt textarea."),
+    domObservation("launcher_near_textarea", "inline_launcher", true, "Found the launcher anchored inside the prompt area."),
+    domObservation("optimize_panel_visible", "optimize_panel", true, "Found the optimize panel open."),
+    domObservation("strength_badge_visible", "strength_badge", true, "Found the correct strength badge."),
+    domObservation("question_ui_visible", "question_flow", true, "Found visible follow-up questions."),
+    domObservation("replace_button_visible", "replace_button", true, "Found the Replace button."),
+    domObservation("improved_prompt_visible_in_textarea", "prompt_textarea_content", true, "Found improved prompt text in the textarea."),
+    domObservation("popup_visible", "extension_popup", true, "Found the popup open."),
+    domObservation("auth_state_visible", "auth_state", true, "Found visible auth state."),
+    domObservation("usage_visible", "usage", true, "Found visible usage text."),
+    domObservation("strengthen_flow_visible", "strengthen_flow", true, "Found the Strengthen flow visible.")
+  ]
+
+  const partialDom = [
+    domObservation("prompt_textarea_found", "prompt_textarea", true, "Found the Replit prompt textarea."),
+    domObservation("launcher_near_textarea", "inline_launcher", true, "Found the launcher anchored inside the prompt area."),
+    domObservation("optimize_panel_visible", "optimize_panel", true, "Found the optimize panel open."),
+    domObservation("strength_badge_visible", "strength_badge", true, "Found the correct strength badge."),
+    domObservation("question_ui_visible", "question_flow", false, "No follow-up question UI was visible."),
+    domObservation("replace_button_visible", "replace_button", false, "No Replace button was visible."),
+    domObservation("improved_prompt_visible_in_textarea", "prompt_textarea_content", false, "The textarea did not show an improved prompt."),
+    domObservation("popup_visible", "extension_popup", false, "The popup was not visibly open."),
+    domObservation("auth_state_visible", "auth_state", false, "No auth state was visible."),
+    domObservation("usage_visible", "usage", false, "No usage text was visible."),
+    domObservation("strengthen_flow_visible", "strengthen_flow", false, "No Strengthen flow was visible.")
+  ]
+
+  const contradictionDom = [
+    domObservation("prompt_textarea_found", "prompt_textarea", true, "Found the Replit prompt textarea."),
+    domObservation("launcher_near_textarea", "inline_launcher", true, "Found the launcher anchored inside the prompt area."),
+    domObservation("optimize_panel_visible", "optimize_panel", true, "Found the optimize panel open."),
+    domObservation("strength_badge_visible", "strength_badge", true, "Found the correct strength badge."),
+    domObservation("question_ui_visible", "question_flow", false, "No follow-up question UI was visible."),
+    domObservation("replace_button_visible", "replace_button", false, "No Replace button was visible."),
+    domObservation("improved_prompt_visible_in_textarea", "prompt_textarea_content", false, "The textarea did not show an improved prompt."),
+    domObservation("popup_visible", "extension_popup", false, "The popup was not visibly open."),
+    domObservation("auth_state_visible", "auth_state", false, "No auth state was visible."),
+    domObservation("usage_visible", "usage", false, "No usage text was visible."),
+    domObservation("strengthen_flow_visible", "strengthen_flow", false, "No Strengthen flow was visible.")
+  ]
+
+  const artifacts =
+    preset === "replit_success"
+      ? [responseArtifact, ...successDom, runtimeSignal("No extension-related console errors were visible during load or typing.")]
+      : preset === "replit_partial"
+        ? [responseArtifact, ...partialDom, runtimeSignal("No extension-related console errors were visible during load or typing.")]
+      : preset === "replit_blocked_ui"
+        ? [responseArtifact, runtimeSignal("No extension-related console errors were visible during load or typing.")]
+      : [responseArtifact, ...contradictionDom, runtimeSignal("TypeError: content.js crashed while typing in the Replit chat area.")]
+
+  return {
+    mode: "passive",
+    surface: "replit",
+    artifacts
+  }
+}
+
 function buildRequest(fixture: RegressionFixture, deep: boolean, baseline?: ReturnType<typeof analyzeAfterAttempt> extends Promise<infer T> ? T : never): AfterPipelineRequest {
   const intent = buildAttemptIntentFromSubmittedPrompt(fixture.submittedPrompt, "DEBUG")
   const attempt = {
@@ -96,7 +208,8 @@ function buildRequest(fixture: RegressionFixture, deep: boolean, baseline?: Retu
     project_context: fixture.projectContext,
     current_state: fixture.currentState,
     error_summary: null,
-    changed_file_paths_summary: []
+    changed_file_paths_summary: [],
+    artifact_context: deep ? buildReplitArtifactContext(fixture.deepArtifactPreset, fixture.responseText) : undefined
   }
 }
 
@@ -158,6 +271,27 @@ async function main() {
         !deep.acceptance_checklist.some((item) => item.status === "not_sure"),
         `[${fixture.id}] deep checklist still contains not_sure`
       )
+      if (fixture.expectedCheckedArtifactTypes) {
+        assert(
+          JSON.stringify(deep.checked_artifact_types) === JSON.stringify(fixture.expectedCheckedArtifactTypes),
+          `[${fixture.id}] deep checked artifact types drifted: expected ${JSON.stringify(fixture.expectedCheckedArtifactTypes)}, got ${JSON.stringify(deep.checked_artifact_types)}`
+        )
+      }
+      if (fixture.expectedBlockedCriteria) {
+        const blockedLabels = deep.acceptance_checklist
+          .filter((item) => item.status === "blocked")
+          .map((item) => item.label)
+        assert(
+          JSON.stringify(blockedLabels) === JSON.stringify(fixture.expectedBlockedCriteria),
+          `[${fixture.id}] blocked criteria drifted: expected ${JSON.stringify(fixture.expectedBlockedCriteria)}, got ${JSON.stringify(blockedLabels)}`
+        )
+      }
+      if (typeof fixture.minDeepContradictions === "number") {
+        assert(
+          deep.contradiction_count >= fixture.minDeepContradictions,
+          `[${fixture.id}] deep contradiction count drifted: expected at least ${fixture.minDeepContradictions}, got ${deep.contradiction_count}`
+        )
+      }
       assert(
         JSON.stringify(deep.review_contract.criteria.map((item) => item.label)) ===
           JSON.stringify(deepRepeat.review_contract.criteria.map((item) => item.label)),

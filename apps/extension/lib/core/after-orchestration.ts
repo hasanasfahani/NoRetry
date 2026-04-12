@@ -5,7 +5,7 @@ import type {
   AfterNextQuestionRequest,
   ClarificationQuestion,
   PromptIntent
-} from "@prompt-optimizer/shared/src/schemas"
+} from "@prompt-optimizer/shared"
 
 export function buildAfterPlaceholder(
   finding: string,
@@ -46,6 +46,9 @@ export function buildAfterPlaceholder(
       prompt_strategy: "retry_cleanly"
     },
     acceptance_checklist: [],
+    checked_artifact_types: [],
+    deep_criterion_verifications: [],
+    contradiction_count: 0,
     review_contract: {
       version: "v1",
       target_signature: "",

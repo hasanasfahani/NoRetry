@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react"
-import type { AfterAnalysisResult } from "@prompt-optimizer/shared"
-import type { ClarificationQuestion } from "@prompt-optimizer/shared/src/schemas"
+import type { AfterAnalysisResult, ClarificationQuestion } from "@prompt-optimizer/shared"
 
 type AfterVerdictPanelProps = {
   verdict: AfterAnalysisResult
@@ -281,7 +280,14 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const isPlannerOnlyState = !hasRealReview && props.nextStepStarted
   const checklistItems = (props.verdict.acceptance_checklist ?? []).map((item) => ({
     label: humanizeChecklistLabel(item.label),
-    marker: item.status === "met" ? "✅" : item.status === "missed" ? "🚫" : "(not sure)"
+    marker:
+      item.status === "met"
+        ? "✅"
+        : item.status === "missed"
+          ? "🚫"
+          : item.status === "blocked"
+            ? "(blocked)"
+            : "(not sure)"
   }))
   const confidenceTone = toneForConfidence(props.verdict.confidence)
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
@@ -305,7 +311,12 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
         ).filter(isMeaningfulDeepAnalysisNote)
       : []
   const deepReviewEvidenceHint =
-    activeReviewMode === "deep" && deepReviewAnalysisNotes.length
+    activeReviewMode === "deep" && props.verdict.checked_artifact_types.length
+      ? `Deep checked artifacts: ${props.verdict.checked_artifact_types
+          .map((item) => item.replace(/_/g, "/"))
+          .slice(0, 4)
+          .join(" • ")}`
+      : activeReviewMode === "deep" && deepReviewAnalysisNotes.length
       ? `Deep review found: ${deepReviewAnalysisNotes.slice(0, 2).join(" • ")}`
       : activeReviewMode === "deep" && deepReviewEvidenceItems.length
       ? `Deep review inspected: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
@@ -682,6 +693,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             <p style={styles.criteriaCaption}>Checked against your submitted prompt</p>
             {activeReviewMode === "deep" && props.deepDeltaNote ? (
               <p style={styles.criteriaNote}>{props.deepDeltaNote}</p>
+            ) : null}
+            {activeReviewMode === "deep" && deepReviewEvidenceHint ? (
+              <p style={styles.criteriaNote}>{deepReviewEvidenceHint}</p>
             ) : null}
             <ul style={styles.list}>
               {checklistItems.map((item) => (

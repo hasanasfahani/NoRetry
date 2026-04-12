@@ -1,3 +1,5 @@
+import type { ArtifactContext, ReviewContract } from "@prompt-optimizer/shared"
+
 export type PromptSurfaceId = "chatgpt" | "replit"
 
 export type DraftPromptSnapshot = {
@@ -39,6 +41,10 @@ export interface SurfaceAdapter {
   getLatestUserPrompt(): UserPromptSnapshot
   getThread(): ThreadSnapshot
   getPanelMountContext(): PanelMountContext
+  collectDeepArtifacts(input: {
+    responseText: string
+    reviewContract: ReviewContract | null
+  }): ArtifactContext
 }
 
 export function createEmptyDraftPromptSnapshot(): DraftPromptSnapshot {
@@ -78,5 +84,13 @@ export function createPanelMountContext(anchor: HTMLElement | null): PanelMountC
   return {
     anchor,
     shouldOpenPlannerFirst: false
+  }
+}
+
+export function createEmptyArtifactContext(surface: ArtifactContext["surface"]): ArtifactContext {
+  return {
+    mode: "none",
+    surface,
+    artifacts: []
   }
 }

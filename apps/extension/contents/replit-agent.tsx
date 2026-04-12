@@ -3,20 +3,21 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type {
   AnalyzePromptResponse,
   AfterAnalysisResult,
+  ArtifactContext,
   ClarificationQuestion,
   DetectOutcomeResponse,
   DiagnoseFailureResponse,
   PromptIntent,
+  ReviewContract,
   SessionSummary,
   Attempt
-} from "@prompt-optimizer/shared/src/schemas"
-import { DETECTION_THRESHOLDS } from "@prompt-optimizer/shared/src/constants"
-import { analyzePromptLocally } from "@prompt-optimizer/shared/src/analyzePrompt"
+} from "@prompt-optimizer/shared"
+import { DETECTION_THRESHOLDS, analyzePromptLocally } from "@prompt-optimizer/shared"
 import {
   mapPromptIntentToTaskType,
   preprocessResponse
 } from "@prompt-optimizer/shared"
-import { summarizeSessionMemory } from "@prompt-optimizer/shared/src/session"
+import { summarizeSessionMemory } from "@prompt-optimizer/shared"
 import { AfterVerdictPanel } from "../components/AfterVerdictPanel"
 import { OptimizerShell } from "../components/OptimizerShell"
 import { analyzeAfterAttempt, analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, generateAfterNextQuestion, refinePrompt, sendFeedback } from "../lib/api"
@@ -127,6 +128,7 @@ export default function PromptOptimizerApp() {
     normalizedText: string
     quick: AfterAnalysisResult | null
     deep: AfterAnalysisResult | null
+    deepArtifactSignature?: string
   }
 
   const OTHER_OPTION = "Other"
@@ -567,6 +569,21 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
+  function buildArtifactSignature(artifactContext: ArtifactContext | null | undefined) {
+    if (!artifactContext || artifactContext.mode === "none") return ""
+
+    return JSON.stringify({
+      mode: artifactContext.mode,
+      surface: artifactContext.surface ?? "",
+      artifacts: artifactContext.artifacts.map((artifact) => ({
+        type: artifact.type,
+        surface_scope: artifact.surface_scope,
+        content: artifact.content,
+        metadata: Object.fromEntries(Object.entries(artifact.metadata ?? {}).sort(([left], [right]) => left.localeCompare(right)))
+      }))
+    })
+  }
+
   function isGenericChecklistLabel(label: string) {
     const normalized = label.trim().toLowerCase()
     return (
@@ -688,7 +705,8 @@ export default function PromptOptimizerApp() {
   async function getCachedAfterReviewsForTarget(
     threadIdentity: string,
     responseIdentity: string,
-    normalizedText: string
+    normalizedText: string,
+    deepArtifactSignature = ""
   ) {
     const inMemoryCache = isSameCachedAfterTarget(
       afterReviewCacheRef.current,
@@ -714,7 +732,11 @@ export default function PromptOptimizerApp() {
       responseIdentity: persistedCache.responseIdentity,
       normalizedText: persistedCache.normalizedText,
       quick: persistedCache.quick,
-      deep: persistedCache.deep
+      deep:
+        deepArtifactSignature && persistedCache.deepArtifactSignature && persistedCache.deepArtifactSignature !== deepArtifactSignature
+          ? null
+          : persistedCache.deep,
+      deepArtifactSignature: persistedCache.deepArtifactSignature
     }
 
     afterReviewCacheRef.current = restoredCache
@@ -749,9 +771,19 @@ export default function PromptOptimizerApp() {
 
     const sample = changedItems[0]
     const sampleVerdict =
-      sample.status === "met" ? "confirmed" : sample.status === "missed" ? "marked missing" : "left unresolved"
+      sample.status === "met"
+        ? "confirmed"
+        : sample.status === "missed"
+          ? "marked missing"
+          : sample.status === "blocked"
+            ? "blocked by missing artifact evidence"
+            : "left unresolved"
 
-    return `Deep review tightened ${changedItems.length} checklist result${changedItems.length > 1 ? "s" : ""}; for example, "${sample.label}" is now ${sampleVerdict}.`
+    const checkedArtifacts = deep.checked_artifact_types.length
+      ? ` using ${deep.checked_artifact_types.map((item) => item.replace(/_/g, "/")).slice(0, 3).join(", ")}`
+      : ""
+
+    return `Deep review tightened ${changedItems.length} checklist result${changedItems.length > 1 ? "s" : ""}${checkedArtifacts}; for example, "${sample.label}" is now ${sampleVerdict}.`
   }
 
   function buildCurrentAfterTargetOverride(): PendingContextAnalysis | null {
@@ -834,6 +866,21 @@ export default function PromptOptimizerApp() {
           ? cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
           : cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
         : null
+      const baselineReviewContract: ReviewContract | null =
+        sameAnalyzedTarget
+          ? afterReviewCacheRef.current?.quick?.review_contract ??
+            baselineVerdict?.review_contract ??
+            afterVerdict?.review_contract ??
+            null
+          : null
+      const artifactContext =
+        deepAnalysis
+          ? resolveSurfaceAdapter().collectDeepArtifacts({
+              responseText: text,
+              reviewContract: baselineReviewContract
+            })
+          : undefined
+      const deepArtifactSignature = deepAnalysis ? buildArtifactSignature(artifactContext) : ""
       const baselineAcceptanceCriteria =
         sameAnalyzedTarget
           ? canonicalChecklistLabels(afterReviewCacheRef.current?.quick ?? baselineVerdict ?? afterVerdict)
@@ -851,7 +898,8 @@ export default function PromptOptimizerApp() {
         project_context: compactProjectMemory.projectContext,
         current_state: compactProjectMemory.currentState,
         error_summary: collectVisibleErrorSummary(),
-        changed_file_paths_summary: changedFiles
+        changed_file_paths_summary: changedFiles,
+        artifact_context: artifactContext
       })
       const result = baselineVerdict
         ? preserveStrongerReviewContext(rawResult, baselineVerdict)
@@ -890,18 +938,21 @@ export default function PromptOptimizerApp() {
           responseIdentity: latestMessageId,
           normalizedText,
           quick: deepAnalysis ? null : result,
-          deep: deepAnalysis ? result : null
+          deep: deepAnalysis ? result : null,
+          deepArtifactSignature: deepAnalysis ? deepArtifactSignature : ""
         }
       } else if (deepAnalysis) {
         afterReviewCacheRef.current = {
           ...afterReviewCacheRef.current,
           quick: afterReviewCacheRef.current.quick ?? baselineVerdict ?? null,
-          deep: result
+          deep: result,
+          deepArtifactSignature: deepArtifactSignature
         }
       } else {
         afterReviewCacheRef.current = {
           ...afterReviewCacheRef.current,
-          quick: result
+          quick: result,
+          deepArtifactSignature: afterReviewCacheRef.current.deepArtifactSignature ?? ""
         }
       }
       if (!sameAnalyzedTarget || !strongestAfterVerdictRef.current) {
@@ -915,7 +966,8 @@ export default function PromptOptimizerApp() {
           responseIdentity: afterReviewCacheRef.current.responseIdentity,
           normalizedText: afterReviewCacheRef.current.normalizedText,
           quick: afterReviewCacheRef.current.quick,
-          deep: afterReviewCacheRef.current.deep
+          deep: afterReviewCacheRef.current.deep,
+          deepArtifactSignature: afterReviewCacheRef.current.deepArtifactSignature
         })
       }
       return true
@@ -1417,10 +1469,17 @@ export default function PromptOptimizerApp() {
     const targetOverride = buildCurrentAfterTargetOverride()
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
+      const artifactSignature = buildArtifactSignature(
+        resolveSurfaceAdapter().collectDeepArtifacts({
+          responseText: targetOverride.responseText,
+          reviewContract: afterReviewCacheRef.current?.quick?.review_contract ?? afterVerdict.review_contract
+        })
+      )
       const cachedReviews = await getCachedAfterReviewsForTarget(
         targetOverride.threadIdentity,
         targetOverride.responseIdentity,
-        normalizedText
+        normalizedText,
+        artifactSignature
       )
 
       if (cachedReviews?.deep) {
@@ -1471,10 +1530,20 @@ export default function PromptOptimizerApp() {
     const targetOverride = buildCurrentAfterTargetOverride()
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
+      const artifactSignature =
+        mode === "deep"
+          ? buildArtifactSignature(
+              resolveSurfaceAdapter().collectDeepArtifacts({
+                responseText: targetOverride.responseText,
+                reviewContract: afterReviewCacheRef.current?.quick?.review_contract ?? afterVerdict.review_contract
+              })
+            )
+          : ""
       const cachedReviews = await getCachedAfterReviewsForTarget(
         targetOverride.threadIdentity,
         targetOverride.responseIdentity,
-        normalizedText
+        normalizedText,
+        artifactSignature
       )
 
       const cachedResult = mode === "deep" ? cachedReviews?.deep : cachedReviews?.quick

@@ -1,5 +1,7 @@
 import {
   AcceptanceChecklistItemSchema,
+  ArtifactContextSchema,
+  DeepCriterionVerificationSchema,
   AfterPipelineResponseSchema,
   IntentExtractionOutputSchema,
   NextPromptOutputSchema,
@@ -10,7 +12,11 @@ import {
   buildResponseExcerpts,
   compressGoal,
   type AfterPipelineRequest,
+  type ArtifactContext,
+  type ArtifactRecord,
+  type ArtifactType,
   type AttemptIntent,
+  type DeepCriterionEvidenceType,
   type ReviewContract,
   type ReviewCriterion,
   type ReviewCriterionLayer,
@@ -51,6 +57,45 @@ type CriterionSeed = {
   label: string
   source: ReviewCriterionSource
   layer: ReviewCriterionLayer
+}
+
+type ChecklistItem = z.infer<typeof AcceptanceChecklistItemSchema>
+
+type DomObservation = {
+  probeId: string
+  target: string
+  observed: boolean
+  confidence: number
+  details: string
+  content: string
+}
+
+type NormalizedArtifactBundle = {
+  mode: ArtifactContext["mode"]
+  surface?: ArtifactContext["surface"]
+  checkedArtifactTypes: ArtifactType[]
+  responseTexts: string[]
+  responseCodeBlocks: string[]
+  changedFileLabels: string[]
+  outputSnippets: string[]
+  errorSummaries: string[]
+  buildOrTestTexts: string[]
+  runtimeSignals: string[]
+  domObservations: DomObservation[]
+}
+
+type CriterionEvidencePolicy = {
+  primary: DeepCriterionEvidenceType[]
+  fallbackIfPrimaryUnavailable?: DeepCriterionEvidenceType[]
+}
+
+type DeepArtifactEvaluation = {
+  checklist: ChecklistItem[]
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>
+  detailInspection: ReturnType<typeof DetailInspectionSchema.parse>
+  verifications: z.infer<typeof DeepCriterionVerificationSchema>[]
+  checkedArtifactTypes: ArtifactType[]
+  contradictionCount: number
 }
 
 const REVIEW_SOURCE_ORDER: ReviewCriterionSource[] = [
@@ -1185,6 +1230,520 @@ function buildFrozenDeepEvidenceTargeting(
   })
 }
 
+function normalizeArtifactContext(artifactContext: AfterPipelineRequest["artifact_context"] | undefined): NormalizedArtifactBundle {
+  const parsed = ArtifactContextSchema.safeParse(artifactContext)
+  const context: ArtifactContext = parsed.success
+    ? parsed.data
+    : ArtifactContextSchema.parse({ mode: "none", artifacts: [] })
+  const domObservations: DomObservation[] = []
+  const responseTexts: string[] = []
+  const responseCodeBlocks: string[] = []
+  const changedFileLabels: string[] = []
+  const outputSnippets: string[] = []
+  const errorSummaries: string[] = []
+  const buildOrTestTexts: string[] = []
+  const runtimeSignals: string[] = []
+
+  for (const artifact of context.artifacts) {
+    const content = normalizeWhitespace(artifact.content)
+    if (!content) continue
+
+    if (artifact.type === "response_text") {
+      responseTexts.push(content)
+      continue
+    }
+
+    if (artifact.type === "response_code_blocks") {
+      responseCodeBlocks.push(content)
+      continue
+    }
+
+    if (artifact.type === "changed_file_labels") {
+      changedFileLabels.push(
+        ...content
+          .split(/\r?\n|,\s*/)
+          .map((item) => normalizeWhitespace(item))
+          .filter(Boolean)
+      )
+      continue
+    }
+
+    if (artifact.type === "visible_output_snippet") {
+      outputSnippets.push(content)
+      continue
+    }
+
+    if (artifact.type === "visible_error_summary") {
+      errorSummaries.push(content)
+      continue
+    }
+
+    if (artifact.type === "visible_build_or_test_text") {
+      buildOrTestTexts.push(content)
+      continue
+    }
+
+    if (artifact.type === "visible_runtime_signals") {
+      runtimeSignals.push(content)
+      continue
+    }
+
+    if (artifact.type === "dom_observations") {
+      const probeId =
+        typeof artifact.metadata.probe_id === "string" ? artifact.metadata.probe_id : artifact.source || "dom_probe"
+      const target = typeof artifact.metadata.target === "string" ? artifact.metadata.target : artifact.surface_scope || "dom"
+      const observed = artifact.metadata.observed === true
+      const confidence =
+        typeof artifact.metadata.confidence === "number"
+          ? Math.max(0, Math.min(1, artifact.metadata.confidence))
+          : observed
+            ? 0.7
+            : 0.35
+      const details =
+        typeof artifact.metadata.details === "string" ? normalizeWhitespace(artifact.metadata.details) : content
+
+      domObservations.push({
+        probeId,
+        target,
+        observed,
+        confidence,
+        details,
+        content
+      })
+    }
+  }
+
+  return {
+    mode: context.mode,
+    surface: context.surface,
+    checkedArtifactTypes: dedupe(context.artifacts.map((artifact) => artifact.type), 8) as ArtifactType[],
+    responseTexts: dedupe(responseTexts, 6),
+    responseCodeBlocks: dedupe(responseCodeBlocks, 6),
+    changedFileLabels: dedupe(changedFileLabels, 8),
+    outputSnippets: dedupe(outputSnippets, 4),
+    errorSummaries: dedupe(errorSummaries, 4),
+    buildOrTestTexts: dedupe(buildOrTestTexts, 4),
+    runtimeSignals: dedupe(runtimeSignals, 4),
+    domObservations
+  }
+}
+
+function evidencePolicyForCriterion(label: string): CriterionEvidencePolicy {
+  if (/red\/yellow\/green button|strength button/i.test(label) && /textarea|chat textarea|prompt area/i.test(label)) {
+    return { primary: ["dom_ui_state"] }
+  }
+
+  if (/opens the optimize panel|llm-generated questions|strength badge/i.test(label)) {
+    return { primary: ["dom_ui_state"] }
+  }
+
+  if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(label)) {
+    return {
+      primary: ["dom_ui_state"],
+      fallbackIfPrimaryUnavailable: ["response_claim"]
+    }
+  }
+
+  if (/replace button injects|text visibly updates|injects the improved prompt/i.test(label)) {
+    return { primary: ["dom_ui_state"] }
+  }
+
+  if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(label)) {
+    return { primary: ["dom_ui_state"] }
+  }
+
+  if (/no chrome devtools errors|no console errors|devtools errors/i.test(label)) {
+    return { primary: ["runtime_error_state"] }
+  }
+
+  if (/spa navigation|re-appears|survive/i.test(label)) {
+    return { primary: ["dom_ui_state", "runtime_error_state"] }
+  }
+
+  if (/dist|rebuild|build|typecheck|test|documented|automated/i.test(label)) {
+    return { primary: ["build_or_test_output", "changed_files"] }
+  }
+
+  return {
+    primary: ["response_claim"],
+    fallbackIfPrimaryUnavailable: ["response_code", "changed_files"]
+  }
+}
+
+function hasEvidenceTypeAvailable(bundle: NormalizedArtifactBundle, evidenceType: DeepCriterionEvidenceType) {
+  if (evidenceType === "response_claim") {
+    return bundle.responseTexts.length > 0 || bundle.outputSnippets.length > 0
+  }
+
+  if (evidenceType === "response_code") {
+    return bundle.responseCodeBlocks.length > 0
+  }
+
+  if (evidenceType === "changed_files") {
+    return bundle.changedFileLabels.length > 0
+  }
+
+  if (evidenceType === "runtime_error_state") {
+    return bundle.runtimeSignals.length > 0 || bundle.errorSummaries.length > 0
+  }
+
+  if (evidenceType === "build_or_test_output") {
+    return bundle.buildOrTestTexts.length > 0 || bundle.outputSnippets.length > 0
+  }
+
+  return bundle.domObservations.length > 0
+}
+
+function domObservationsForCriterion(label: string, bundle: NormalizedArtifactBundle) {
+  const probeIds: string[] = []
+
+  if (/red\/yellow\/green button|strength button/i.test(label) && /textarea|chat textarea|prompt area/i.test(label)) {
+    probeIds.push("prompt_textarea_found", "launcher_near_textarea")
+  } else if (/opens the optimize panel|llm-generated questions|strength badge/i.test(label)) {
+    probeIds.push("optimize_panel_visible", "strength_badge_visible", "question_ui_visible")
+  } else if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(label)) {
+    probeIds.push("question_ui_visible", "improved_prompt_visible_in_textarea")
+  } else if (/replace button injects|text visibly updates|injects the improved prompt/i.test(label)) {
+    probeIds.push("replace_button_visible", "improved_prompt_visible_in_textarea")
+  } else if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(label)) {
+    probeIds.push("popup_visible", "auth_state_visible", "usage_visible", "strengthen_flow_visible")
+  } else if (/spa navigation|re-appears|survive/i.test(label)) {
+    probeIds.push("spa_navigation_signal_visible", "launcher_near_textarea")
+  }
+
+  if (!probeIds.length) return []
+
+  return probeIds
+    .map((probeId) => bundle.domObservations.find((observation) => observation.probeId === probeId))
+    .filter((observation): observation is DomObservation => Boolean(observation))
+}
+
+function responseClaimText(bundle: NormalizedArtifactBundle, responseSummary: AfterPipelineRequest["response_summary"]) {
+  return normalizeWhitespace(
+    [
+      ...bundle.responseTexts,
+      ...bundle.outputSnippets,
+      responseSummary.response_text,
+      ...responseSummary.change_claims,
+      ...responseSummary.success_signals,
+      ...responseSummary.validation_signals
+    ].join(" ")
+  )
+}
+
+function runtimeEvidenceText(bundle: NormalizedArtifactBundle) {
+  return normalizeWhitespace([...bundle.runtimeSignals, ...bundle.errorSummaries].join(" "))
+}
+
+function buildOrTestEvidenceText(bundle: NormalizedArtifactBundle) {
+  return normalizeWhitespace([...bundle.buildOrTestTexts, ...bundle.outputSnippets].join(" "))
+}
+
+function changedFilesEvidenceText(bundle: NormalizedArtifactBundle) {
+  return normalizeWhitespace(bundle.changedFileLabels.join(" "))
+}
+
+function explainEvidenceType(evidenceType: DeepCriterionEvidenceType) {
+  if (evidenceType === "dom_ui_state") return "visible DOM/UI artifacts"
+  if (evidenceType === "runtime_error_state") return "visible runtime/error artifacts"
+  if (evidenceType === "build_or_test_output") return "visible build/test artifacts"
+  if (evidenceType === "changed_files") return "changed-file artifacts"
+  if (evidenceType === "response_code") return "response code artifacts"
+  return "response evidence"
+}
+
+function summarizeChecklistStatusForFinding(status: ChecklistItem["status"]) {
+  if (status === "met") return "verified"
+  if (status === "missed") return "missing"
+  if (status === "blocked") return "blocked"
+  return "left unresolved"
+}
+
+function verifyCriterionAgainstArtifacts(
+  criterion: ReviewCriterion,
+  bundle: NormalizedArtifactBundle,
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  const policy = evidencePolicyForCriterion(criterion.label)
+  const availablePrimary = policy.primary.filter((type) => hasEvidenceTypeAvailable(bundle, type))
+  const activeEvidenceTypes =
+    availablePrimary.length > 0
+      ? availablePrimary
+      : (policy.fallbackIfPrimaryUnavailable ?? []).filter((type) => hasEvidenceTypeAvailable(bundle, type))
+  const artifactFindings: string[] = []
+  const contradictions: string[] = []
+  const normalizedResponseText = normalizeForMatch(responseSummary.response_text)
+  const broadlyClaimsSuccess =
+    /\b(validated|verified|full flow|end to end|end-to-end|works|working|fixed|confirmed)\b/i.test(
+      normalizedResponseText
+    ) || responseSummary.success_signals.length > 0
+  const criterionMentionedInResponse =
+    extractMeaningfulTokens(criterion.label).filter((token) => normalizedResponseText.includes(token)).length >= 2
+  const claimedInResponse =
+    quickCriterionSatisfied(criterion.label, responseSummary) || (broadlyClaimsSuccess && criterionMentionedInResponse)
+
+  if (!activeEvidenceTypes.length) {
+    const requiredEvidenceTypes = (availablePrimary.length ? availablePrimary : policy.primary).slice(0, 4)
+    return {
+      verification: DeepCriterionVerificationSchema.parse({
+        criterion_label: criterion.label,
+        required_evidence_types: requiredEvidenceTypes,
+        artifact_findings: [
+          `Needed ${requiredEvidenceTypes.map((type) => explainEvidenceType(type)).join(" or ")}, but those artifacts were not available.`
+        ],
+        judgment: "blocked",
+        confidence: "medium",
+        explanation: `Deep could not verify this criterion because the required artifact evidence was unavailable.`
+      }),
+      contradictions
+    }
+  }
+
+  let judgment: z.infer<typeof DeepCriterionVerificationSchema>["judgment"] = "blocked"
+  let confidence: "low" | "medium" | "high" = "medium"
+  let explanation = "Deep checked the available artifacts for this criterion."
+
+  for (const evidenceType of activeEvidenceTypes) {
+    if (evidenceType === "dom_ui_state") {
+      const observations = domObservationsForCriterion(criterion.label, bundle)
+      if (!observations.length) continue
+
+      const observedCount = observations.filter((item) => item.observed).length
+      const missingObservation = observations.find((item) => !item.observed)
+      artifactFindings.push(
+        ...observations.map(
+          (observation) =>
+            `${observation.probeId}: ${observation.observed ? "observed" : "not observed"} (${limitText(observation.details, 120)})`
+        )
+      )
+
+      if (missingObservation) {
+        judgment = "missed"
+        confidence = "high"
+        explanation = `Deep checked visible DOM/UI artifacts and did not observe: ${limitText(
+          missingObservation.details,
+          150
+        )}`
+      } else if (observedCount === observations.length) {
+        judgment = "met"
+        confidence = observations.every((item) => item.confidence >= 0.7) ? "high" : "medium"
+        explanation = `Deep checked visible DOM/UI artifacts and verified this criterion.`
+      }
+      continue
+    }
+
+    if (evidenceType === "runtime_error_state") {
+      const runtimeText = runtimeEvidenceText(bundle)
+      if (!runtimeText) continue
+
+      const saysNoErrors =
+        /\b(no|zero)\b[\w\s-]{0,40}\b(console|devtools|extension-related)\s+errors?\b/i.test(runtimeText) ||
+        /\bno\s+errors?\b/i.test(runtimeText)
+      const showsErrors = /\b(error|errors|exception|traceback|failed|failure)\b/i.test(runtimeText) && !saysNoErrors
+
+      artifactFindings.push(limitText(runtimeText, 180))
+
+      if (showsErrors) {
+        judgment = "missed"
+        confidence = "high"
+        explanation = `Deep checked visible runtime/error artifacts and found error signals that contradict this criterion.`
+      } else if (saysNoErrors || /passed|success/i.test(runtimeText)) {
+        judgment = "met"
+        confidence = saysNoErrors ? "high" : "medium"
+        explanation = `Deep checked visible runtime/error artifacts and found no active error signal for this criterion.`
+      } else if (judgment !== "missed") {
+        judgment = "blocked"
+        confidence = "medium"
+        explanation = `Deep checked runtime/error artifacts, but they did not clearly prove this criterion either way.`
+      }
+      continue
+    }
+
+    if (evidenceType === "build_or_test_output") {
+      const buildText = buildOrTestEvidenceText(bundle)
+      if (!buildText) continue
+
+      const buildFailed = /\b(fail(?:ed|ing)?|error|errors|exception)\b/i.test(buildText) && !/\bno errors?\b/i.test(buildText)
+      const buildPassed = /\b(passed|success|successful|compiled|build succeeded|typecheck passed)\b/i.test(buildText)
+      artifactFindings.push(limitText(buildText, 180))
+
+      if (buildFailed) {
+        judgment = "missed"
+        confidence = "high"
+        explanation = `Deep checked visible build/test artifacts and found failure signals.`
+      } else if (buildPassed) {
+        judgment = "met"
+        confidence = "medium"
+        explanation = `Deep checked visible build/test artifacts and found a positive signal for this criterion.`
+      }
+      continue
+    }
+
+    if (evidenceType === "changed_files") {
+      const filesText = changedFilesEvidenceText(bundle)
+      if (!filesText) continue
+
+      const criterionTokens = extractMeaningfulTokens(criterion.label)
+      const matched = criterionTokens.filter((token) => filesText.includes(token))
+      artifactFindings.push(`Changed file labels: ${limitText(filesText, 180)}`)
+
+      if (matched.length >= Math.min(2, criterionTokens.length)) {
+        judgment = "met"
+        confidence = "low"
+        explanation = `Deep found changed-file artifacts that align with this criterion, but file labels alone are weaker proof.`
+      } else if (judgment === "blocked") {
+        explanation = `Deep found changed-file artifacts, but they did not clearly line up with this criterion.`
+      }
+      continue
+    }
+
+    if (evidenceType === "response_code") {
+      const codeText = normalizeWhitespace(bundle.responseCodeBlocks.join(" "))
+      if (!codeText) continue
+      const supported = deepCriterionSatisfiedFromEvidence(criterion.label, codeText, responseSummary)
+      artifactFindings.push(`Response code blocks inspected.`)
+
+      if (supported) {
+        judgment = "met"
+        confidence = "medium"
+        explanation = `Deep checked response code artifacts and found support for this criterion.`
+      }
+      continue
+    }
+
+    if (evidenceType === "response_claim") {
+      const claimText = responseClaimText(bundle, responseSummary)
+      if (!claimText) continue
+      const supported = deepCriterionSatisfiedFromEvidence(criterion.label, claimText, responseSummary)
+      artifactFindings.push(`Visible response claims inspected.`)
+
+      if (supported) {
+        judgment = "met"
+        confidence = "medium"
+        explanation = `Deep checked the visible answer text for this criterion because stronger artifacts were unavailable.`
+      }
+    }
+  }
+
+  if (judgment === "missed" && claimedInResponse) {
+    contradictions.push(`The answer claimed this criterion was satisfied, but the artifacts did not support it.`)
+  }
+
+  if (judgment === "blocked" && activeEvidenceTypes.some((type) => type !== "response_claim")) {
+    explanation = `Deep could not verify this criterion from the available ${activeEvidenceTypes
+      .map((type) => explainEvidenceType(type))
+      .join(" or ")}.`
+  }
+
+  return {
+    verification: DeepCriterionVerificationSchema.parse({
+      criterion_label: criterion.label,
+      required_evidence_types: activeEvidenceTypes.slice(0, 4),
+      artifact_findings: dedupe(artifactFindings, 6).slice(0, 6),
+      judgment,
+      confidence,
+      explanation: limitText(explanation, 240)
+    }),
+    contradictions
+  }
+}
+
+function buildArtifactAwareDeepEvaluation(
+  reviewContract: ReviewContract,
+  bundle: NormalizedArtifactBundle,
+  responseSummary: AfterPipelineRequest["response_summary"]
+): DeepArtifactEvaluation {
+  const verifications: z.infer<typeof DeepCriterionVerificationSchema>[] = []
+  const contradictions: string[] = []
+
+  for (const criterion of reviewContract.criteria.slice(0, MAX_REVIEW_CRITERIA)) {
+    const result = verifyCriterionAgainstArtifacts(criterion, bundle, responseSummary)
+    verifications.push(result.verification)
+    contradictions.push(...result.contradictions)
+  }
+
+  const checklist = reviewContract.criteria.slice(0, MAX_REVIEW_CRITERIA).map((criterion) => {
+    const verification = verifications.find((item) => normalizeForMatch(item.criterion_label) === normalizeForMatch(criterion.label))
+    return AcceptanceChecklistItemSchema.parse({
+      label: criterion.label,
+      source: criterion.source,
+      layer: criterion.layer,
+      priority: criterion.priority,
+      status: verification?.judgment ?? "blocked"
+    })
+  })
+
+  const addressedCriteria = checklist.filter((item) => item.status === "met").map((item) => item.label)
+  const missingCriteria = checklist
+    .filter((item) => item.status === "missed" || item.status === "blocked")
+    .map((item) => item.label)
+  const blockedCriteria = checklist.filter((item) => item.status === "blocked").map((item) => item.label)
+  const contradictionCount = contradictions.length
+  const problemFit =
+    contradictionCount > 0 && addressedCriteria.length === 0
+      ? "wrong_direction"
+      : missingCriteria.length
+        ? "partial"
+        : addressedCriteria.length
+          ? "correct"
+          : "wrong_direction"
+
+  const analysisNotes = dedupe(
+    [
+      bundle.checkedArtifactTypes.length
+        ? `Deep checked artifact types: ${bundle.checkedArtifactTypes.join(", ")}.`
+        : "",
+      addressedCriteria.length
+        ? `Artifact-backed support found for: ${summarizeChecklistLabels(addressedCriteria)}.`
+        : "",
+      blockedCriteria.length
+        ? `Deep could not verify required artifacts for: ${summarizeChecklistLabels(blockedCriteria, 1)}.`
+        : "",
+      contradictions[0] || ""
+    ],
+    4
+  )
+
+  const detailInspection = DetailInspectionSchema.parse({
+    supported_claims: verifications
+      .filter((item) => item.judgment === "met")
+      .slice(0, 2)
+      .map((item) => normalizeCriterionLabel(item.criterion_label)),
+    contradictions: dedupe(contradictions, 4),
+    unresolved_risks: verifications
+      .filter((item) => item.judgment === "blocked")
+      .slice(0, 2)
+      .map((item) => item.explanation),
+    evidence_strength:
+      addressedCriteria.length === checklist.length && checklist.length > 0
+        ? "strong"
+        : addressedCriteria.length > 0 || contradictionCount > 0
+          ? "moderate"
+          : "weak",
+    inspection_depth:
+      bundle.responseCodeBlocks.length > 0 || bundle.changedFileLabels.length > 0
+        ? "targeted_code"
+        : bundle.checkedArtifactTypes.length > 0
+          ? "targeted_text"
+          : "summary_only"
+  })
+
+  return {
+    checklist,
+    stage2: Stage2OutputSchema.parse({
+      addressed_criteria: addressedCriteria,
+      missing_criteria: missingCriteria,
+      constraint_risks: [],
+      problem_fit: problemFit,
+      analysis_notes: analysisNotes
+    }),
+    detailInspection,
+    verifications,
+    checkedArtifactTypes: bundle.checkedArtifactTypes,
+    contradictionCount
+  }
+}
+
 function constraintMentioned(constraint: string, responseSummary: AfterPipelineRequest["response_summary"]) {
   const normalizedConstraint = normalizeForMatch(constraint)
   const haystack = [
@@ -1710,19 +2269,34 @@ function buildAcceptanceChecklist(
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
-  deepAnalysisRequested = false
+  deepAnalysisRequested = false,
+  deepCriterionVerifications: z.infer<typeof DeepCriterionVerificationSchema>[] = []
 ) {
   const addressedKeys = new Set(stage2.addressed_criteria.map((item) => normalizeForMatch(item)))
   const missedKeys = new Set(stage2.missing_criteria.map((item) => normalizeForMatch(item)))
   const binaryDecisionRequired = deepAnalysisRequested || detail.inspection_depth !== "summary_only"
+  const verificationByLabel = new Map(
+    deepCriterionVerifications.map((item) => [normalizeForMatch(item.criterion_label), item])
+  )
 
   return reviewContract.criteria.slice(0, MAX_REVIEW_CRITERIA).map((criterion) =>
     {
       const normalizedLabel = normalizeForMatch(criterion.label)
+      const artifactVerification = verificationByLabel.get(normalizedLabel)
+      if (deepAnalysisRequested && artifactVerification) {
+        return AcceptanceChecklistItemSchema.parse({
+          label: criterion.label,
+          source: criterion.source,
+          layer: criterion.layer,
+          priority: criterion.priority,
+          status: artifactVerification.judgment
+        })
+      }
+
       const quickSatisfied = quickCriterionSatisfied(criterion.label, responseSummary)
       const explicitlyUnproven = criterionExplicitlyUnproven(criterion.label, responseSummary)
 
-      let status: "met" | "not_sure" | "missed"
+      let status: "met" | "not_sure" | "missed" | "blocked"
       if (explicitlyUnproven) {
         status = binaryDecisionRequired ? "missed" : "not_sure"
       } else if (addressedKeys.has(normalizedLabel) || quickSatisfied) {
@@ -1756,7 +2330,7 @@ function alignStage2WithChecklist(
   const missingCriteria = reviewContract.criteria
     .filter((criterion) => {
       const status = checklistByLabel.get(normalizeForMatch(criterion.label))
-      return status === "missed" || status === "not_sure"
+      return status === "missed" || status === "not_sure" || status === "blocked"
     })
     .map((criterion) => criterion.label)
 
@@ -1827,10 +2401,13 @@ function reconcileVerdictWithChecklist(
 
   const metCount = checklist.filter((item) => item.status === "met").length
   const unresolvedCount = checklist.filter((item) => item.status === "not_sure").length
+  const blockedCount = checklist.filter((item) => item.status === "blocked").length
   const missedCore = coreCriteria.filter((criterion) => statusForCriterion(criterion) === "missed")
   const missedValidation = validationCriteria.filter((criterion) => statusForCriterion(criterion) === "missed")
   const unresolvedCore = coreCriteria.filter((criterion) => statusForCriterion(criterion) === "not_sure")
   const unresolvedValidation = validationCriteria.filter((criterion) => statusForCriterion(criterion) === "not_sure")
+  const blockedCore = coreCriteria.filter((criterion) => statusForCriterion(criterion) === "blocked")
+  const blockedValidation = validationCriteria.filter((criterion) => statusForCriterion(criterion) === "blocked")
   const allKnownCriteriaMet = checklist.length > 0 && checklist.every((item) => item.status === "met")
   const remainingStageMissing = stage2.missing_criteria.filter(
     (item) => checklistByLabel.get(normalizeForMatch(item)) !== "met"
@@ -1878,23 +2455,33 @@ function reconcileVerdictWithChecklist(
       deepAnalysisRequested && detail.inspection_depth !== "summary_only" && unresolvedCount === 0
         ? `Deep review resolved the fixed checklist and found at least one unmet core requirement: ${missedCore[0].label}.`
         : `At least one core requirement is still not satisfied: ${missedCore[0].label}.`
+  } else if (blockedCore.length > 0) {
+    status = "PARTIAL"
+    confidence = "medium"
+    confidenceReason = `A core requirement still needs artifact proof: ${blockedCore[0].label}.`
   } else if (unresolvedCore.length > 0) {
     status = "PARTIAL"
     confidence = "medium"
     confidenceReason = `A core requirement still needs proof: ${unresolvedCore[0].label}.`
-  } else if (missedValidation.length > 0 || unresolvedValidation.length > 0) {
-    status = "LIKELY_SUCCESS"
+  } else if (missedValidation.length > 0 || unresolvedValidation.length > 0 || blockedValidation.length > 0) {
+    status = blockedValidation.length > 0 ? "PARTIAL" : "LIKELY_SUCCESS"
     confidence = detail.inspection_depth === "summary_only" ? "medium" : "high"
     confidenceReason =
       missedValidation.length > 0
         ? deepAnalysisRequested && detail.inspection_depth !== "summary_only" && unresolvedCount === 0
           ? `Deep review resolved the fixed checklist and found a failed validation check: ${missedValidation[0].label}.`
           : `Core requirements look satisfied, but a validation check failed: ${missedValidation[0].label}.`
+        : blockedValidation.length > 0
+          ? `Core requirements look satisfied, but a validation check still needs artifact proof: ${blockedValidation[0].label}.`
         : `Core requirements look satisfied, but a validation check still needs proof: ${unresolvedValidation[0].label}.`
   } else if (stage2.problem_fit === "wrong_direction") {
     status = "WRONG_DIRECTION"
     confidence = detail.inspection_depth === "summary_only" ? "medium" : "high"
     confidenceReason = "The answer appears to solve a different problem than the frozen review contract."
+  }
+
+  if (deepAnalysisRequested && blockedCount > 0 && status === "SUCCESS") {
+    status = "LIKELY_SUCCESS"
   }
 
   if (detail.inspection_depth !== "summary_only" && confidence === "low") {
@@ -2121,8 +2708,12 @@ function fallbackNextPrompt(
 function buildDeepReviewPrimaryFinding(
   intent: AttemptIntent,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
-  detail: ReturnType<typeof DetailInspectionSchema.parse>
+  detail: ReturnType<typeof DetailInspectionSchema.parse>,
+  deepCriterionVerifications: z.infer<typeof DeepCriterionVerificationSchema>[] = []
 ) {
+  const blockedVerification = deepCriterionVerifications.find((item) => item.judgment === "blocked")
+  const missedVerification = deepCriterionVerifications.find((item) => item.judgment === "missed")
+  const metVerification = deepCriterionVerifications.find((item) => item.judgment === "met")
   const supportedClaim = detail.supported_claims
     .map((item) => normalizeWhitespace(item))
     .find(Boolean)
@@ -2138,6 +2729,18 @@ function buildDeepReviewPrimaryFinding(
   const addressedCriterion = stage2.addressed_criteria
     .map((item) => normalizeCriterionLabel(item))
     .find(Boolean)
+
+  if (blockedVerification) {
+    return `Deep could not verify "${blockedVerification.criterion_label}" because the required artifact evidence was not available.`
+  }
+
+  if (missedVerification && missedVerification.artifact_findings.length) {
+    return `Deep checked artifacts and marked "${missedVerification.criterion_label}" missing.`
+  }
+
+  if (metVerification && metVerification.artifact_findings.length) {
+    return `Deep verified "${metVerification.criterion_label}" using artifact evidence.`
+  }
 
   if (supportedClaim && missingCriterion) {
     return `Deep review verified ${supportedClaim}, but it still does not directly prove: ${missingCriterion}.`
@@ -2192,7 +2795,19 @@ function buildChecklistDrivenPrimaryFinding(
   const unresolvedValidation = checklist
     .filter((item) => item.status === "not_sure" && item.layer === "validation" && !isGenericDisplayCriterion(item.label))
     .map((item) => item.label)
+  const blockedCore = checklist
+    .filter((item) => item.status === "blocked" && item.layer === "core" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const blockedValidation = checklist
+    .filter((item) => item.status === "blocked" && item.layer === "validation" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
   const visibleVerifiedWork = concreteMet.length ? summarizeChecklistLabels(concreteMet) : ""
+
+  if (deepAnalysisRequested && blockedCore.length) {
+    return visibleVerifiedWork
+      ? `Deep verified ${visibleVerifiedWork}, but it still needs artifact proof for: ${blockedCore[0]}.`
+      : `Deep still needs artifact proof for: ${blockedCore[0]}.`
+  }
 
   if (deepAnalysisRequested && missedCore.length) {
     return visibleVerifiedWork
@@ -2210,6 +2825,12 @@ function buildChecklistDrivenPrimaryFinding(
     return visibleVerifiedWork
       ? `Deep review verified ${visibleVerifiedWork}, but it still found a validation failure: ${missedValidation[0]}.`
       : `Deep review resolved the core flow, but it still found a validation failure: ${missedValidation[0]}.`
+  }
+
+  if (deepAnalysisRequested && blockedValidation.length) {
+    return visibleVerifiedWork
+      ? `Deep verified ${visibleVerifiedWork}, but it still needs validation artifacts for: ${blockedValidation[0]}.`
+      : `Deep still needs validation artifacts for: ${blockedValidation[0]}.`
   }
 
   if (!deepAnalysisRequested && unresolvedCore.length) {
@@ -2263,7 +2884,7 @@ function buildDeepDeltaFinding(
 
   const sample = changed[0]
   const previous = baselineMap.get(normalizeForMatch(sample.label))
-  return `Deep review changed ${changed.length} checklist result${changed.length > 1 ? "s" : ""}; for example, ${sample.label} moved from ${previous} to ${sample.status}.`
+  return `Deep review changed ${changed.length} checklist result${changed.length > 1 ? "s" : ""}; for example, ${sample.label} moved from ${previous} to ${summarizeChecklistStatusForFinding(sample.status)}.`
 }
 
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
@@ -2271,6 +2892,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const changedFiles = summarizeChangedFiles(parsed.changed_file_paths_summary ?? [])
   const errorSummary = parsed.error_summary?.trim() ?? ""
   const deepAnalysisRequested = parsed.deep_analysis ?? false
+  const artifactBundle = normalizeArtifactContext(parsed.artifact_context)
   // Once quick has frozen a contract for this answer, deep should only deepen evidence,
   // not re-derive the checklist or verdict from fresh model drift.
   const frozenDeepReview = deepAnalysisRequested && Boolean(parsed.baseline_review_contract?.criteria?.length)
@@ -2474,6 +3096,14 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     safeStage2 = normalizeStage2AgainstReviewContract(stage4Alignment ?? fallbackAlignedStage2, reviewContract)
   }
 
+  const artifactAwareDeepEvaluation = deepAnalysisRequested
+    ? buildArtifactAwareDeepEvaluation(reviewContract, artifactBundle, parsed.response_summary)
+    : null
+  if (artifactAwareDeepEvaluation) {
+    detailInspection = artifactAwareDeepEvaluation.detailInspection
+    safeStage2 = artifactAwareDeepEvaluation.stage2
+  }
+
   let safeVerdict = fallbackVerdict(
     intent,
     parsed.response_summary,
@@ -2535,7 +3165,8 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     safeStage2,
     detailInspection,
     parsed.response_summary,
-    deepAnalysisRequested
+    deepAnalysisRequested,
+    artifactAwareDeepEvaluation?.verifications ?? []
   )
   if (deepAnalysisRequested) {
     safeStage2 = alignStage2WithChecklist(safeStage2, acceptanceChecklist, reviewContract)
@@ -2567,7 +3198,12 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   })
 
   if (deepAnalysisRequested && detailInspection.inspection_depth !== "summary_only") {
-    const deepPrimaryFinding = buildDeepReviewPrimaryFinding(intent, safeStage2, detailInspection)
+    const deepPrimaryFinding = buildDeepReviewPrimaryFinding(
+      intent,
+      safeStage2,
+      detailInspection,
+      artifactAwareDeepEvaluation?.verifications ?? []
+    )
     safeVerdict = VerdictOutputSchema.parse({
       ...safeVerdict,
       findings: dedupe([deepPrimaryFinding, ...safeVerdict.findings], 3)
@@ -2590,6 +3226,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     acceptance_checklist: acceptanceChecklist,
     review_contract: reviewContract,
     response_summary: parsed.response_summary,
+    checked_artifact_types: artifactAwareDeepEvaluation?.checkedArtifactTypes ?? [],
+    deep_criterion_verifications: artifactAwareDeepEvaluation?.verifications ?? [],
+    contradiction_count: artifactAwareDeepEvaluation?.contradictionCount ?? 0,
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal
   })

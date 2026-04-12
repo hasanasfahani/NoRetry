@@ -175,9 +175,66 @@ export const VerdictOutputSchema = z.object({
   issues: z.array(z.string()).max(6).default([])
 })
 
+export const ArtifactContextModeSchema = z.enum(["none", "passive"])
+export const ArtifactSurfaceSchema = z.enum(["replit", "chatgpt"])
+export const ArtifactTypeSchema = z.enum([
+  "response_text",
+  "response_code_blocks",
+  "changed_file_labels",
+  "visible_output_snippet",
+  "visible_error_summary",
+  "visible_build_or_test_text",
+  "visible_runtime_signals",
+  "dom_observations"
+])
+export const DeepCriterionJudgmentSchema = z.enum(["met", "missed", "blocked"])
+export const DeepCriterionEvidenceTypeSchema = z.enum([
+  "response_claim",
+  "response_code",
+  "changed_files",
+  "runtime_error_state",
+  "build_or_test_output",
+  "dom_ui_state"
+])
+
+export const ArtifactRecordSchema = z.object({
+  type: ArtifactTypeSchema,
+  source: z.string().max(80),
+  captured_at: z.string(),
+  surface_scope: z.string().max(80).default(""),
+  content: z.string().max(12000).default(""),
+  metadata: z
+    .record(
+      z.union([
+        z.string(),
+        z.number(),
+        z.boolean(),
+        z.array(z.string()),
+        z.array(z.number()),
+        z.array(z.boolean())
+      ])
+    )
+    .default({})
+})
+
+export const ArtifactContextSchema = z.object({
+  mode: ArtifactContextModeSchema.default("none"),
+  surface: ArtifactSurfaceSchema.optional(),
+  artifacts: z.array(ArtifactRecordSchema).max(40).default([])
+})
+
+export const DeepCriterionVerificationSchema = z.object({
+  criterion_label: z.string().max(240),
+  required_evidence_types: z.array(DeepCriterionEvidenceTypeSchema).max(4).default([]),
+  artifact_findings: z.array(z.string().max(240)).max(6).default([]),
+  judgment: DeepCriterionJudgmentSchema,
+  confidence: AfterConfidenceSchema,
+  explanation: z.string().max(240).default("")
+})
+
 export const AcceptanceChecklistItemSchema = z.object({
   label: z.string().max(240),
-  status: z.enum(["met", "not_sure", "missed"]),
+  status: z.enum(["met", "not_sure", "missed", "blocked"]),
   source: ReviewCriterionSourceSchema.optional(),
   layer: ReviewCriterionLayerSchema.optional(),
   priority: z.number().int().min(1).max(6).optional()
@@ -217,6 +274,9 @@ export const AfterAnalysisResultSchema = z.object({
   verdict: VerdictOutputSchema,
   next_prompt_output: NextPromptOutputSchema,
   acceptance_checklist: z.array(AcceptanceChecklistItemSchema).max(6).default([]),
+  checked_artifact_types: z.array(ArtifactTypeSchema).max(8).default([]),
+  deep_criterion_verifications: z.array(DeepCriterionVerificationSchema).max(6).default([]),
+  contradiction_count: z.number().int().min(0).default(0),
   review_contract: ReviewContractSchema,
   response_summary: ResponsePreprocessorOutputSchema,
   used_fallback_intent: z.boolean().default(false),
@@ -297,7 +357,8 @@ export const AfterPipelineRequestSchema = z.object({
   project_context: z.string().max(4000).default(""),
   current_state: z.string().max(3000).default(""),
   error_summary: z.string().max(300).nullable().optional(),
-  changed_file_paths_summary: z.array(z.string().max(180)).max(20).default([])
+  changed_file_paths_summary: z.array(z.string().max(180)).max(20).default([]),
+  artifact_context: ArtifactContextSchema.optional()
 })
 
 export const AfterPipelineResponseSchema = AfterAnalysisResultSchema
@@ -409,6 +470,14 @@ export type UnifiedTaskType = z.infer<typeof UnifiedTaskTypeSchema>
 export type VerdictStatus = z.infer<typeof VerdictStatusSchema>
 export type ReviewCriterionSource = z.infer<typeof ReviewCriterionSourceSchema>
 export type ReviewCriterionLayer = z.infer<typeof ReviewCriterionLayerSchema>
+export type ArtifactContextMode = z.infer<typeof ArtifactContextModeSchema>
+export type ArtifactSurface = z.infer<typeof ArtifactSurfaceSchema>
+export type ArtifactType = z.infer<typeof ArtifactTypeSchema>
+export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>
+export type ArtifactContext = z.infer<typeof ArtifactContextSchema>
+export type DeepCriterionJudgment = z.infer<typeof DeepCriterionJudgmentSchema>
+export type DeepCriterionEvidenceType = z.infer<typeof DeepCriterionEvidenceTypeSchema>
+export type DeepCriterionVerification = z.infer<typeof DeepCriterionVerificationSchema>
 export type AttemptIntent = z.infer<typeof AttemptIntentSchema>
 export type Attempt = z.infer<typeof AttemptSchema>
 export type ResponsePreprocessorOutput = z.infer<typeof ResponsePreprocessorOutputSchema>

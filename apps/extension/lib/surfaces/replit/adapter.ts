@@ -1,5 +1,6 @@
 import {
   createEmptyAssistantResponseSnapshot,
+  createEmptyArtifactContext,
   createEmptyDraftPromptSnapshot,
   createEmptyUserPromptSnapshot,
   createPanelMountContext,
@@ -7,12 +8,15 @@ import {
   type SurfaceAdapter
 } from "../adapter"
 import {
+  collectChangedFilesSummary,
+  collectVisibleErrorSummary,
   collectVisibleOutputSnippet,
   findPromptInput,
   findSubmitButton,
   readPromptValue,
   writePromptValue
 } from "../../replit"
+import type { ArtifactContext, ArtifactRecord, ReviewContract } from "@prompt-optimizer/shared"
 
 function isVisibleElement(element: HTMLElement) {
   const rect = element.getBoundingClientRect()
@@ -76,8 +80,8 @@ function compareAssistantCandidates(
 ) {
   const leftRect = left.getBoundingClientRect()
   const rightRect = right.getBoundingClientRect()
-  const leftInConversation = Boolean(conversationContainer) && conversationContainer.contains(left)
-  const rightInConversation = Boolean(conversationContainer) && conversationContainer.contains(right)
+  const leftInConversation = conversationContainer ? conversationContainer.contains(left) : false
+  const rightInConversation = conversationContainer ? conversationContainer.contains(right) : false
 
   if (leftInConversation !== rightInConversation) {
     return rightInConversation ? 1 : -1
@@ -124,14 +128,16 @@ function buildDomPath(node: HTMLElement | null) {
   let depth = 0
 
   while (current && depth < 5) {
-    const parent = current.parentElement
-    const tag = current.tagName.toLowerCase()
+    const activeNode: HTMLElement = current
+    const parent: HTMLElement | null = activeNode.parentElement
+    const tag = activeNode.tagName.toLowerCase()
     const index =
       parent == null
         ? 0
         : Array.from(parent.children)
-            .filter((child) => child.tagName === current?.tagName)
-            .indexOf(current)
+            .filter((child): child is HTMLElement => child instanceof HTMLElement)
+            .filter((child) => child.tagName === activeNode.tagName)
+            .indexOf(activeNode)
     path.unshift(`${tag}:${Math.max(index, 0)}`)
     current = parent
     depth += 1
@@ -158,6 +164,233 @@ function readMessageIdentity(node: HTMLElement | null, fallbackText = "") {
   const textSeed = fallbackText.trim().slice(0, 80)
 
   return [testId, domPath, textSeed].filter(Boolean).join("::")
+}
+
+function extractCodeBlocks(text: string) {
+  return [...text.matchAll(/```[\s\S]*?```/g)].map((match) => match[0].trim()).filter(Boolean)
+}
+
+function limitText(value: string, limit: number) {
+  if (value.length <= limit) return value
+  return `${value.slice(0, limit - 1).trimEnd()}…`
+}
+
+function createArtifact(
+  type: ArtifactRecord["type"],
+  surfaceScope: string,
+  content: string,
+  metadata: ArtifactRecord["metadata"] = {},
+  source = "replit_surface"
+): ArtifactRecord | null {
+  const trimmed = content.trim()
+  if (!trimmed) return null
+
+  return {
+    type,
+    source,
+    captured_at: new Date().toISOString(),
+    surface_scope: surfaceScope,
+    content: limitText(trimmed, 12000),
+    metadata
+  }
+}
+
+function findVisibleTextMatches(pattern: RegExp, selectors: string[]) {
+  const seen = new Set<string>()
+  const matches: string[] = []
+
+  for (const selector of selectors) {
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
+      if (!isVisibleElement(element)) continue
+      if (element.closest("#prompt-optimizer-root")) continue
+      const text = element.innerText.trim()
+      if (!text || !pattern.test(text)) continue
+      const limited = limitText(text, 500)
+      if (seen.has(limited)) continue
+      seen.add(limited)
+      matches.push(limited)
+      if (matches.length >= 3) return matches
+    }
+  }
+
+  return matches
+}
+
+function collectVisibleBuildOrTestText() {
+  return findVisibleTextMatches(
+    /\b(build|built|compile|compiled|typecheck|test|tests|passed|failing|failed|vite|webpack|next build|npm run)\b/i,
+    ["pre", "code", "[role='log']", "[data-testid*='output' i]", "[class*='output' i]", "[class*='console' i]", "section", "article", "main"]
+  ).join("\n\n")
+}
+
+function collectVisibleRuntimeSignalsText() {
+  return findVisibleTextMatches(
+    /\b(error|errors|warning|warnings|passed|success|console|runtime|traceback|exception)\b/i,
+    ["pre", "code", "[role='alert']", "[role='status']", "[data-testid*='output' i]", "[class*='console' i]", "section", "article", "main"]
+  ).join("\n\n")
+}
+
+function findVisibleElementByText(pattern: RegExp, selectors: string[]) {
+  for (const selector of selectors) {
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
+      if (!isVisibleElement(element)) continue
+      if (element.closest("#prompt-optimizer-root")) continue
+      if (pattern.test(element.innerText.trim())) return element
+    }
+  }
+
+  return null
+}
+
+function buildDomObservationArtifacts(reviewContract: ReviewContract | null): ArtifactRecord[] {
+  const artifacts: ArtifactRecord[] = []
+  const textarea = findPromptInput()
+  const textareaRect = textarea?.getBoundingClientRect() ?? null
+
+  const pushObservation = (
+    probeId: string,
+    target: string,
+    observed: boolean,
+    confidence: number,
+    details: string
+  ) => {
+    const artifact = createArtifact(
+      "dom_observations",
+      "replit_dom",
+      `${probeId}: ${observed ? "observed" : "not_observed"} - ${details}`,
+      {
+        probe_id: probeId,
+        target,
+        observed,
+        confidence,
+        details
+      }
+    )
+    if (artifact) artifacts.push(artifact)
+  }
+
+  pushObservation(
+    "prompt_textarea_found",
+    "prompt_textarea",
+    Boolean(textarea),
+    textarea ? 0.95 : 0.4,
+    textarea ? "Found a prompt input on the page." : "Could not find the current prompt textarea."
+  )
+
+  const launcher = findVisibleElementByText(/\b(strength|optimi[sz]e|improve prompt|launcher)\b/i, ["button", "[role='button']", "span", "div"])
+  const launcherNearTextarea =
+    Boolean(launcher && textareaRect) &&
+    (() => {
+      const rect = launcher!.getBoundingClientRect()
+      return Math.abs(rect.top - textareaRect!.top) < 120 && Math.abs(rect.left - textareaRect!.right) < 220
+    })()
+  pushObservation(
+    "launcher_near_textarea",
+    "inline_launcher",
+    launcherNearTextarea,
+    launcherNearTextarea ? 0.8 : launcher ? 0.55 : 0.35,
+    launcherNearTextarea
+      ? "Found a likely optimize/strength launcher near the prompt textarea."
+      : launcher
+      ? "Found a likely optimize/strength control, but not confidently near the prompt textarea."
+      : "No likely optimize/strength launcher was visible near the prompt textarea."
+  )
+
+  const optimizePanel = findVisibleElementByText(/\b(optimi[sz]e|clarif|follow-up|acceptance criteria|strength badge)\b/i, ["aside", "dialog", "section", "[role='dialog']", "[class*='panel' i]", "[class*='drawer' i]"])
+  pushObservation(
+    "optimize_panel_visible",
+    "optimize_panel",
+    Boolean(optimizePanel),
+    optimizePanel ? 0.8 : 0.35,
+    optimizePanel ? "Found a likely optimize panel or drawer." : "No optimize panel was visibly open."
+  )
+
+  const strengthBadge = findVisibleElementByText(/\b(red|yellow|green|strength)\b/i, ["span", "div", "button", "section", "aside", "[role='dialog']"])
+  pushObservation(
+    "strength_badge_visible",
+    "strength_badge",
+    Boolean(strengthBadge),
+    strengthBadge ? 0.72 : 0.35,
+    strengthBadge ? "Found visible strength-related badge text." : "No visible strength badge text was found."
+  )
+
+  const questionUi = findVisibleElementByText(/\b(question|questions|follow-up|clarification)\b/i, ["aside", "dialog", "section", "[role='dialog']", "main"])
+  pushObservation(
+    "question_ui_visible",
+    "question_flow",
+    Boolean(questionUi),
+    questionUi ? 0.72 : 0.35,
+    questionUi ? "Found visible question or follow-up UI text." : "No question or follow-up UI was visible."
+  )
+
+  const replaceButton = findVisibleElementByText(/\breplace\b/i, ["button", "[role='button']"])
+  pushObservation(
+    "replace_button_visible",
+    "replace_button",
+    Boolean(replaceButton),
+    replaceButton ? 0.78 : 0.35,
+    replaceButton ? "Found a visible Replace button." : "No visible Replace button was found."
+  )
+
+  const promptValue = textarea ? readPromptValue(textarea).trim() : ""
+  pushObservation(
+    "improved_prompt_visible_in_textarea",
+    "prompt_textarea_content",
+    Boolean(promptValue.length > 20),
+    promptValue.length > 20 ? 0.62 : 0.3,
+    promptValue.length > 20
+      ? "Prompt textarea currently contains visible prompt text."
+      : "Prompt textarea did not show enough visible prompt text to confirm replacement."
+  )
+
+  const popup = findVisibleElementByText(/\b(auth state|usage|strengthen|prompt optimizer|noretry)\b/i, ["dialog", "aside", "section", "[role='dialog']", "[class*='popup' i]"])
+  pushObservation(
+    "popup_visible",
+    "extension_popup",
+    Boolean(popup),
+    popup ? 0.7 : 0.32,
+    popup ? "Found likely extension popup content." : "No extension popup content was visibly open."
+  )
+
+  const authState = findVisibleElementByText(/\b(auth state|signed in|sign in|logged in|login)\b/i, ["dialog", "aside", "section", "main"])
+  pushObservation(
+    "auth_state_visible",
+    "auth_state",
+    Boolean(authState),
+    authState ? 0.7 : 0.32,
+    authState ? "Found visible auth/sign-in state text." : "No auth/sign-in state text was visible."
+  )
+
+  const usage = findVisibleElementByText(/\b(usage|credits|quota)\b/i, ["dialog", "aside", "section", "main"])
+  pushObservation(
+    "usage_visible",
+    "usage",
+    Boolean(usage),
+    usage ? 0.7 : 0.32,
+    usage ? "Found visible usage/credits/quota text." : "No usage/credits text was visible."
+  )
+
+  const strengthen = findVisibleElementByText(/\bstrengthen\b/i, ["dialog", "aside", "section", "button", "[role='tab']", "[role='button']"])
+  pushObservation(
+    "strengthen_flow_visible",
+    "strengthen_flow",
+    Boolean(strengthen),
+    strengthen ? 0.62 : 0.3,
+    strengthen ? "Found visible Strengthen flow/tab text." : "No visible Strengthen flow/tab text was found."
+  )
+
+  if (reviewContract?.criteria.some((criterion) => /spa navigation|re-appears|survive/i.test(criterion.label))) {
+    const nav = findVisibleElementByText(/\b(navigation|re-appear|reappear|stays visible)\b/i, ["main", "section", "article", "pre", "code"])
+    pushObservation(
+      "spa_navigation_signal_visible",
+      "spa_navigation",
+      Boolean(nav),
+      nav ? 0.45 : 0.2,
+      nav ? "Found visible navigation-related signal text." : "No visible SPA navigation proof was present."
+    )
+  }
+
+  return artifacts
 }
 
 function collectAssistantCandidates() {
@@ -221,7 +454,7 @@ function collectAssistantCandidates() {
         horizontalOverlapRatio(rect, promptRect) > 0.45
       const belowPrompt = promptRect != null && rect.top >= promptRect.top - 12
       const inConversationContainer =
-        Boolean(conversationContainer) &&
+        conversationContainer != null &&
         (conversationContainer === element || conversationContainer.contains(element) || element.contains(conversationContainer))
       const oversizedRegion =
         promptRect != null &&
@@ -326,5 +559,59 @@ export const replitSurfaceAdapter: SurfaceAdapter = {
   },
   getPanelMountContext() {
     return createPanelMountContext(findPromptInput())
+  },
+  collectDeepArtifacts(input) {
+    const responseText = input.responseText.trim()
+    if (!responseText) return createEmptyArtifactContext("replit")
+
+    const artifacts: ArtifactRecord[] = []
+    const responseArtifact = createArtifact("response_text", "latest_assistant_response", responseText)
+    if (responseArtifact) artifacts.push(responseArtifact)
+
+    const codeBlocks = extractCodeBlocks(responseText)
+    if (codeBlocks.length) {
+      const codeArtifact = createArtifact(
+        "response_code_blocks",
+        "latest_assistant_response",
+        codeBlocks.join("\n\n"),
+        { block_count: codeBlocks.length }
+      )
+      if (codeArtifact) artifacts.push(codeArtifact)
+    }
+
+    const changedFiles = collectChangedFilesSummary()
+    if (changedFiles.length) {
+      const changedFilesArtifact = createArtifact(
+        "changed_file_labels",
+        "workspace_surface",
+        changedFiles.join("\n"),
+        { file_count: changedFiles.length }
+      )
+      if (changedFilesArtifact) artifacts.push(changedFilesArtifact)
+    }
+
+    const outputSnippet = collectVisibleOutputSnippet()
+    const outputArtifact = createArtifact("visible_output_snippet", "workspace_surface", outputSnippet)
+    if (outputArtifact) artifacts.push(outputArtifact)
+
+    const errorSummary = collectVisibleErrorSummary()
+    const errorArtifact = createArtifact("visible_error_summary", "workspace_surface", errorSummary ?? "")
+    if (errorArtifact) artifacts.push(errorArtifact)
+
+    const buildOrTestText = collectVisibleBuildOrTestText()
+    const buildArtifact = createArtifact("visible_build_or_test_text", "workspace_surface", buildOrTestText)
+    if (buildArtifact) artifacts.push(buildArtifact)
+
+    const runtimeSignals = collectVisibleRuntimeSignalsText()
+    const runtimeArtifact = createArtifact("visible_runtime_signals", "workspace_surface", runtimeSignals)
+    if (runtimeArtifact) artifacts.push(runtimeArtifact)
+
+    artifacts.push(...buildDomObservationArtifacts(input.reviewContract))
+
+    return {
+      mode: "passive",
+      surface: "replit",
+      artifacts
+    } satisfies ArtifactContext
   }
 }
