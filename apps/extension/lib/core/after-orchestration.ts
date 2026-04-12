@@ -46,6 +46,12 @@ export function buildAfterPlaceholder(
       prompt_strategy: "retry_cleanly"
     },
     acceptance_checklist: [],
+    review_contract: {
+      version: "v1",
+      target_signature: "",
+      goal: finding,
+      criteria: []
+    },
     response_summary: {
       response_text: "",
       response_length: 0,
@@ -54,6 +60,8 @@ export function buildAfterPlaceholder(
       key_paragraphs: [],
       has_code_blocks: false,
       mentioned_files: [],
+      change_claims: [],
+      validation_signals: [],
       certainty_signals: [],
       uncertainty_signals: [],
       success_signals: [],

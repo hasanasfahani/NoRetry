@@ -3,13 +3,18 @@ import {
   AfterPipelineResponseSchema,
   IntentExtractionOutputSchema,
   NextPromptOutputSchema,
+  ReviewContractSchema,
   Stage1OutputSchema,
   Stage2OutputSchema,
   VerdictOutputSchema,
   type AfterPipelineRequest,
-  type AttemptIntent
-} from "@prompt-optimizer/shared"
-import { buildResponseExcerpts, compressGoal } from "@prompt-optimizer/shared"
+  type AttemptIntent,
+  type ReviewContract,
+  type ReviewCriterion,
+  type ReviewCriterionLayer,
+  type ReviewCriterionSource
+} from "../../../packages/shared/src/schemas.ts"
+import { buildResponseExcerpts, compressGoal } from "../../../packages/shared/src/after-pipeline.ts"
 import * as z from "zod"
 import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
@@ -18,6 +23,7 @@ import { callKimiJson } from "./kimi"
 const AFTER_STAGE_SOFT_DEADLINE_MS = 8000
 const AFTER_DEEP_STAGE_SOFT_DEADLINE_MS = 16000
 const EVIDENCE_EXCERPT_LIMIT = 320
+const MAX_REVIEW_CRITERIA = 6
 
 const EvidenceTargetingSchema = z.object({
   selected_candidate_ids: z.array(z.string()).max(4).default([]),
@@ -39,6 +45,20 @@ type EvidenceCandidate = {
   label: string
   excerpt: string
 }
+
+type CriterionSeed = {
+  label: string
+  source: ReviewCriterionSource
+  layer: ReviewCriterionLayer
+}
+
+const REVIEW_SOURCE_ORDER: ReviewCriterionSource[] = [
+  "submitted_prompt",
+  "definition_of_done",
+  "user_intent",
+  "constraint",
+  "validation"
+]
 
 function dedupe(items: string[], limit = 6) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
@@ -354,12 +374,24 @@ function isGenericDisplayCriterion(value: string) {
   )
 }
 
-function canonicalAcceptanceCriteria(intent: AttemptIntent, baselineCriteria: string[] = []) {
+function canonicalAcceptanceCriteria(
+  intent: AttemptIntent,
+  baselineCriteria: string[] = [],
+  reviewContract?: ReviewContract | null
+) {
+  const contractCriteria = (reviewContract?.criteria ?? [])
+    .map((criterion) => normalizeCriterionLabel(criterion.label))
+    .filter(Boolean)
+
+  if (contractCriteria.some((item) => !isGenericDisplayCriterion(item))) {
+    return dedupe(contractCriteria, 8)
+  }
+
   const preferredBaseline = dedupe(
     baselineCriteria
       .map((item) => normalizeCriterionLabel(item))
       .filter(Boolean),
-    6
+    8
   )
 
   if (preferredBaseline.some((item) => !isGenericDisplayCriterion(item))) {
@@ -370,7 +402,7 @@ function canonicalAcceptanceCriteria(intent: AttemptIntent, baselineCriteria: st
     intent.acceptance_criteria
       .map((item) => normalizeCriterionLabel(item))
       .filter(Boolean),
-    6
+    8
   )
 
   if (fromIntent.some((item) => !isGenericDisplayCriterion(item))) {
@@ -385,6 +417,210 @@ function summarizeChecklistLabels(labels: string[], limit = 2) {
     .slice(0, limit)
     .map((label) => conciseGoal(label, 90))
     .join(" • ")
+}
+
+function classifyCriterionLayer(label: string): ReviewCriterionLayer {
+  return /\b(console errors?|devtools errors?|no errors?|spa navigation|re-appears|survive|works end-to-end|usage|auth state|popup)\b/i.test(
+    label
+  )
+    ? "validation"
+    : "core"
+}
+
+function normalizeCriterionSeed(label: string, source: ReviewCriterionSource): CriterionSeed | null {
+  const normalizedLabel = normalizeCriterionLabel(label)
+  if (!normalizedLabel || isGenericDisplayCriterion(normalizedLabel)) return null
+
+  const layer = source === "validation" ? "validation" : classifyCriterionLayer(normalizedLabel)
+  return {
+    label: normalizedLabel,
+    source,
+    layer
+  }
+}
+
+function isBroadCompositeCriterion(label: string) {
+  const andCount = (label.match(/\band\b/gi) ?? []).length
+  return label.length > 120 || extractMeaningfulTokens(label).length > 18 || andCount >= 2
+}
+
+function criterionMatchScore(candidateLabel: string, contractLabel: string) {
+  const normalizedCandidate = normalizeForMatch(normalizeCriterionLabel(candidateLabel))
+  const normalizedContract = normalizeForMatch(normalizeCriterionLabel(contractLabel))
+
+  if (!normalizedCandidate || !normalizedContract) return 0
+  if (normalizedCandidate === normalizedContract) return 100
+
+  const candidateTokens = extractMeaningfulTokens(normalizedCandidate)
+  const contractTokens = extractMeaningfulTokens(normalizedContract)
+  if (!candidateTokens.length || !contractTokens.length) return 0
+
+  const overlap = candidateTokens.filter((token) => contractTokens.includes(token))
+  if (!overlap.length) return 0
+
+  const candidateRatio = overlap.length / candidateTokens.length
+  const contractRatio = overlap.length / contractTokens.length
+
+  if ((normalizedCandidate.includes(normalizedContract) || normalizedContract.includes(normalizedCandidate)) && overlap.length >= 2) {
+    return 90
+  }
+
+  if (candidateRatio >= 0.75 || contractRatio >= 0.75) return 80
+  if (candidateRatio >= 0.6 && overlap.length >= 2) return 70
+  if (contractRatio >= 0.6 && overlap.length >= 2) return 65
+
+  return overlap.length >= 3 ? 55 : 0
+}
+
+function mapCriteriaToReviewContract(labels: string[], reviewContract: ReviewContract) {
+  const results: string[] = []
+
+  for (const rawLabel of labels) {
+    const normalizedLabel = normalizeCriterionLabel(rawLabel)
+    if (!normalizedLabel || isGenericDisplayCriterion(normalizedLabel)) continue
+
+    const exactMatch = reviewContract.criteria.find(
+      (criterion) => normalizeForMatch(criterion.label) === normalizeForMatch(normalizedLabel)
+    )
+    if (exactMatch) {
+      results.push(exactMatch.label)
+      continue
+    }
+
+    const bestMatch = reviewContract.criteria
+      .map((criterion) => ({
+        criterion,
+        score: criterionMatchScore(normalizedLabel, criterion.label)
+      }))
+      .sort((left, right) => right.score - left.score || left.criterion.priority - right.criterion.priority)[0]
+
+    if (bestMatch && bestMatch.score >= 65) {
+      results.push(bestMatch.criterion.label)
+    }
+  }
+
+  return dedupe(results, MAX_REVIEW_CRITERIA)
+}
+
+function normalizeStage2AgainstReviewContract(
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  reviewContract: ReviewContract
+) {
+  const addressedCriteria = mapCriteriaToReviewContract(stage2.addressed_criteria, reviewContract)
+  const missingCriteria = mapCriteriaToReviewContract(stage2.missing_criteria, reviewContract).filter(
+    (label) => !addressedCriteria.includes(label)
+  )
+
+  return Stage2OutputSchema.parse({
+    ...stage2,
+    addressed_criteria: addressedCriteria,
+    missing_criteria: missingCriteria,
+    analysis_notes: dedupe(
+      stage2.analysis_notes.filter((note) => {
+        const normalized = note.trim().toLowerCase()
+        return (
+          normalized.length > 18 &&
+          !normalized.includes("the user's latest request") &&
+          !normalized.includes("solve the requested task")
+        )
+      }),
+      4
+    )
+  })
+}
+
+function buildReviewContract(
+  intent: AttemptIntent,
+  projectContext: string,
+  currentState: string,
+  baselineContract: ReviewContract | null | undefined,
+  targetSignature: string
+): ReviewContract {
+  if (baselineContract?.criteria?.length) {
+    return ReviewContractSchema.parse({
+      ...baselineContract,
+      target_signature: targetSignature || baselineContract.target_signature || "",
+      goal: baselineContract.goal || intent.goal,
+      criteria: baselineContract.criteria.slice(0, MAX_REVIEW_CRITERIA)
+    })
+  }
+
+  const definitionOfDone = extractSectionLines(projectContext, ["definition of done"]).concat(
+    extractSectionLines(currentState, ["definition of done"])
+  )
+  const userIntentToPreserve = extractSectionLines(projectContext, ["user intent to preserve"]).concat(
+    extractSectionLines(currentState, ["user intent to preserve"])
+  )
+  const validationCriteria = extractSectionLines(projectContext, ["constraints"])
+    .concat(extractSectionLines(currentState, ["constraints"]))
+    .filter((line) =>
+      /\b(console errors?|no errors?|spa navigation|re-appears|survive|works end-to-end|popup|usage|auth state)\b/i.test(
+        line
+      )
+    )
+
+  const seedBuckets: Record<ReviewCriterionSource, CriterionSeed[]> = {
+    submitted_prompt:
+      definitionOfDone.length >= 3
+        ? []
+        : intent.acceptance_criteria
+            .map((label) => normalizeCriterionSeed(label, "submitted_prompt"))
+            .filter((item) => {
+              if (!item) return false
+              const hasStructuredProjectCriteria = definitionOfDone.length > 0 || userIntentToPreserve.length > 0
+              return !hasStructuredProjectCriteria || !isBroadCompositeCriterion(item.label)
+            })
+            .filter((item): item is CriterionSeed => Boolean(item)),
+    definition_of_done: definitionOfDone
+      .map((label) => normalizeCriterionSeed(label, "definition_of_done"))
+      .filter((item): item is CriterionSeed => Boolean(item)),
+    user_intent:
+      definitionOfDone.length >= 3
+        ? []
+        : userIntentToPreserve
+            .map((label) => normalizeCriterionSeed(label, "user_intent"))
+            .filter((item): item is CriterionSeed => Boolean(item)),
+    constraint: intent.constraints
+      .map((label) => normalizeCriterionSeed(label, "constraint"))
+      .filter((item): item is CriterionSeed => Boolean(item)),
+    validation: validationCriteria
+      .map((label) => normalizeCriterionSeed(label, "validation"))
+      .filter((item): item is CriterionSeed => Boolean(item))
+  }
+
+  const uniqueSeeds: CriterionSeed[] = []
+  for (const source of REVIEW_SOURCE_ORDER) {
+    for (const seed of seedBuckets[source]) {
+      const isAlreadyRepresented = uniqueSeeds.some(
+        (existing) =>
+          normalizeForMatch(existing.label) === normalizeForMatch(seed.label) ||
+          criterionMatchScore(existing.label, seed.label) >= 65
+      )
+      if (isAlreadyRepresented) continue
+      uniqueSeeds.push(seed)
+    }
+  }
+
+  const orderedSeeds = [
+    ...uniqueSeeds.filter((seed) => seed.layer === "core"),
+    ...uniqueSeeds.filter((seed) => seed.layer === "validation")
+  ].slice(0, MAX_REVIEW_CRITERIA)
+
+  const fallbackSeed = normalizeCriterionSeed(`Solve: ${intent.goal}`, "submitted_prompt")
+  const finalSeeds = orderedSeeds.length ? orderedSeeds : fallbackSeed ? [fallbackSeed] : []
+
+  return ReviewContractSchema.parse({
+    version: "v1",
+    target_signature: targetSignature,
+    goal: intent.goal,
+    criteria: finalSeeds.map((seed, index) => ({
+      id: `criterion-${index + 1}`,
+      label: seed.label,
+      source: seed.source,
+      layer: seed.layer,
+      priority: index + 1
+    }))
+  })
 }
 
 function reviewQualityContract(deepAnalysisRequested: boolean) {
@@ -403,9 +639,72 @@ function responseIsMostlyCode(responseText: string) {
   return stripped.length < 80
 }
 
+function hasAllSignals(haystack: string, patterns: RegExp[]) {
+  return patterns.every((pattern) => pattern.test(haystack))
+}
+
+function criterionExplicitlyUnproven(criterion: string, responseSummary: AfterPipelineRequest["response_summary"]) {
+  const normalizedCriterion = normalizeForMatch(criterion)
+  const uncertaintyPatterns = [
+    /did not fully verify/i,
+    /not fully verify/i,
+    /did not verify/i,
+    /not yet verify/i,
+    /still needs follow up/i,
+    /still needs follow-up/i,
+    /could not confirm/i,
+    /not confirmed/i,
+    /unconfirmed/i,
+    /unproven/i,
+    /still needs proof/i
+  ]
+
+  const uncertaintySentences = responseSummary.response_text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+    .filter((sentence) => uncertaintyPatterns.some((pattern) => pattern.test(sentence)))
+
+  const uncertainty = normalizeForMatch(
+    [...uncertaintySentences, ...responseSummary.uncertainty_signals, ...responseSummary.failure_signals].join(" ")
+  )
+
+  if (!uncertaintyPatterns.some((pattern) => pattern.test(uncertainty))) {
+    return false
+  }
+
+  if (/answer questions|generated improved prompt|acceptance criteria/i.test(criterion)) {
+    return /\b(question-answering|answer questions?|improved prompt|acceptance criteria)\b/i.test(uncertainty)
+  }
+
+  if (/replace button|injects the improved prompt|text visibly updates/i.test(criterion)) {
+    return /\b(replace button|inject(?:s|ed)?|textarea|text visibly updates?)\b/i.test(uncertainty)
+  }
+
+  if (/popup opens|auth state|usage|strengthen tab/i.test(criterion)) {
+    return /\b(popup|auth state|usage|strengthen tab)\b/i.test(uncertainty)
+  }
+
+  const tokens = extractMeaningfulTokens(normalizedCriterion).filter((token) => token.length >= 4)
+  const matchedTokens = tokens.filter((token) => uncertainty.includes(token))
+  return matchedTokens.length >= Math.min(2, tokens.length)
+}
+
 function quickCriterionSatisfied(criterion: string, responseSummary: AfterPipelineRequest["response_summary"]) {
   const normalizedCriterion = normalizeForMatch(criterion)
   const haystack = normalizeForMatch(responseSummary.response_text)
+  const validationHaystack = normalizeForMatch(
+    [
+      ...responseSummary.validation_signals,
+      ...responseSummary.success_signals,
+      ...responseSummary.change_claims,
+      ...responseSummary.mentioned_files
+    ].join(" ")
+  )
+
+  if (criterionExplicitlyUnproven(criterion, responseSummary)) {
+    return false
+  }
 
   if (/return only/i.test(criterion) && /html|code block|markdown code block/i.test(criterion)) {
     return responseSummary.has_code_blocks
@@ -413,6 +712,60 @@ function quickCriterionSatisfied(criterion: string, responseSummary: AfterPipeli
 
   if (/no explanations/i.test(criterion)) {
     return responseSummary.has_code_blocks && responseIsMostlyCode(responseSummary.response_text)
+  }
+
+  if (/red\/yellow\/green button|strength button/i.test(criterion) && /textarea|chat textarea|prompt area/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(button|badge|icon)\b/i,
+      /\b(visible|appear(?:s|ed)?|shows?)\b/i,
+      /\b(textarea|chat|prompt)\b/i
+    ])
+  }
+
+  if (/opens the optimize panel|llm-generated questions|strength badge/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(click(?:ing)?|tap(?:ping)?)\b/i,
+      /\b(open(?:s|ed)?|show(?:s|ed)?)\b/i,
+      /\b(panel|popup|optimi[sz]e)\b/i
+    ]) && /\b(question|badge)\b/i.test(haystack)
+  }
+
+  if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(answer(?:ed|ing)?|question(?:s)?)\b/i,
+      /\b(generate(?:d|s)?|generated)\b/i,
+      /\b(improved prompt|acceptance criteria)\b/i
+    ])
+  }
+
+  if (/replace button injects|text visibly updates|injects the improved prompt/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(replace button|replace)\b/i,
+      /\b(inject(?:s|ed)?|write(?:s|n)? back|updates?)\b/i,
+      /\b(textarea|prompt text|text visibly updates?)\b/i
+    ])
+  }
+
+  if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(popup|extension icon|strengthen tab)\b/i,
+      /\b(open(?:s|ed)?)\b/i,
+      /\b(auth state|usage|end-to-end)\b/i
+    ])
+  }
+
+  if (/no chrome devtools errors|no console errors|devtools errors/i.test(criterion)) {
+    return (
+      /\b(no|zero)\b[\w\s-]{0,40}\b(devtools|console)\s+errors?\b/i.test(haystack) ||
+      /\bno\s+errors?\b/i.test(validationHaystack)
+    )
+  }
+
+  if (/spa navigation|re-appears|survive/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(spa navigation|soft navigation|navigation)\b/i,
+      /\b(survive(?:s|d)?|re-appears?|stays visible)\b/i
+    ])
   }
 
   const tokens = extractMeaningfulTokens(normalizedCriterion).filter(
@@ -817,6 +1170,7 @@ function buildStage1Prompts(
 
 function buildStage2Prompts(
   intent: AttemptIntent,
+  reviewContract: ReviewContract,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
   candidates: EvidenceCandidate[],
@@ -828,13 +1182,14 @@ function buildStage2Prompts(
 ) {
   return {
     system:
-      `Choose which raw answer excerpts deserve closer inspection. Prioritize evidence that can confirm or refute the claimed fix against the saved goal, current debugging state, repeated bugs, and visible error summary. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.`,
+      `Choose which raw answer excerpts deserve closer inspection. Prioritize evidence that can confirm or refute the claimed fix against the frozen review contract, current debugging state, repeated bugs, and visible error summary. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: selected_candidate_ids, risk_flags, inspection_goal. Pick at most 4 IDs.`,
     user: JSON.stringify({
       intent: {
         goal: compressGoal(intent.goal),
         constraints: intent.constraints.slice(0, 4),
-        acceptance_criteria: intent.acceptance_criteria.slice(0, 4)
+        acceptance_criteria: reviewContract.criteria.map((item) => item.label)
       },
+      review_contract: reviewContract,
       project_context: projectContext,
       current_state: currentState,
       changed_file_paths_summary: summarizeChangedFiles(changedFiles),
@@ -854,6 +1209,7 @@ function buildStage2Prompts(
 
 function buildStage3Prompts(
   intent: AttemptIntent,
+  reviewContract: ReviewContract,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof EvidenceTargetingSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
@@ -866,13 +1222,14 @@ function buildStage3Prompts(
 ) {
   return {
     system:
-      `Inspect the selected raw answer excerpts and decide whether they support the assistant's claims. Use the project context, current debugging state, repeated bugs, and the current visible error summary to distinguish a real fix from a partial or drifting change. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.`,
+      `Inspect the selected raw answer excerpts and decide whether they support the assistant's claims against the frozen review contract. Use the project context, current debugging state, repeated bugs, and the current visible error summary to distinguish a real fix from a partial or drifting change. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: supported_claims, contradictions, unresolved_risks, evidence_strength, inspection_depth.`,
     user: JSON.stringify({
       intent: {
         goal: compressGoal(intent.goal),
         constraints: intent.constraints.slice(0, 4),
-        acceptance_criteria: intent.acceptance_criteria.slice(0, 4)
+        acceptance_criteria: reviewContract.criteria.map((item) => item.label)
       },
+      review_contract: reviewContract,
       project_context: projectContext,
       current_state: currentState,
       changed_file_paths_summary: summarizeChangedFiles(changedFiles),
@@ -892,6 +1249,7 @@ function buildStage3Prompts(
 
 function buildStage4Prompts(
   intent: AttemptIntent,
+  reviewContract: ReviewContract,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
@@ -904,9 +1262,10 @@ function buildStage4Prompts(
 ) {
   return {
     system:
-      `Generate a trustworthy verdict for the AI response. Prefer UNVERIFIED over success when evidence is weak. Use the project context, current debugging state, changed file hints, and visible error summary to judge whether the answer really resolves the user's debugging situation instead of only sounding plausible. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: status, confidence, findings, issues.`,
+      `Generate a trustworthy verdict for the AI response against the frozen review contract. Prefer UNVERIFIED over success when evidence is weak. Use the project context, current debugging state, changed file hints, and visible error summary to judge whether the answer really resolves the user's debugging situation instead of only sounding plausible. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: status, confidence, findings, issues.`,
     user: JSON.stringify({
       intent,
+      review_contract: reviewContract,
       project_context: projectContext,
       current_state: currentState,
       changed_file_paths_summary: summarizeChangedFiles(changedFiles),
@@ -1006,15 +1365,20 @@ function fallbackStage1(
 }
 
 function fallbackStage2(
+  reviewContract: ReviewContract,
   intent: AttemptIntent,
   stage1: ReturnType<typeof Stage1OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"]
 ) {
   const codeHeavyTask = isCodeHeavyTask(intent)
+  const contractCriteria = reviewContract.criteria.map((criterion) => criterion.label)
   const nonCodeChecks = codeHeavyTask ? { addressed: [], missing: [] } : evaluateNonCodeCriteria(intent, responseSummary)
-  const goalMatched = hasGoalEvidence(intent.goal, responseSummary)
-  const usesDefaultGoalCriterion = intent.acceptance_criteria.some((criterion) =>
+  const goalMatched =
+    hasGoalEvidence(intent.goal, responseSummary) ||
+    reviewContract.criteria.some((criterion) => quickCriterionSatisfied(criterion.label, responseSummary)) ||
+    hasGoalEvidence(reviewContract.goal, responseSummary)
+  const usesDefaultGoalCriterion = contractCriteria.some((criterion) =>
     /prove the answer solved this goal:/i.test(criterion)
   )
   const hasOnTopicSignals =
@@ -1023,23 +1387,23 @@ function fallbackStage2(
       stage1.response_mode === "explained" ||
       responseSummary.success_signals.length > 0 ||
       responseSummary.response_length > 220)
-  const quickAddressedCriteria = intent.acceptance_criteria.filter((criterion) =>
+  const quickAddressedCriteria = contractCriteria.filter((criterion) =>
     quickCriterionSatisfied(criterion, responseSummary)
   )
 
   const addressed =
     (stage1.response_mode === "implemented" || detail.evidence_strength === "strong") && goalMatched
-      ? dedupe([...quickAddressedCriteria, ...intent.acceptance_criteria], 4)
+      ? dedupe([...quickAddressedCriteria, ...contractCriteria], 4)
       : quickAddressedCriteria.length
         ? quickAddressedCriteria.slice(0, 4)
       : !codeHeavyTask && nonCodeChecks.addressed.length && goalMatched && detail.inspection_depth !== "summary_only"
-        ? intent.acceptance_criteria.slice(0, Math.min(2, Math.max(1, nonCodeChecks.addressed.length)))
+        ? contractCriteria.slice(0, Math.min(2, Math.max(1, nonCodeChecks.addressed.length)))
       : !codeHeavyTask && usesDefaultGoalCriterion && goalMatched && detail.inspection_depth !== "summary_only"
-        ? intent.acceptance_criteria.slice(0, 1)
+        ? contractCriteria.slice(0, 1)
         : usesDefaultGoalCriterion && hasOnTopicSignals
-        ? intent.acceptance_criteria.slice(0, 1)
+        ? contractCriteria.slice(0, 1)
         : []
-  const rawMissing = intent.acceptance_criteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
+  const rawMissing = contractCriteria.filter((criterion) => !addressed.includes(criterion)).slice(0, 4)
   const missing = dedupe([...rawMissing.map((criterion) => {
     if (/prove the answer solved this goal:/i.test(criterion)) {
       if (!codeHeavyTask && goalMatched && detail.inspection_depth !== "summary_only") {
@@ -1120,85 +1484,154 @@ function fallbackDetailInspection(
 }
 
 function buildAcceptanceChecklist(
-  intent: AttemptIntent,
+  reviewContract: ReviewContract,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   responseSummary: AfterPipelineRequest["response_summary"],
-  baselineCriteria: string[] = [],
   deepAnalysisRequested = false
 ) {
-  const checklistCriteria = canonicalAcceptanceCriteria(intent, baselineCriteria)
   const addressedKeys = new Set(stage2.addressed_criteria.map((item) => normalizeForMatch(item)))
+  const missedKeys = new Set(stage2.missing_criteria.map((item) => normalizeForMatch(item)))
   const binaryDecisionRequired = deepAnalysisRequested || detail.inspection_depth !== "summary_only"
 
-  return checklistCriteria.slice(0, 6).map((criterion) =>
-    AcceptanceChecklistItemSchema.parse({
-      label: normalizeCriterionLabel(criterion),
-      status:
-        addressedKeys.has(normalizeForMatch(criterion)) || quickCriterionSatisfied(criterion, responseSummary)
-          ? "met"
-          : binaryDecisionRequired
-            ? "missed"
-            : "not_sure"
-    })
+  return reviewContract.criteria.slice(0, MAX_REVIEW_CRITERIA).map((criterion) =>
+    {
+      const normalizedLabel = normalizeForMatch(criterion.label)
+      const quickSatisfied = quickCriterionSatisfied(criterion.label, responseSummary)
+      const explicitlyUnproven = criterionExplicitlyUnproven(criterion.label, responseSummary)
+
+      let status: "met" | "not_sure" | "missed"
+      if (explicitlyUnproven) {
+        status = binaryDecisionRequired ? "missed" : "not_sure"
+      } else if (addressedKeys.has(normalizedLabel) || quickSatisfied) {
+        status = "met"
+      } else if (missedKeys.has(normalizedLabel)) {
+        status = binaryDecisionRequired ? "missed" : "not_sure"
+      } else {
+        status = binaryDecisionRequired ? "missed" : "not_sure"
+      }
+
+      return AcceptanceChecklistItemSchema.parse({
+        label: criterion.label,
+        source: criterion.source,
+        layer: criterion.layer,
+        priority: criterion.priority,
+        status
+      })
+    }
   )
 }
 
 function reconcileVerdictWithChecklist(
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
   checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
+  reviewContract: ReviewContract,
   stage2: ReturnType<typeof Stage2OutputSchema.parse>,
   detail: ReturnType<typeof DetailInspectionSchema.parse>,
   deepAnalysisRequested = false
 ) {
+  const contractCriteria = reviewContract.criteria
+  const coreCriteria = contractCriteria.filter((criterion) => criterion.layer === "core")
+  const validationCriteria = contractCriteria.filter((criterion) => criterion.layer === "validation")
+  const checklistByLabel = new Map(checklist.map((item) => [normalizeForMatch(item.label), item.status]))
+  const statusForCriterion = (criterion: ReviewCriterion) =>
+    checklistByLabel.get(normalizeForMatch(criterion.label)) ?? "not_sure"
+
   const metCount = checklist.filter((item) => item.status === "met").length
-  const missedCount = checklist.filter((item) => item.status === "missed").length
   const unresolvedCount = checklist.filter((item) => item.status === "not_sure").length
-  const allKnownCriteriaMet = checklist.length > 0 && metCount === checklist.length
-  const hasUnresolvedStageRisks = stage2.missing_criteria.length > 0 || stage2.constraint_risks.length > 0
+  const missedCore = coreCriteria.filter((criterion) => statusForCriterion(criterion) === "missed")
+  const missedValidation = validationCriteria.filter((criterion) => statusForCriterion(criterion) === "missed")
+  const unresolvedCore = coreCriteria.filter((criterion) => statusForCriterion(criterion) === "not_sure")
+  const unresolvedValidation = validationCriteria.filter((criterion) => statusForCriterion(criterion) === "not_sure")
+  const allKnownCriteriaMet = checklist.length > 0 && checklist.every((item) => item.status === "met")
+  const remainingStageMissing = stage2.missing_criteria.filter(
+    (item) => checklistByLabel.get(normalizeForMatch(item)) !== "met"
+  )
+  const remainingConstraintRisks = stage2.constraint_risks.filter((risk) => {
+    const normalizedRisk = normalizeForMatch(risk)
+    const matchedCriterion = contractCriteria.find((criterion) =>
+      normalizedRisk.includes(normalizeForMatch(criterion.label))
+    )
+
+    if (!matchedCriterion) {
+      return false
+    }
+
+    return statusForCriterion(matchedCriterion) !== "met"
+  })
+  const hasUnresolvedStageRisks = remainingStageMissing.length > 0 || remainingConstraintRisks.length > 0
 
   let status = verdict.status
   let confidence = verdict.confidence
   let confidenceReason = verdict.confidence_reason
   let findings = verdict.findings
 
-  if (allKnownCriteriaMet && stage2.problem_fit === "correct" && !hasUnresolvedStageRisks) {
+  if (allKnownCriteriaMet && !hasUnresolvedStageRisks) {
     status = detail.inspection_depth === "summary_only" ? "LIKELY_SUCCESS" : "SUCCESS"
-    if (detail.inspection_depth !== "summary_only" && deepAnalysisRequested) {
-      confidence = "high"
-      confidenceReason = "Deep review found direct visible support for every acceptance criterion."
-    } else if (confidence === "low") {
-      confidence = "medium"
-    }
-  } else if ((status === "FAILED" || status === "WRONG_DIRECTION") && metCount >= 2 && missedCount === 0) {
+    confidence =
+      detail.inspection_depth !== "summary_only" && deepAnalysisRequested
+        ? "high"
+        : confidence === "low"
+          ? "medium"
+          : confidence
+    confidenceReason =
+      detail.inspection_depth !== "summary_only" && deepAnalysisRequested
+        ? "Deep review found direct visible support for every acceptance criterion."
+        : "The visible checklist and review contract are fully aligned."
+  } else if (missedCore.length > 0) {
+    status = "PARTIAL"
+    confidence =
+      deepAnalysisRequested && detail.inspection_depth !== "summary_only" && unresolvedCount === 0
+        ? "high"
+        : confidence === "high"
+          ? "medium"
+          : confidence
+    confidenceReason =
+      deepAnalysisRequested && detail.inspection_depth !== "summary_only" && unresolvedCount === 0
+        ? `Deep review resolved the fixed checklist and found at least one unmet core requirement: ${missedCore[0].label}.`
+        : `At least one core requirement is still not satisfied: ${missedCore[0].label}.`
+  } else if (unresolvedCore.length > 0) {
+    status = "PARTIAL"
+    confidence = "medium"
+    confidenceReason = `A core requirement still needs proof: ${unresolvedCore[0].label}.`
+  } else if (missedValidation.length > 0 || unresolvedValidation.length > 0) {
+    status = "LIKELY_SUCCESS"
+    confidence = detail.inspection_depth === "summary_only" ? "medium" : "high"
+    confidenceReason =
+      missedValidation.length > 0
+        ? deepAnalysisRequested && detail.inspection_depth !== "summary_only" && unresolvedCount === 0
+          ? `Deep review resolved the fixed checklist and found a failed validation check: ${missedValidation[0].label}.`
+          : `Core requirements look satisfied, but a validation check failed: ${missedValidation[0].label}.`
+        : `Core requirements look satisfied, but a validation check still needs proof: ${unresolvedValidation[0].label}.`
+  } else if (stage2.problem_fit === "wrong_direction") {
+    status = "WRONG_DIRECTION"
+    confidence = detail.inspection_depth === "summary_only" ? "medium" : "high"
+    confidenceReason = "The answer appears to solve a different problem than the frozen review contract."
+  }
+
+  if (detail.inspection_depth !== "summary_only" && confidence === "low") {
+    confidence = "medium"
+  }
+
+  if (
+    (status === "FAILED" || status === "WRONG_DIRECTION") &&
+    metCount >= Math.min(2, checklist.length) &&
+    missedCore.length === 0
+  ) {
     status = "PARTIAL"
     confidence = confidence === "high" ? "medium" : confidence
-    confidenceReason = "The answer still needs review, but the visible checklist shows meaningful alignment with the request."
+    confidenceReason = "The answer still needs review, but the fixed checklist shows meaningful alignment with the request."
     findings = [
       "The answer shows meaningful progress against the request, but NoRetry still found gaps or weak evidence in the overall review.",
       ...verdict.findings.slice(1)
     ].slice(0, 3)
   }
 
-  if (detail.inspection_depth !== "summary_only" && confidence === "low") {
-    confidence = "medium"
-    if (!confidenceReason) {
-      confidenceReason = "Deep review resolved the checklist against targeted evidence, even though some requirements still need work."
-    }
-  }
-
-  if (deepAnalysisRequested && unresolvedCount === 0 && confidence === "low") {
-    confidence = "medium"
-    if (!confidenceReason) {
-      confidenceReason = "Deep review resolved every checklist item to a yes-or-no answer."
-    }
-  }
-
   return VerdictOutputSchema.parse({
     ...verdict,
     status,
     confidence,
-    confidence_reason: confidenceReason,
+    confidence_reason: limitText(confidenceReason, 180),
     findings
   })
 }
@@ -1343,7 +1776,7 @@ function fallbackVerdict(
   return VerdictOutputSchema.parse({
     status,
     confidence,
-    confidence_reason: confidenceReason,
+    confidence_reason: limitText(confidenceReason, 180),
     findings: dedupe(
       [
         primaryFinding,
@@ -1447,7 +1880,7 @@ function buildDeepReviewPrimaryFinding(
 
 function buildChecklistDrivenPrimaryFinding(
   checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
-  intent: AttemptIntent,
+  reviewContract: ReviewContract,
   deepAnalysisRequested: boolean
 ) {
   const concreteMissed = checklist
@@ -1459,21 +1892,60 @@ function buildChecklistDrivenPrimaryFinding(
   const concreteMet = checklist
     .filter((item) => item.status === "met" && !isGenericDisplayCriterion(item.label))
     .map((item) => item.label)
+  const missedCore = checklist
+    .filter((item) => item.status === "missed" && item.layer === "core" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const unresolvedCore = checklist
+    .filter((item) => item.status === "not_sure" && item.layer === "core" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const missedValidation = checklist
+    .filter((item) => item.status === "missed" && item.layer === "validation" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const unresolvedValidation = checklist
+    .filter((item) => item.status === "not_sure" && item.layer === "validation" && !isGenericDisplayCriterion(item.label))
+    .map((item) => item.label)
+  const visibleVerifiedWork = concreteMet.length ? summarizeChecklistLabels(concreteMet) : ""
 
-  if (deepAnalysisRequested && concreteMissed.length) {
-    return `Deep review still could not confirm: ${concreteMissed[0]}.`
+  if (deepAnalysisRequested && missedCore.length) {
+    return visibleVerifiedWork
+      ? `Deep review verified ${visibleVerifiedWork}, but it still could not confirm: ${missedCore[0]}.`
+      : `Deep review still could not confirm: ${missedCore[0]}.`
   }
 
-  if (!deepAnalysisRequested && concreteMissed.length) {
-    return `The answer mentions progress, but it still does not clearly show: ${concreteMissed[0]}.`
+  if (!deepAnalysisRequested && missedCore.length) {
+    return visibleVerifiedWork
+      ? `The answer visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${missedCore[0]}.`
+      : `The answer mentions progress, but it still does not clearly show: ${missedCore[0]}.`
   }
 
-  if (!deepAnalysisRequested && concreteUnresolved.length) {
-    return `The answer mentions progress, but it still does not clearly show: ${concreteUnresolved[0]}.`
+  if (deepAnalysisRequested && missedValidation.length) {
+    return visibleVerifiedWork
+      ? `Deep review verified ${visibleVerifiedWork}, but it still found a validation failure: ${missedValidation[0]}.`
+      : `Deep review resolved the core flow, but it still found a validation failure: ${missedValidation[0]}.`
+  }
+
+  if (!deepAnalysisRequested && unresolvedCore.length) {
+    return visibleVerifiedWork
+      ? `The answer visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${unresolvedCore[0]}.`
+      : `The answer mentions progress, but it still does not clearly show: ${unresolvedCore[0]}.`
+  }
+
+  if (!deepAnalysisRequested && missedValidation.length) {
+    return visibleVerifiedWork
+      ? `The answer appears aligned with the main goal and visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${missedValidation[0]}.`
+      : `The answer appears aligned with the main goal, but it still does not clearly show: ${missedValidation[0]}.`
+  }
+
+  if (!deepAnalysisRequested && unresolvedValidation.length) {
+    return visibleVerifiedWork
+      ? `The answer appears aligned with the main goal and visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${unresolvedValidation[0]}.`
+      : `The answer appears aligned with the main goal, but it still does not clearly show: ${unresolvedValidation[0]}.`
   }
 
   if (deepAnalysisRequested && concreteMet.length) {
-    return `Deep review found direct visible support for: ${summarizeChecklistLabels(concreteMet)}.`
+    return concreteMet.length === checklist.length
+      ? "Deep review found direct visible support for every acceptance criterion."
+      : `Deep review found direct visible support for: ${summarizeChecklistLabels(concreteMet)}.`
   }
 
   if (concreteMet.length) {
@@ -1481,8 +1953,29 @@ function buildChecklistDrivenPrimaryFinding(
   }
 
   return deepAnalysisRequested
-    ? `Deep review inspected the visible answer for proof that it satisfied: ${conciseGoal(intent.goal)}.`
-    : `The answer appears aligned with the goal: ${conciseGoal(intent.goal)}.`
+    ? `Deep review inspected the visible answer for proof that it satisfied: ${conciseGoal(reviewContract.goal)}.`
+    : `The answer appears aligned with the goal: ${conciseGoal(reviewContract.goal)}.`
+}
+
+function buildDeepDeltaFinding(
+  baselineChecklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
+  deepChecklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>
+) {
+  if (!baselineChecklist.length || !deepChecklist.length) return ""
+
+  const baselineMap = new Map(baselineChecklist.map((item) => [normalizeForMatch(item.label), item.status]))
+  const changed = deepChecklist.filter((item) => {
+    const previous = baselineMap.get(normalizeForMatch(item.label))
+    return previous && previous !== item.status
+  })
+
+  if (!changed.length) {
+    return "Deep review checked the same fixed criteria and kept the same conclusion."
+  }
+
+  const sample = changed[0]
+  const previous = baselineMap.get(normalizeForMatch(sample.label))
+  return `Deep review changed ${changed.length} checklist result${changed.length > 1 ? "s" : ""}; for example, ${sample.label} moved from ${previous} to ${sample.status}.`
 }
 
 export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
@@ -1521,9 +2014,23 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   intent = mergeIntentWithProjectMemory(intent, parsed.project_context, parsed.current_state, {
     aggressive: deepAnalysisRequested
   })
+  const reviewContract = buildReviewContract(
+    intent,
+    parsed.project_context,
+    parsed.current_state,
+    parsed.baseline_review_contract ?? null,
+    parsed.attempt.attempt_id && parsed.response_summary.response_length
+      ? `${parsed.attempt.attempt_id}:${parsed.response_summary.response_length}:${parsed.response_summary.first_excerpt.slice(0, 80)}`
+      : parsed.attempt.attempt_id
+  )
   intent = {
     ...intent,
-    acceptance_criteria: canonicalAcceptanceCriteria(intent, parsed.baseline_acceptance_criteria)
+    goal: reviewContract.goal,
+    acceptance_criteria: canonicalAcceptanceCriteria(
+      intent,
+      parsed.baseline_acceptance_criteria,
+      reviewContract
+    )
   }
 
   const stage1Prompts = buildStage1Prompts(
@@ -1556,6 +2063,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   if (shouldZoomIn) {
     const stage2Prompts = buildStage2Prompts(
       intent,
+      reviewContract,
       safeStage1,
       parsed.response_summary,
       evidenceCandidates,
@@ -1577,7 +2085,10 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       EvidenceTargetingSchema.parse({
         selected_candidate_ids: evidenceCandidates.slice(0, deepAnalysisRequested ? 4 : 3).map((candidate) => candidate.id),
         risk_flags: parsed.response_summary.success_signals.length ? ["success_claim_needs_evidence"] : [],
-        inspection_goal: `Verify whether the visible answer truly supports: ${compressGoal(intent.goal)}`
+        inspection_goal: limitText(
+          `Verify whether the visible answer truly supports: ${compressGoal(intent.goal)}`,
+          180
+        )
       })
   }
 
@@ -1593,6 +2104,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   if (selectedEvidence.length && elapsed() < stageSoftDeadline) {
     const stage3Prompts = buildStage3Prompts(
       intent,
+      reviewContract,
       safeStage1,
       targetedEvidence,
       parsed.response_summary,
@@ -1618,6 +2130,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
       `Compare the assistant response to the intended goal. Use the saved project context and current debugging state so the judgment stays grounded in the user's real situation. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.`,
     user: JSON.stringify({
       intent,
+      review_contract: reviewContract,
       project_context: parsed.project_context,
       current_state: parsed.current_state,
       stage_1: safeStage1,
@@ -1642,7 +2155,10 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     tokenUsageTotal >= budgetSoftLimit ? 130 : deepAnalysisRequested ? 220 : 180
   )
   tokenUsageTotal += estimateTokensFromText(alignmentPrompts.system, alignmentPrompts.user)
-  const safeStage2 = stage4Alignment ?? fallbackStage2(intent, safeStage1, detailInspection, parsed.response_summary)
+  const safeStage2 = normalizeStage2AgainstReviewContract(
+    stage4Alignment ?? fallbackStage2(reviewContract, intent, safeStage1, detailInspection, parsed.response_summary),
+    reviewContract
+  )
 
   let safeVerdict = fallbackVerdict(
     intent,
@@ -1658,6 +2174,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   if (elapsed() < stageSoftDeadline) {
     const stage4Prompts = buildStage4Prompts(
       intent,
+      reviewContract,
       safeStage1,
       safeStage2,
       detailInspection,
@@ -1700,16 +2217,16 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   }
 
   const acceptanceChecklist = buildAcceptanceChecklist(
-    intent,
+    reviewContract,
     safeStage2,
     detailInspection,
     parsed.response_summary,
-    parsed.baseline_acceptance_criteria,
     deepAnalysisRequested
   )
   safeVerdict = reconcileVerdictWithChecklist(
     safeVerdict,
     acceptanceChecklist,
+    reviewContract,
     safeStage2,
     detailInspection,
     deepAnalysisRequested
@@ -1717,12 +2234,16 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
 
   const checklistDrivenPrimaryFinding = buildChecklistDrivenPrimaryFinding(
     acceptanceChecklist,
-    intent,
+    reviewContract,
     deepAnalysisRequested
   )
+  const deepDeltaFinding =
+    deepAnalysisRequested
+      ? buildDeepDeltaFinding(parsed.baseline_acceptance_checklist, acceptanceChecklist)
+      : ""
   safeVerdict = VerdictOutputSchema.parse({
     ...safeVerdict,
-    findings: dedupe([checklistDrivenPrimaryFinding, ...safeVerdict.findings], 3)
+    findings: dedupe([checklistDrivenPrimaryFinding, deepDeltaFinding, ...safeVerdict.findings], 3)
   })
 
   if (deepAnalysisRequested && detailInspection.inspection_depth !== "summary_only") {
@@ -1747,6 +2268,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     verdict: safeVerdict,
     next_prompt_output: safeNextPrompt,
     acceptance_checklist: acceptanceChecklist,
+    review_contract: reviewContract,
     response_summary: parsed.response_summary,
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal

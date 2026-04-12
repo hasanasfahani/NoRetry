@@ -9,6 +9,7 @@ type AfterVerdictPanelProps = {
   loadingProgress: { percent: number; label: string } | null
   codeAnalysisMode: "quick" | "deep"
   displayedReviewMode: "quick" | "deep"
+  deepDeltaNote?: string
   nextStepStarted: boolean
   planningGoal: string
   planningGoalNotice: string
@@ -679,6 +680,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
         {checklistItems.length ? (
           <div style={styles.subtleSurface}>
             <p style={styles.criteriaCaption}>Checked against your submitted prompt</p>
+            {activeReviewMode === "deep" && props.deepDeltaNote ? (
+              <p style={styles.criteriaNote}>{props.deepDeltaNote}</p>
+            ) : null}
             <ul style={styles.list}>
               {checklistItems.map((item) => (
                 <li key={item.label} style={styles.listItem}>
@@ -1115,6 +1119,12 @@ const styles = {
     margin: "0 0 8px",
     fontSize: 12,
     fontWeight: 700,
+    color: "#64748b"
+  } as CSSProperties,
+  criteriaNote: {
+    margin: "0 0 10px",
+    fontSize: 12,
+    lineHeight: 1.55,
     color: "#64748b"
   } as CSSProperties,
   summarySentence: {

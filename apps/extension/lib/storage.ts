@@ -1,4 +1,4 @@
-import type { SessionSummary } from "@prompt-optimizer/shared/src/schemas"
+import type { AfterAnalysisResult, SessionSummary } from "@prompt-optimizer/shared/src/schemas"
 import { Storage } from "@plasmohq/storage"
 
 const storage = new Storage({ area: "local" })
@@ -6,6 +6,7 @@ const storage = new Storage({ area: "local" })
 const ONBOARDING_KEY = "prompt-optimizer:onboarding-seen"
 const SESSION_KEY = "prompt-optimizer:session-summary"
 const PROJECT_MEMORY_PREFIX = "prompt-optimizer:project-memory:"
+const AFTER_REVIEW_CACHE_PREFIX = "prompt-optimizer:after-review:"
 
 export type ProjectMemoryRecord = {
   projectKey: string
@@ -17,6 +18,15 @@ export type ProjectMemoryRecord = {
   baselineResponseIdentity?: string
   baselineResponseText?: string
   baselineThreadIdentity?: string
+  updatedAt: string
+}
+
+export type AfterReviewCacheRecord = {
+  threadIdentity: string
+  responseIdentity: string
+  normalizedText: string
+  quick: AfterAnalysisResult | null
+  deep: AfterAnalysisResult | null
   updatedAt: string
 }
 
@@ -54,6 +64,26 @@ function getProjectMemoryKey(projectKey: string) {
   return `${PROJECT_MEMORY_PREFIX}${projectKey}`
 }
 
+function stableStorageHash(value: string) {
+  let hash = 2166136261
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+
+  return (hash >>> 0).toString(36)
+}
+
+function getAfterReviewCacheKey(input: {
+  threadIdentity: string
+  responseIdentity: string
+  normalizedText: string
+}) {
+  const signature = `${input.threadIdentity}::${input.responseIdentity || ""}::${input.normalizedText}`
+  return `${AFTER_REVIEW_CACHE_PREFIX}${stableStorageHash(signature)}`
+}
+
 export async function getProjectMemory(projectKey: string) {
   return ((await storage.get<ProjectMemoryRecord>(getProjectMemoryKey(projectKey))) ?? null) as ProjectMemoryRecord | null
 }
@@ -83,5 +113,41 @@ export async function saveProjectMemory(input: {
   }
 
   await storage.set(getProjectMemoryKey(input.projectKey), record)
+  return record
+}
+
+export async function getAfterReviewCache(input: {
+  threadIdentity: string
+  responseIdentity: string
+  normalizedText: string
+}) {
+  const record =
+    ((await storage.get<AfterReviewCacheRecord>(getAfterReviewCacheKey(input))) ?? null) as AfterReviewCacheRecord | null
+
+  if (!record) return null
+  if (record.threadIdentity !== input.threadIdentity) return null
+  if (record.responseIdentity !== input.responseIdentity) return null
+  if (record.normalizedText !== input.normalizedText) return null
+
+  return record
+}
+
+export async function saveAfterReviewCache(input: {
+  threadIdentity: string
+  responseIdentity: string
+  normalizedText: string
+  quick: AfterAnalysisResult | null
+  deep: AfterAnalysisResult | null
+}) {
+  const record: AfterReviewCacheRecord = {
+    threadIdentity: input.threadIdentity,
+    responseIdentity: input.responseIdentity,
+    normalizedText: input.normalizedText,
+    quick: input.quick,
+    deep: input.deep,
+    updatedAt: new Date().toISOString()
+  }
+
+  await storage.set(getAfterReviewCacheKey(input), record)
   return record
 }

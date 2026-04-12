@@ -1,0 +1,107 @@
+[
+  {
+    "id": "replit-button-partial",
+    "submittedPrompt": "Make the red/yellow/green strength button visibly appear inside the Replit AI Agent chat textarea after the user types 15+ characters. Clicking the button should open the optimize panel with LLM-generated questions and the correct strength badge. The user can answer questions and receive a generated improved prompt with acceptance criteria. The Replace button should inject the improved prompt back into the Replit textarea. The popup should open, show auth state and usage, and the Strengthen tab should work end-to-end. No Chrome DevTools console errors should be thrown by content.js during page load or while typing. Button re-appears automatically after Replit SPA navigation without reloading the extension.",
+    "expectedCriteria": [
+      "The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.",
+      "Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.",
+      "User can answer questions and receive a generated improved prompt with acceptance criteria.",
+      "The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.",
+      "The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow.",
+      "No Chrome DevTools errors on replit.com related to the extension."
+    ],
+    "projectContext": "Project Overview\nPrompt Strength for Replit is a Chrome extension with a backend API.\n\nDefinition Of Done\n- The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.\n- Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.\n- User can answer questions and receive a generated improved prompt with acceptance criteria.\n- The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.\n- The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow.\n\nConstraints\n- No Chrome DevTools errors on replit.com related to the extension.\n- Button re-appears automatically after Replit SPA navigation without reloading the extension.\n\nUser Intent To Preserve\n- Keep the inline button inside the prompt area.\n- Keep the end-to-end optimize flow working from the button and popup.",
+    "currentState": "Working on: stabilizing the Replit inline button flow.\nCurrent bug: the answer claims progress but sometimes leaves runtime behavior unproven.\nRepeated Bugs\n- Button drifted to the top-right corner after popup close.\nFix Attempts\n- Freeze the prompt anchor while popup is open.\n- Rebind the launcher to the prompt after closing.\nAI Drift Patterns\n- The AI sometimes claims the flow works without proving the question flow and replacement flow end-to-end.",
+    "responseText": "I fixed the Replit launcher so the red/yellow/green button appears inside the AI Agent chat textarea after typing 15+ characters and stays anchored there. Clicking it now opens the optimize panel with the right strength badge. I also confirmed there are no extension-related console errors during page load or typing, and the button re-appears after SPA navigation without reloading the extension.\n\nWhat still needs follow-up: I did not fully verify the question-answering flow that generates the improved prompt, and I did not fully verify the popup Strengthen tab end-to-end auth and usage display path yet.",
+    "expectedQuickStatus": "PARTIAL",
+    "expectedDeepStatus": "PARTIAL",
+    "expectedQuickConfidence": "medium",
+    "expectedDeepConfidence": "high",
+    "expectedSources": [
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "constraint"
+    ],
+    "expectedLayers": [
+      "core",
+      "core",
+      "core",
+      "core",
+      "validation",
+      "validation"
+    ]
+  },
+  {
+    "id": "replit-button-success",
+    "submittedPrompt": "Make the red/yellow/green strength button visibly appear inside the Replit AI Agent chat textarea after the user types 15+ characters. Clicking the button should open the optimize panel with LLM-generated questions and the correct strength badge. The user can answer questions and receive a generated improved prompt with acceptance criteria. The Replace button should inject the improved prompt back into the Replit textarea. The popup should open, show auth state and usage, and the Strengthen tab should work end-to-end. No Chrome DevTools console errors should be thrown by content.js during page load or while typing. Button re-appears automatically after Replit SPA navigation without reloading the extension.",
+    "expectedCriteria": [
+      "The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.",
+      "Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.",
+      "User can answer questions and receive a generated improved prompt with acceptance criteria.",
+      "The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.",
+      "The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow.",
+      "No Chrome DevTools errors on replit.com related to the extension."
+    ],
+    "projectContext": "Definition Of Done\n- The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.\n- Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.\n- User can answer questions and receive a generated improved prompt with acceptance criteria.\n- The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.\n- The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow.\n\nConstraints\n- No Chrome DevTools errors on replit.com related to the extension.\n- Button re-appears automatically after Replit SPA navigation without reloading the extension.",
+    "currentState": "Working on: validating the full Replit flow after the latest fixes.",
+    "responseText": "I validated the full Replit flow end-to-end. The red/yellow/green button now appears inside the AI Agent chat textarea within about one second after the user types more than 15 characters. Clicking it opens the optimize panel with the correct strength badge and LLM-generated questions. The user can answer those questions and receive a generated improved prompt with acceptance criteria. The Replace button injects the improved prompt back into the Replit textarea and the textarea visibly updates. The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end. I also verified there are no extension-related console errors during page load or typing, and the button re-appears automatically after Replit SPA navigation without reloading the extension.",
+    "expectedQuickStatus": "LIKELY_SUCCESS",
+    "expectedDeepStatus": "SUCCESS",
+    "expectedQuickConfidence": "medium",
+    "expectedDeepConfidence": "high",
+    "expectedSources": [
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "constraint"
+    ],
+    "expectedLayers": [
+      "core",
+      "core",
+      "core",
+      "core",
+      "validation",
+      "validation"
+    ]
+  },
+  {
+    "id": "generic-prompt-relies-on-project-memory",
+    "submittedPrompt": "Did this fully fix the Replit flow?",
+    "expectedCriteria": [
+      "The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.",
+      "Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.",
+      "User can answer questions and receive a generated improved prompt with acceptance criteria.",
+      "The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.",
+      "The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow.",
+      "No Chrome DevTools errors on replit.com related to the extension."
+    ],
+    "projectContext": "Project Overview\nPrompt Strength for Replit is a Chrome extension with a backend API.\n\nDefinition Of Done\n- The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.\n- Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.\n- User can answer questions and receive a generated improved prompt with acceptance criteria.\n- The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.\n- The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow.\n\nConstraints\n- No Chrome DevTools errors on replit.com related to the extension.\n- Button re-appears automatically after Replit SPA navigation without reloading the extension.\n\nUser Intent To Preserve\n- Keep the inline button inside the prompt area.\n- Keep the end-to-end optimize flow working from the button and popup.",
+    "currentState": "Working on: validating whether the latest answer really closed the loop.\nRepeated Bugs\n- The assistant sometimes answers at a high level and skips the end-to-end question flow.\nAI Drift Patterns\n- The AI sometimes says the fix works without proving the popup Strengthen flow.",
+    "responseText": "Yes, I verified the core Replit flow. The red/yellow/green button is visible inside the AI Agent chat textarea within about one second after typing more than 15 characters. Clicking it opens the optimize panel with the correct strength badge and LLM-generated questions. The user can answer those questions, receive a generated improved prompt with acceptance criteria, and the Replace button injects that improved prompt back into the textarea so the visible text updates there. I also verified the popup opens with auth state and usage, the Strengthen tab works end-to-end, and there are no extension-related console errors during page load or typing.",
+    "expectedQuickStatus": "LIKELY_SUCCESS",
+    "expectedDeepStatus": "SUCCESS",
+    "expectedQuickConfidence": "medium",
+    "expectedDeepConfidence": "high",
+    "expectedSources": [
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "definition_of_done",
+      "constraint"
+    ],
+    "expectedLayers": [
+      "core",
+      "core",
+      "core",
+      "core",
+      "validation",
+      "validation"
+    ]
+  }
+]

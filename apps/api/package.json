@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "regression:after": "node --experimental-strip-types --loader ./scripts/ts-extension-loader.mjs ./scripts/after-review-regression.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",

@@ -87,10 +87,12 @@ import {
 } from "../lib/replit"
 import {
   deriveProjectMemoryIdentity,
+  getAfterReviewCache,
   getProjectMemory,
   getSessionSummary,
   hasSeenOnboarding,
   markOnboardingSeen,
+  saveAfterReviewCache,
   saveProjectMemory,
   saveSessionSummary
 } from "../lib/storage"
@@ -577,8 +579,9 @@ export default function PromptOptimizerApp() {
   }
 
   function canonicalChecklistLabels(result: AfterAnalysisResult | null) {
-    return (result?.acceptance_checklist ?? [])
-      .map((item) => item.label.trim())
+    const fromContract = (result?.review_contract?.criteria ?? []).map((item) => item.label.trim())
+    const labels = fromContract.length ? fromContract : (result?.acceptance_checklist ?? []).map((item) => item.label.trim())
+    return labels
       .filter((label) => label && !isGenericChecklistLabel(label))
       .slice(0, 6)
   }
@@ -631,6 +634,10 @@ export default function PromptOptimizerApp() {
       ...nextResult,
       findings: nextFindingsAreWeak ? previousResult.findings : nextResult.findings,
       acceptance_checklist: nextChecklistIsWeak ? previousResult.acceptance_checklist : nextResult.acceptance_checklist,
+      review_contract:
+        nextChecklistIsWeak && previousResult.review_contract.criteria.length
+          ? previousResult.review_contract
+          : nextResult.review_contract,
       stage_1: {
         ...nextResult.stage_1,
         claimed_evidence: Array.from(
@@ -676,6 +683,63 @@ export default function PromptOptimizerApp() {
     }
 
     return normalizedText === cache.normalizedText
+  }
+
+  async function getCachedAfterReviewsForTarget(
+    threadIdentity: string,
+    responseIdentity: string,
+    normalizedText: string
+  ) {
+    const inMemoryCache = isSameCachedAfterTarget(
+      afterReviewCacheRef.current,
+      threadIdentity,
+      responseIdentity,
+      normalizedText
+    )
+      ? afterReviewCacheRef.current
+      : null
+
+    if (inMemoryCache) return inMemoryCache
+
+    const persistedCache = await getAfterReviewCache({
+      threadIdentity,
+      responseIdentity,
+      normalizedText
+    })
+
+    if (!persistedCache) return null
+
+    const restoredCache: CachedAfterReviews = {
+      threadIdentity: persistedCache.threadIdentity,
+      responseIdentity: persistedCache.responseIdentity,
+      normalizedText: persistedCache.normalizedText,
+      quick: persistedCache.quick,
+      deep: persistedCache.deep
+    }
+
+    afterReviewCacheRef.current = restoredCache
+    strongestAfterVerdictRef.current = restoredCache.deep ?? restoredCache.quick ?? strongestAfterVerdictRef.current
+    return restoredCache
+  }
+
+  function buildDeepDeltaNote(quick: AfterAnalysisResult | null, deep: AfterAnalysisResult | null) {
+    if (!quick || !deep) return ""
+
+    const quickChecklist = new Map(
+      quick.acceptance_checklist.map((item) => [normalizeAssistantTextForReuse(item.label), item.status])
+    )
+    const changedItems = deep.acceptance_checklist.filter((item) => {
+      const previousStatus = quickChecklist.get(normalizeAssistantTextForReuse(item.label))
+      return Boolean(previousStatus) && previousStatus !== item.status
+    })
+
+    if (!changedItems.length) return ""
+
+    const sample = changedItems[0]
+    const sampleVerdict =
+      sample.status === "met" ? "confirmed" : sample.status === "missed" ? "marked missing" : "left unresolved"
+
+    return `Deep review tightened ${changedItems.length} checklist result${changedItems.length > 1 ? "s" : ""}; for example, "${sample.label}" is now ${sampleVerdict}.`
   }
 
   function buildCurrentAfterTargetOverride(): PendingContextAnalysis | null {
@@ -768,6 +832,10 @@ export default function PromptOptimizerApp() {
         response_text_fallback: text,
         deep_analysis: deepAnalysis,
         baseline_acceptance_criteria: baselineAcceptanceCriteria,
+        baseline_acceptance_checklist:
+          sameAnalyzedTarget ? afterReviewCacheRef.current?.quick?.acceptance_checklist ?? [] : [],
+        baseline_review_contract:
+          sameAnalyzedTarget ? afterReviewCacheRef.current?.quick?.review_contract ?? null : null,
         project_context: compactProjectMemory.projectContext,
         current_state: compactProjectMemory.currentState,
         error_summary: collectVisibleErrorSummary(),
@@ -829,6 +897,15 @@ export default function PromptOptimizerApp() {
       } else if (specificityScore(result) >= specificityScore(strongestAfterVerdictRef.current)) {
         strongestAfterVerdictRef.current = result
       }
+      if (afterReviewCacheRef.current) {
+        await saveAfterReviewCache({
+          threadIdentity: afterReviewCacheRef.current.threadIdentity,
+          responseIdentity: afterReviewCacheRef.current.responseIdentity,
+          normalizedText: afterReviewCacheRef.current.normalizedText,
+          quick: afterReviewCacheRef.current.quick,
+          deep: afterReviewCacheRef.current.deep
+        })
+      }
       return true
     } finally {
       if (requestId === afterEvaluationRequestIdRef.current) {
@@ -848,6 +925,10 @@ export default function PromptOptimizerApp() {
         lastProbableStatus: "UNKNOWN"
       },
     [session]
+  )
+  const deepDeltaNote = buildDeepDeltaNote(
+    afterReviewCacheRef.current?.quick ?? null,
+    afterReviewCacheRef.current?.deep ?? null
   )
 
   useEffect(() => {
@@ -1137,6 +1218,9 @@ export default function PromptOptimizerApp() {
       baselineResponse?.threadIdentity === threadSnapshot.identity &&
       ((latestMessageId && baselineResponse.identity && latestMessageId === baselineResponse.identity) ||
         normalizedText === baselineResponse.normalizedText)
+    const cachedReviews = text
+      ? await getCachedAfterReviewsForTarget(threadSnapshot.identity, latestMessageId, normalizedText)
+      : null
 
     if (hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current && sameAsProjectMemoryBaseline) {
       setProjectContextSetupActive(false)
@@ -1158,6 +1242,19 @@ export default function PromptOptimizerApp() {
     if (afterVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
       setProjectContextReadyActive(false)
       setAfterPanelOpen(true)
+      return
+    }
+
+    if (cachedReviews?.quick) {
+      setProjectContextSetupActive(false)
+      setProjectContextReadyActive(false)
+      setAfterPanelOpen(true)
+      setAfterDisplayedReviewMode("quick")
+      setAfterVerdict(cachedReviews.quick)
+      setAfterAttempt(await ensureSubmittedAttempt())
+      lastEvaluatedAssistantTextRef.current = text
+      lastEvaluatedAssistantMessageIdRef.current = latestMessageId
+      lastEvaluatedChatHrefRef.current = threadSnapshot.identity
       return
     }
 
@@ -1308,14 +1405,11 @@ export default function PromptOptimizerApp() {
     const targetOverride = buildCurrentAfterTargetOverride()
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
-      const cachedReviews = isSameCachedAfterTarget(
-        afterReviewCacheRef.current,
+      const cachedReviews = await getCachedAfterReviewsForTarget(
         targetOverride.threadIdentity,
         targetOverride.responseIdentity,
         normalizedText
       )
-        ? afterReviewCacheRef.current
-        : null
 
       if (cachedReviews?.deep) {
         setAfterDisplayedReviewMode("deep")
@@ -1365,14 +1459,11 @@ export default function PromptOptimizerApp() {
     const targetOverride = buildCurrentAfterTargetOverride()
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
-      const cachedReviews = isSameCachedAfterTarget(
-        afterReviewCacheRef.current,
+      const cachedReviews = await getCachedAfterReviewsForTarget(
         targetOverride.threadIdentity,
         targetOverride.responseIdentity,
         normalizedText
       )
-        ? afterReviewCacheRef.current
-        : null
 
       const cachedResult = mode === "deep" ? cachedReviews?.deep : cachedReviews?.quick
       if (cachedResult) {
@@ -2441,6 +2532,7 @@ export default function PromptOptimizerApp() {
           loadingProgress={afterLoadingProgress}
           codeAnalysisMode={codeAnalysisMode}
           displayedReviewMode={afterDisplayedReviewMode}
+          deepDeltaNote={deepDeltaNote}
           nextStepStarted={afterNextStepStarted}
           planningGoal={afterPlanningGoal}
           planningGoalNotice={planningGoalNotice}

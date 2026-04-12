@@ -18,6 +18,14 @@ export const VerdictStatusSchema = z.enum([
   "WRONG_DIRECTION",
   "UNVERIFIED"
 ])
+export const ReviewCriterionSourceSchema = z.enum([
+  "submitted_prompt",
+  "definition_of_done",
+  "user_intent",
+  "constraint",
+  "validation"
+])
+export const ReviewCriterionLayerSchema = z.enum(["core", "validation"])
 
 export const SessionSummarySchema = z.object({
   sessionId: z.string(),
@@ -169,7 +177,25 @@ export const VerdictOutputSchema = z.object({
 
 export const AcceptanceChecklistItemSchema = z.object({
   label: z.string().max(240),
-  status: z.enum(["met", "not_sure", "missed"])
+  status: z.enum(["met", "not_sure", "missed"]),
+  source: ReviewCriterionSourceSchema.optional(),
+  layer: ReviewCriterionLayerSchema.optional(),
+  priority: z.number().int().min(1).max(6).optional()
+})
+
+export const ReviewCriterionSchema = z.object({
+  id: z.string(),
+  label: z.string().max(240),
+  source: ReviewCriterionSourceSchema,
+  layer: ReviewCriterionLayerSchema,
+  priority: z.number().int().min(1).max(6)
+})
+
+export const ReviewContractSchema = z.object({
+  version: z.literal("v1").default("v1"),
+  target_signature: z.string().default(""),
+  goal: z.string(),
+  criteria: z.array(ReviewCriterionSchema).max(6).default([])
 })
 
 export const NextPromptOutputSchema = z.object({
@@ -191,6 +217,7 @@ export const AfterAnalysisResultSchema = z.object({
   verdict: VerdictOutputSchema,
   next_prompt_output: NextPromptOutputSchema,
   acceptance_checklist: z.array(AcceptanceChecklistItemSchema).max(6).default([]),
+  review_contract: ReviewContractSchema,
   response_summary: ResponsePreprocessorOutputSchema,
   used_fallback_intent: z.boolean().default(false),
   token_usage_total: z.number().int().min(0).default(0)
@@ -265,6 +292,8 @@ export const AfterPipelineRequestSchema = z.object({
   response_text_fallback: z.string().default(""),
   deep_analysis: z.boolean().default(false),
   baseline_acceptance_criteria: z.array(z.string().max(240)).max(6).default([]),
+  baseline_acceptance_checklist: z.array(AcceptanceChecklistItemSchema).max(6).default([]),
+  baseline_review_contract: ReviewContractSchema.nullable().optional(),
   project_context: z.string().max(4000).default(""),
   current_state: z.string().max(3000).default(""),
   error_summary: z.string().max(300).nullable().optional(),
@@ -378,12 +407,16 @@ export type AttemptPlatform = z.infer<typeof AttemptPlatformSchema>
 export type AttemptStatus = z.infer<typeof AttemptStatusSchema>
 export type UnifiedTaskType = z.infer<typeof UnifiedTaskTypeSchema>
 export type VerdictStatus = z.infer<typeof VerdictStatusSchema>
+export type ReviewCriterionSource = z.infer<typeof ReviewCriterionSourceSchema>
+export type ReviewCriterionLayer = z.infer<typeof ReviewCriterionLayerSchema>
 export type AttemptIntent = z.infer<typeof AttemptIntentSchema>
 export type Attempt = z.infer<typeof AttemptSchema>
 export type ResponsePreprocessorOutput = z.infer<typeof ResponsePreprocessorOutputSchema>
 export type Stage1Output = z.infer<typeof Stage1OutputSchema>
 export type Stage2Output = z.infer<typeof Stage2OutputSchema>
 export type VerdictOutput = z.infer<typeof VerdictOutputSchema>
+export type ReviewCriterion = z.infer<typeof ReviewCriterionSchema>
+export type ReviewContract = z.infer<typeof ReviewContractSchema>
 export type NextPromptOutput = z.infer<typeof NextPromptOutputSchema>
 export type AfterAnalysisResult = z.infer<typeof AfterAnalysisResultSchema>
 export type IntentExtractionOutput = z.infer<typeof IntentExtractionOutputSchema>

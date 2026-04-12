@@ -261,6 +261,8 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
   return AfterAnalysisResultSchema.parse({
     status: verdict.status,
     confidence: verdict.confidence,
+    confidence_reason: verdict.confidence_reason,
+    inspection_depth: "summary_only",
     findings: verdict.findings,
     issues: verdict.issues,
     next_prompt: nextPromptOutput.next_prompt,
@@ -269,6 +271,13 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
     stage_2: stage2,
     verdict,
     next_prompt_output: nextPromptOutput,
+    acceptance_checklist: [],
+    review_contract: {
+      version: "v1",
+      target_signature: "",
+      goal: intent.goal,
+      criteria: []
+    },
     response_summary: parsed.response_summary,
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal
