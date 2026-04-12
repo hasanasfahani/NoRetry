@@ -23,6 +23,14 @@ const detectOutcomeFallback = detectOutcomeLocallyFromRules
 const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
 const USE_DIRECT_HOSTED_FETCH = API_BASE.startsWith("https://")
 const REQUEST_TIMEOUT_MS = USE_DIRECT_HOSTED_FETCH ? 45000 : 8000
+const AFTER_CRITERION_LABEL_MAX = 240
+const AFTER_PROJECT_CONTEXT_MAX = 4000
+const AFTER_CURRENT_STATE_MAX = 3000
+const AFTER_ERROR_SUMMARY_MAX = 300
+const AFTER_CHANGED_FILE_MAX = 180
+const AFTER_ARTIFACT_SOURCE_MAX = 80
+const AFTER_ARTIFACT_SCOPE_MAX = 80
+const AFTER_ARTIFACT_CONTENT_MAX = 12000
 
 function getApiBases() {
   const bases = [API_BASE]
@@ -51,6 +59,68 @@ function sanitizeForJson(value: unknown): unknown {
   }
 
   return value
+}
+
+function limitText(value: string, maxLength: number) {
+  const normalized = value.trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`
+}
+
+function sanitizeAfterPipelineRequest(input: AfterPipelineRequest): AfterPipelineRequest {
+  const responseSummary = input.response_summary
+  const artifactContext = input.artifact_context
+
+  return {
+    ...input,
+    response_summary: {
+      ...responseSummary,
+      key_paragraphs: responseSummary.key_paragraphs.slice(0, 2),
+      mentioned_files: responseSummary.mentioned_files.slice(0, 20),
+      change_claims: responseSummary.change_claims.slice(0, 4),
+      validation_signals: responseSummary.validation_signals.slice(0, 4),
+      certainty_signals: responseSummary.certainty_signals.slice(0, 6),
+      uncertainty_signals: responseSummary.uncertainty_signals.slice(0, 6),
+      success_signals: responseSummary.success_signals.slice(0, 6),
+      failure_signals: responseSummary.failure_signals.slice(0, 6)
+    },
+    baseline_acceptance_criteria: (input.baseline_acceptance_criteria ?? [])
+      .map((item) => limitText(item, AFTER_CRITERION_LABEL_MAX))
+      .slice(0, 6),
+    baseline_acceptance_checklist: (input.baseline_acceptance_checklist ?? []).slice(0, 6).map((item) => ({
+      ...item,
+      label: limitText(item.label, AFTER_CRITERION_LABEL_MAX)
+    })),
+    baseline_review_contract:
+      input.baseline_review_contract
+        ? {
+            ...input.baseline_review_contract,
+            criteria: input.baseline_review_contract.criteria.slice(0, 6).map((item, index) => ({
+              ...item,
+              label: limitText(item.label, AFTER_CRITERION_LABEL_MAX),
+              priority: Math.max(1, Math.min(item.priority || index + 1, 6))
+            }))
+          }
+        : input.baseline_review_contract,
+    project_context: limitText(input.project_context ?? "", AFTER_PROJECT_CONTEXT_MAX),
+    current_state: limitText(input.current_state ?? "", AFTER_CURRENT_STATE_MAX),
+    error_summary: input.error_summary ? limitText(input.error_summary, AFTER_ERROR_SUMMARY_MAX) : input.error_summary,
+    changed_file_paths_summary: (input.changed_file_paths_summary ?? [])
+      .map((item) => limitText(item, AFTER_CHANGED_FILE_MAX))
+      .slice(0, 20),
+    artifact_context:
+      artifactContext
+        ? {
+            ...artifactContext,
+            artifacts: artifactContext.artifacts.slice(0, 40).map((artifact) => ({
+              ...artifact,
+              source: limitText(artifact.source, AFTER_ARTIFACT_SOURCE_MAX),
+              surface_scope: limitText(artifact.surface_scope ?? "", AFTER_ARTIFACT_SCOPE_MAX),
+              content: limitText(artifact.content ?? "", AFTER_ARTIFACT_CONTENT_MAX)
+            }))
+          }
+        : artifactContext
+  }
 }
 
 function encodeBase64Utf8(value: string) {
@@ -232,7 +302,7 @@ export async function sendFeedback(outcomeEventId: string, feedbackType: "WORKED
 }
 
 export async function analyzeAfterAttempt(input: AfterPipelineRequest): Promise<AfterPipelineResponse> {
-  return post("/api/analyze-after", input, (value) => value as AfterPipelineResponse)
+  return post("/api/analyze-after", sanitizeAfterPipelineRequest(input), (value) => value as AfterPipelineResponse)
 }
 
 export async function generateAfterNextQuestion(input: AfterNextQuestionRequest): Promise<AfterNextQuestionResponse> {

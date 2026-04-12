@@ -235,9 +235,8 @@ export default function PromptOptimizerApp() {
   const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
   const lastAfterDecisionLogKeyRef = useRef("")
-  const lastObservedAssistantTextRef = useRef("")
-  const lastObservedAssistantIdentityRef = useRef("")
-  const lastAssistantResponseMutationAtRef = useRef(0)
+  const scanTimeoutRef = useRef<number | null>(null)
+  const positionFrameRef = useRef<number | null>(null)
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -587,21 +586,6 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
-  function recordAssistantResponseMutationSnapshot() {
-    const snapshot = getCurrentAssistantSnapshot()
-    const normalizedText = normalizeAssistantTextForReuse(snapshot.text)
-    if (!snapshot.exists && !normalizedText) return
-
-    if (
-      snapshot.identity !== lastObservedAssistantIdentityRef.current ||
-      normalizedText !== lastObservedAssistantTextRef.current
-    ) {
-      lastObservedAssistantIdentityRef.current = snapshot.identity
-      lastObservedAssistantTextRef.current = normalizedText
-      lastAssistantResponseMutationAtRef.current = Date.now()
-    }
-  }
-
   function hasVisibleGenerationIndicator(node: HTMLElement | null) {
     const selectors = [
       "[aria-busy='true']",
@@ -733,7 +717,6 @@ export default function PromptOptimizerApp() {
     if (!initialText) return { ready: true as const }
 
     const visibleIndicator = hasVisibleGenerationIndicator(initial.node)
-    const recentMutation = Date.now() - lastAssistantResponseMutationAtRef.current < 1200
 
     await wait(850)
 
@@ -750,7 +733,7 @@ export default function PromptOptimizerApp() {
       }
     }
 
-    if (changed || recentMutation) {
+    if (changed) {
       return {
         ready: false as const,
         popupState: "ANALYSIS_RAN_TOO_EARLY" as const
@@ -1303,8 +1286,26 @@ export default function PromptOptimizerApp() {
     })
     void loadProjectMemoryForCurrentLocation()
 
-    const scan = () => {
-      recordAssistantResponseMutationSnapshot()
+    const isRelevantMutationNode = (node: Node | null) => {
+      if (!(node instanceof HTMLElement)) return false
+      if (node.closest("#prompt-optimizer-root")) return false
+      if (isPromptLikeElement(node)) return true
+
+      const hint = `${node.id} ${node.className?.toString?.() ?? ""} ${node.getAttribute("role") ?? ""} ${
+        node.getAttribute("aria-label") ?? ""
+      } ${node.getAttribute("placeholder") ?? ""}`.toLowerCase()
+      if (/\b(prompt|message|agent|send|submit|launcher|strength|optimi[sz]e|improve)\b/.test(hint)) {
+        return true
+      }
+
+      return Boolean(
+        node.querySelector?.(
+          "textarea, input, [role='textbox'], [contenteditable='true'], button, [role='button'], form, [aria-label*='prompt' i], [placeholder*='prompt' i], [aria-label*='message' i], [placeholder*='message' i]"
+        )
+      )
+    }
+
+    const runScan = () => {
       const currentThreadIdentity = getCurrentThreadSnapshot().identity
       if (lastThreadIdentityRef.current && lastThreadIdentityRef.current !== currentThreadIdentity) {
         pendingNavigationRef.current = currentThreadIdentity
@@ -1370,6 +1371,16 @@ export default function PromptOptimizerApp() {
       }
     }
 
+    const scheduleScan = (delay = 120) => {
+      if (scanTimeoutRef.current) {
+        window.clearTimeout(scanTimeoutRef.current)
+      }
+      scanTimeoutRef.current = window.setTimeout(() => {
+        scanTimeoutRef.current = null
+        runScan()
+      }, delay)
+    }
+
     const handleFocusIn = (event: FocusEvent) => {
       if (popupOpenRef.current) return
 
@@ -1380,26 +1391,49 @@ export default function PromptOptimizerApp() {
       promptRef.current = target
       lastFocusedPromptRef.current = target
       submitRef.current = findSubmitButton(target)
-      positionHost()
+      schedulePositionHost()
       if (inputChanged) {
         setInputBindingVersion((current) => current + 1)
       }
     }
 
-    scan()
-    const observer = new MutationObserver(scan)
+    runScan()
+    const observer = new MutationObserver((mutations) => {
+      if (popupOpenRef.current) {
+        schedulePositionHost()
+        return
+      }
+
+      const relevant = mutations.some((mutation) => {
+        if (isRelevantMutationNode(mutation.target)) return true
+        return [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)].some((node) =>
+          isRelevantMutationNode(node)
+        )
+      })
+
+      if (!relevant) return
+      scheduleScan(140)
+    })
     observer.observe(document.body, { childList: true, subtree: true })
     document.addEventListener("focusin", handleFocusIn)
-    window.addEventListener("resize", positionHost)
-    window.addEventListener("scroll", positionHost, true)
+    window.addEventListener("resize", schedulePositionHost)
+    window.addEventListener("scroll", schedulePositionHost, true)
     setMounted(true)
 
     return () => {
       observer.disconnect()
       document.removeEventListener("focusin", handleFocusIn)
-      window.removeEventListener("resize", positionHost)
-      window.removeEventListener("scroll", positionHost, true)
+      window.removeEventListener("resize", schedulePositionHost)
+      window.removeEventListener("scroll", schedulePositionHost, true)
       if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current)
+      if (scanTimeoutRef.current) {
+        window.clearTimeout(scanTimeoutRef.current)
+        scanTimeoutRef.current = null
+      }
+      if (positionFrameRef.current != null) {
+        window.cancelAnimationFrame(positionFrameRef.current)
+        positionFrameRef.current = null
+      }
       if (afterLoadingIntervalRef.current) {
         window.clearInterval(afterLoadingIntervalRef.current)
         afterLoadingIntervalRef.current = null
@@ -3107,6 +3141,14 @@ export default function PromptOptimizerApp() {
     host.style.top = `${window.scrollY + rect.top - 26}px`
     host.style.left = `${window.scrollX + rect.right - 28}px`
     host.style.right = "auto"
+  }
+
+  function schedulePositionHost() {
+    if (positionFrameRef.current != null) return
+    positionFrameRef.current = window.requestAnimationFrame(() => {
+      positionFrameRef.current = null
+      positionHost()
+    })
   }
 
   return (

@@ -311,6 +311,57 @@ function buildRequest(fixture: RegressionFixture, deep: boolean, baseline?: Retu
   }
 }
 
+async function runOverflowHardeningCheck() {
+  const oversizedCriterion =
+    "The popup opens and shows auth state and usage while keeping the same end-to-end flow " +
+    "without drifting into unrelated rebuild work or changing unrelated architecture details ".repeat(3)
+  const submittedPrompt =
+    "Make the red/yellow/green strength button visibly appear inside the Replit AI Agent chat textarea after the user types 15+ characters."
+  const intent = buildAttemptIntentFromSubmittedPrompt(submittedPrompt, "DEBUG")
+
+  const request: AfterPipelineRequest = {
+    attempt: {
+      attempt_id: "fixture-overflow-hardening",
+      platform: "replit",
+      raw_prompt: submittedPrompt,
+      optimized_prompt: submittedPrompt,
+      intent,
+      status: "submitted",
+      created_at: new Date("2026-04-12T00:00:00.000Z").toISOString(),
+      submitted_at: new Date("2026-04-12T00:00:05.000Z").toISOString(),
+      response_text: null,
+      response_message_id: null,
+      analysis_result: null,
+      token_usage_total: 0,
+      stage_cache: {}
+    },
+    response_summary: preprocessResponse(
+      "I fixed the launcher and popup flow. The inline button now appears in the Replit textarea and opens the optimizer panel."
+    ),
+    response_text_fallback:
+      "I fixed the launcher and popup flow. The inline button now appears in the Replit textarea and opens the optimizer panel.",
+    deep_analysis: false,
+    baseline_acceptance_criteria: [oversizedCriterion],
+    baseline_acceptance_checklist: [],
+    baseline_review_contract: null,
+    project_context: `Definition Of Done\n- ${oversizedCriterion}`,
+    current_state: `Current State\n- ${oversizedCriterion}`,
+    error_summary: null,
+    changed_file_paths_summary: [`src/${"a".repeat(260)}.tsx`],
+    artifact_context: undefined
+  }
+
+  const result = await analyzeAfterAttempt(request)
+  assert(
+    result.review_contract.criteria.every((item) => item.label.length <= 240),
+    `[overflow-hardening] review contract labels should be clamped to schema-safe length`
+  )
+  assert(
+    result.acceptance_checklist.every((item) => item.label.length <= 240),
+    `[overflow-hardening] acceptance checklist labels should be clamped to schema-safe length`
+  )
+}
+
 async function main() {
   const fixtures = await loadFixtures()
   const failures: string[] = []
@@ -508,6 +559,12 @@ async function main() {
     } catch (error) {
       failures.push(error instanceof Error ? error.message : `[${fixture.id}] unknown failure`)
     }
+  }
+
+  try {
+    await runOverflowHardeningCheck()
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : `[overflow-hardening] unknown failure`)
   }
 
   if (failures.length) {

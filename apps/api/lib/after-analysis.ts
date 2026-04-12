@@ -31,6 +31,11 @@ const AFTER_STAGE_SOFT_DEADLINE_MS = 8000
 const AFTER_DEEP_STAGE_SOFT_DEADLINE_MS = 16000
 const EVIDENCE_EXCERPT_LIMIT = 320
 const MAX_REVIEW_CRITERIA = 6
+const CRITERION_LABEL_MAX = 240
+const ARTIFACT_LABEL_MAX = 120
+const WHY_BULLET_MAX = 220
+const CONFIDENCE_REASON_MAX = 180
+const NEXT_ACTION_MAX = 180
 
 const EvidenceTargetingSchema = z.object({
   selected_candidate_ids: z.array(z.string()).max(4).default([]),
@@ -436,7 +441,7 @@ function normalizeCriterionLabel(value: string) {
     return "Solve the requested task"
   }
 
-  return normalized
+  return limitText(normalized, CRITERION_LABEL_MAX)
 }
 
 function isGenericDisplayCriterion(value: string) {
@@ -1562,13 +1567,13 @@ function buildCheckedArtifactLabels(
   responseSummary: AfterPipelineRequest["response_summary"]
 ) {
   if (deepAnalysisRequested) {
-    return dedupe(bundle.checkedArtifactTypes.map((type) => friendlyArtifactLabel(type)), 8)
+    return dedupe(bundle.checkedArtifactTypes.map((type) => limitText(friendlyArtifactLabel(type), ARTIFACT_LABEL_MAX)), 8)
   }
 
   const labels = ["response"]
   if (responseSummary.has_code_blocks) labels.push("code blocks")
   if (responseSummary.mentioned_files.length) labels.push("mentioned files")
-  return dedupe(labels, 8)
+  return dedupe(labels.map((item) => limitText(item, ARTIFACT_LABEL_MAX)), 8)
 }
 
 function buildUncheckedArtifactLabels(
@@ -1612,14 +1617,45 @@ function buildUncheckedArtifactLabels(
     unchecked.push("live runtime in the Replit workspace")
   }
 
-  return dedupe(unchecked, 8)
+  return dedupe(unchecked.map((item) => limitText(item, ARTIFACT_LABEL_MAX)), 8)
 }
 
 function buildBlockedOrUnprovenItems(checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>) {
   return checklist
     .filter((item) => item.status !== "met")
-    .map((item) => normalizeCriterionLabel(item.label))
+    .map((item) => limitText(normalizeCriterionLabel(item.label), CRITERION_LABEL_MAX))
     .slice(0, 6)
+}
+
+function sanitizeReviewContractForSchema(reviewContract: ReviewContract): ReviewContract {
+  return ReviewContractSchema.parse({
+    ...reviewContract,
+    criteria: reviewContract.criteria.slice(0, MAX_REVIEW_CRITERIA).map((criterion, index) => ({
+      ...criterion,
+      label: limitText(normalizeCriterionLabel(criterion.label), CRITERION_LABEL_MAX),
+      priority: Math.max(1, Math.min(criterion.priority || index + 1, MAX_REVIEW_CRITERIA))
+    }))
+  })
+}
+
+function sanitizeAcceptanceChecklistForSchema(checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>) {
+  return checklist.slice(0, MAX_REVIEW_CRITERIA).map((item) =>
+    AcceptanceChecklistItemSchema.parse({
+      ...item,
+      label: limitText(normalizeCriterionLabel(item.label), CRITERION_LABEL_MAX)
+    })
+  )
+}
+
+function sanitizeDeepVerificationsForSchema(verifications: z.infer<typeof DeepCriterionVerificationSchema>[]) {
+  return verifications.slice(0, MAX_REVIEW_CRITERIA).map((item) =>
+    DeepCriterionVerificationSchema.parse({
+      ...item,
+      criterion_label: limitText(normalizeCriterionLabel(item.criterion_label), CRITERION_LABEL_MAX),
+      artifact_findings: item.artifact_findings.map((finding) => limitText(finding, CRITERION_LABEL_MAX)).slice(0, 6),
+      explanation: limitText(item.explanation, CRITERION_LABEL_MAX)
+    })
+  )
 }
 
 function buildDecisionNextPrompt(params: {
@@ -1894,15 +1930,15 @@ function buildDecisionPresentation(params: {
             ? "WRONG_DIRECTION"
             : "NOT_ENOUGH_PROOF",
     recommendedAction,
-    whyBullets: dedupe(whyBullets, 3).slice(0, 3),
-    nextAction,
+    whyBullets: dedupe(whyBullets.map((item) => limitText(item, WHY_BULLET_MAX)), 3).slice(0, 3),
+    nextAction: limitText(nextAction, NEXT_ACTION_MAX),
     nextPromptOutput,
     checkedArtifacts,
     uncheckedArtifacts,
     blockedOrUnprovenItems,
     confidence,
     confidenceLabel: titleCaseConfidence(confidence),
-    confidenceReasons: dedupe(confidenceReasons, 3).slice(0, 3)
+    confidenceReasons: dedupe(confidenceReasons.map((item) => limitText(item, CONFIDENCE_REASON_MAX)), 3).slice(0, 3)
   }
 }
 
@@ -3789,13 +3825,18 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     confidence_reason: decisionPresentation.confidenceReasons[0] ?? safeVerdict.confidence_reason
   })
   safeNextPrompt = decisionPresentation.nextPromptOutput
+  const sanitizedReviewContract = sanitizeReviewContractForSchema(reviewContract)
+  const sanitizedAcceptanceChecklist = sanitizeAcceptanceChecklistForSchema(acceptanceChecklist)
+  const sanitizedDeepVerifications = sanitizeDeepVerificationsForSchema(
+    artifactAwareDeepEvaluation?.verifications ?? []
+  )
 
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
     popup_state: decisionPresentation.popupState,
     confidence_label: decisionPresentation.confidenceLabel,
-    confidence_reason: safeVerdict.confidence_reason,
+    confidence_reason: limitText(safeVerdict.confidence_reason, CONFIDENCE_REASON_MAX),
     confidence_reasons: decisionPresentation.confidenceReasons,
     inspection_depth: detailInspection.inspection_depth,
     decision: decisionPresentation.decision,
@@ -3806,20 +3847,20 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     issues: safeVerdict.issues,
     next_prompt: safeNextPrompt.next_prompt,
     prompt_strategy: safeNextPrompt.prompt_strategy,
-    next_prompt_explanation: safeNextPrompt.next_prompt_explanation,
-    expected_outcome: safeNextPrompt.expected_outcome,
+    next_prompt_explanation: limitText(safeNextPrompt.next_prompt_explanation, WHY_BULLET_MAX),
+    expected_outcome: limitText(safeNextPrompt.expected_outcome, WHY_BULLET_MAX),
     stage_1: safeStage1,
     stage_2: safeStage2,
     verdict: safeVerdict,
     next_prompt_output: safeNextPrompt,
-    acceptance_checklist: acceptanceChecklist,
-    review_contract: reviewContract,
+    acceptance_checklist: sanitizedAcceptanceChecklist,
+    review_contract: sanitizedReviewContract,
     response_summary: parsed.response_summary,
     checked_artifact_types: artifactAwareDeepEvaluation?.checkedArtifactTypes ?? [],
     checked_artifacts: decisionPresentation.checkedArtifacts,
     unchecked_artifacts: decisionPresentation.uncheckedArtifacts,
     blocked_or_unproven_items: decisionPresentation.blockedOrUnprovenItems,
-    deep_criterion_verifications: artifactAwareDeepEvaluation?.verifications ?? [],
+    deep_criterion_verifications: sanitizedDeepVerifications,
     contradiction_count: artifactAwareDeepEvaluation?.contradictionCount ?? 0,
     helpful_feedback: {
       helpful: null,
