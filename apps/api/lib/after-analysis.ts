@@ -664,6 +664,106 @@ function hasAllSignals(haystack: string, patterns: RegExp[]) {
   return patterns.every((pattern) => pattern.test(haystack))
 }
 
+function criterionSatisfiedFromText(
+  criterion: string,
+  haystack: string,
+  validationHaystack: string,
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  const normalizedCriterion = normalizeForMatch(criterion)
+
+  if (!haystack) return false
+  if (criterionExplicitlyUnproven(criterion, responseSummary)) return false
+
+  if (/return only/i.test(criterion) && /html|code block|markdown code block/i.test(criterion)) {
+    return responseSummary.has_code_blocks
+  }
+
+  if (/no explanations/i.test(criterion)) {
+    return responseSummary.has_code_blocks && responseIsMostlyCode(responseSummary.response_text)
+  }
+
+  if (/red\/yellow\/green button|strength button/i.test(criterion) && /textarea|chat textarea|prompt area/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(button|badge|icon|launcher|trigger|chip)\b/i,
+      /\b(visible|appear(?:s|ed)?|show(?:s|ed)? up|render(?:s|ed)?|display(?:s|ed)?)\b/i,
+      /\b(textarea|chat|prompt|composer|input|editor)\b/i
+    ])
+  }
+
+  if (/opens the optimize panel|llm-generated questions|strength badge/i.test(criterion)) {
+    return (
+      hasAllSignals(haystack, [
+        /\b(click(?:ing)?|tap(?:ping)?|press(?:ing|ed)?|select(?:ing|ed)?)\b/i,
+        /\b(open(?:s|ed)?|show(?:s|ed)?|launch(?:es|ed)?|bring(?:s|ing)? up)\b/i,
+        /\b(panel|popup|optimi[sz]e|optimizer|drawer|sheet|modal|popover)\b/i
+      ]) &&
+      /\b(question(?:s)?|follow(?:-| )?ups?|clarification(?:s)?|badge|strength)\b/i.test(haystack)
+    )
+  }
+
+  if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(answer(?:ed|ing)?|reply(?:ing)?|respond(?:ing)?)\b/i,
+      /\b(question(?:s)?|follow(?:-| )?ups?|clarification(?:s)?)\b/i,
+      /\b(receiv(?:e|es|ed|ing)|get(?:s|ting)?|generate(?:d|s|ing)?|return(?:s|ed)?|give(?:s|n)?|show(?:s|ed)?)\b/i,
+      /\b(improved prompt|rewritten prompt|refined prompt|updated prompt|new prompt)\b/i,
+      /\b(acceptance criteria|criteria)\b/i
+    ])
+  }
+
+  if (/replace button injects|text visibly updates|injects the improved prompt/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(replace(?: button)?)\b/i,
+      /\b(inject(?:s|ed|ing)?|insert(?:s|ed|ing)?|write(?:s|n)?(?: [a-z0-9\s]{0,40})? back|put(?:s|ting)?(?: [a-z0-9\s]{0,40})? back|paste(?:s|d|ing)?|copy(?:ies|ied|ing)?)\b/i,
+      /\b(textarea|composer|input|prompt text|chat box|editor)\b/i,
+      /\b(update(?:s|d|ing)?|change(?:s|d|ing)?|visible text|text visibly update(?:s|d)?|text change(?:s|d)?)\b/i
+    ])
+  }
+
+  if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(criterion)) {
+    return (
+      hasAllSignals(haystack, [
+        /\b(popup|extension icon|extension popup)\b/i,
+        /\b(open(?:s|ed)?|show(?:s|ed)?|visible)\b/i,
+        /\b(auth state|sign(?:ed)?(?:-| )in(?:-| )state|signed(?:-| )in|login state)\b/i,
+        /\b(usage|quota|credits|meter)\b/i,
+        /\b(strengthen(?: tab| flow)?|end(?:-| )to(?:-| )end|works|completes)\b/i
+      ]) ||
+      hasAllSignals(haystack, [
+        /\b(popup|extension popup)\b/i,
+        /\b(sign(?:ed)?(?:-| )in|auth|login)\b/i,
+        /\b(usage|quota|credits|meter)\b/i,
+        /\b(strengthen|end(?:-| )to(?:-| )end|works|completes)\b/i
+      ])
+    )
+  }
+
+  if (/no chrome devtools errors|no console errors|devtools errors/i.test(criterion)) {
+    return (
+      /\b(no|zero)\b[\w\s-]{0,40}\b(devtools|console)\s+errors?\b/i.test(haystack) ||
+      /\bno\s+errors?\b/i.test(validationHaystack)
+    )
+  }
+
+  if (/spa navigation|re-appears|survive/i.test(criterion)) {
+    return hasAllSignals(haystack, [
+      /\b(spa navigation|soft navigation|navigation)\b/i,
+      /\b(survive(?:s|d)?|re-appears?|stays visible)\b/i
+    ])
+  }
+
+  const tokens = extractMeaningfulTokens(normalizedCriterion).filter(
+    (token) =>
+      !["return", "only", "complete", "updated", "html", "block", "markdown", "already", "implemented"].includes(token)
+  )
+
+  if (!tokens.length) return false
+
+  const matched = tokens.filter((token) => haystack.includes(token))
+  return matched.length >= Math.min(2, tokens.length) || matched.length / tokens.length >= 0.66
+}
+
 function criterionExplicitlyUnproven(criterion: string, responseSummary: AfterPipelineRequest["response_summary"]) {
   const normalizedCriterion = normalizeForMatch(criterion)
   const uncertaintyPatterns = [
@@ -712,7 +812,6 @@ function criterionExplicitlyUnproven(criterion: string, responseSummary: AfterPi
 }
 
 function quickCriterionSatisfied(criterion: string, responseSummary: AfterPipelineRequest["response_summary"]) {
-  const normalizedCriterion = normalizeForMatch(criterion)
   const haystack = normalizeForMatch(responseSummary.response_text)
   const validationHaystack = normalizeForMatch(
     [
@@ -723,81 +822,7 @@ function quickCriterionSatisfied(criterion: string, responseSummary: AfterPipeli
     ].join(" ")
   )
 
-  if (criterionExplicitlyUnproven(criterion, responseSummary)) {
-    return false
-  }
-
-  if (/return only/i.test(criterion) && /html|code block|markdown code block/i.test(criterion)) {
-    return responseSummary.has_code_blocks
-  }
-
-  if (/no explanations/i.test(criterion)) {
-    return responseSummary.has_code_blocks && responseIsMostlyCode(responseSummary.response_text)
-  }
-
-  if (/red\/yellow\/green button|strength button/i.test(criterion) && /textarea|chat textarea|prompt area/i.test(criterion)) {
-    return hasAllSignals(haystack, [
-      /\b(button|badge|icon)\b/i,
-      /\b(visible|appear(?:s|ed)?|shows?)\b/i,
-      /\b(textarea|chat|prompt)\b/i
-    ])
-  }
-
-  if (/opens the optimize panel|llm-generated questions|strength badge/i.test(criterion)) {
-    return hasAllSignals(haystack, [
-      /\b(click(?:ing)?|tap(?:ping)?)\b/i,
-      /\b(open(?:s|ed)?|show(?:s|ed)?)\b/i,
-      /\b(panel|popup|optimi[sz]e)\b/i
-    ]) && /\b(question|badge)\b/i.test(haystack)
-  }
-
-  if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(criterion)) {
-    return hasAllSignals(haystack, [
-      /\b(answer(?:ed|ing)?|question(?:s)?)\b/i,
-      /\b(generate(?:d|s)?|generated)\b/i,
-      /\b(improved prompt|acceptance criteria)\b/i
-    ])
-  }
-
-  if (/replace button injects|text visibly updates|injects the improved prompt/i.test(criterion)) {
-    return hasAllSignals(haystack, [
-      /\b(replace button|replace)\b/i,
-      /\b(inject(?:s|ed)?|write(?:s|n)? back|updates?)\b/i,
-      /\b(textarea|prompt text|text visibly updates?)\b/i
-    ])
-  }
-
-  if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(criterion)) {
-    return hasAllSignals(haystack, [
-      /\b(popup|extension icon|strengthen tab)\b/i,
-      /\b(open(?:s|ed)?)\b/i,
-      /\b(auth state|usage|end-to-end)\b/i
-    ])
-  }
-
-  if (/no chrome devtools errors|no console errors|devtools errors/i.test(criterion)) {
-    return (
-      /\b(no|zero)\b[\w\s-]{0,40}\b(devtools|console)\s+errors?\b/i.test(haystack) ||
-      /\bno\s+errors?\b/i.test(validationHaystack)
-    )
-  }
-
-  if (/spa navigation|re-appears|survive/i.test(criterion)) {
-    return hasAllSignals(haystack, [
-      /\b(spa navigation|soft navigation|navigation)\b/i,
-      /\b(survive(?:s|d)?|re-appears?|stays visible)\b/i
-    ])
-  }
-
-  const tokens = extractMeaningfulTokens(normalizedCriterion).filter(
-    (token) =>
-      !["return", "only", "complete", "updated", "html", "block", "markdown", "already", "implemented"].includes(token)
-  )
-
-  if (!tokens.length) return false
-
-  const matched = tokens.filter((token) => haystack.includes(token))
-  return matched.length >= Math.min(2, tokens.length) || matched.length / tokens.length >= 0.66
+  return criterionSatisfiedFromText(criterion, haystack, validationHaystack, responseSummary)
 }
 
 function extractCodeBlocks(rawResponse: string) {
@@ -946,45 +971,7 @@ function deepCriterionSatisfiedFromEvidence(
     [evidenceText, ...responseSummary.validation_signals, ...responseSummary.success_signals].join(" ")
   )
 
-  if (!haystack) return false
-  if (criterionExplicitlyUnproven(criterion, responseSummary)) return false
-
-  if (/red\/yellow\/green button|strength button/i.test(criterion) && /textarea|chat textarea|prompt area/i.test(criterion)) {
-    return hasAllSignals(haystack, [/\b(button|badge|icon)\b/i, /\b(visible|appear(?:s|ed)?|shows?)\b/i, /\b(textarea|chat|prompt)\b/i])
-  }
-
-  if (/opens the optimize panel|llm-generated questions|strength badge/i.test(criterion)) {
-    return hasAllSignals(haystack, [/\b(click(?:ing)?|tap(?:ping)?)\b/i, /\b(open(?:s|ed)?|show(?:s|ed)?)\b/i, /\b(panel|popup|optimi[sz]e)\b/i]) && /\b(question|badge)\b/i.test(haystack)
-  }
-
-  if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(criterion)) {
-    return hasAllSignals(haystack, [/\b(answer(?:ed|ing)?|question(?:s)?)\b/i, /\b(generate(?:d|s)?|generated)\b/i, /\b(improved prompt|acceptance criteria)\b/i])
-  }
-
-  if (/replace button injects|text visibly updates|injects the improved prompt/i.test(criterion)) {
-    return hasAllSignals(haystack, [/\b(replace button|replace)\b/i, /\b(inject(?:s|ed)?|write(?:s|n)? back|updates?)\b/i, /\b(textarea|prompt text|text visibly updates?)\b/i])
-  }
-
-  if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(criterion)) {
-    return hasAllSignals(haystack, [/\b(popup|extension icon|strengthen tab)\b/i, /\b(open(?:s|ed)?)\b/i, /\b(auth state|usage|end-to-end)\b/i])
-  }
-
-  if (/no chrome devtools errors|no console errors|devtools errors/i.test(criterion)) {
-    return /\b(no|zero)\b[\w\s-]{0,40}\b(devtools|console)\s+errors?\b/i.test(haystack) || /\bno\s+errors?\b/i.test(validationHaystack)
-  }
-
-  if (/spa navigation|re-appears|survive/i.test(criterion)) {
-    return hasAllSignals(haystack, [/\b(spa navigation|soft navigation|navigation)\b/i, /\b(survive(?:s|d)?|re-appears?|stays visible)\b/i])
-  }
-
-  const tokens = extractMeaningfulTokens(normalizeCriterionLabel(criterion)).filter(
-    (token) =>
-      !["return", "only", "complete", "updated", "html", "block", "markdown", "already", "implemented"].includes(token)
-  )
-  if (!tokens.length) return false
-
-  const matched = tokens.filter((token) => haystack.includes(token))
-  return matched.length >= Math.min(3, tokens.length) || matched.length / tokens.length >= 0.75
+  return criterionSatisfiedFromText(criterion, haystack, validationHaystack, responseSummary)
 }
 
 function buildFrozenDeepStage2FromEvidence(
