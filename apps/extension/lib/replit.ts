@@ -235,9 +235,16 @@ export function collectVisibleErrorSummary() {
 }
 
 export function collectChangedFilesSummary() {
+  const limitFileLabel = (value: string) => {
+    const trimmed = value.trim()
+    if (trimmed.length <= 180) return trimmed
+    return `${trimmed.slice(0, 179).trimEnd()}…`
+  }
+
   const fileNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-file-path], [aria-label], [title]"))
   const files = fileNodes
     .map((node) => node.getAttribute("data-file-path") || node.getAttribute("aria-label") || node.getAttribute("title") || "")
+    .map((text) => limitFileLabel(text))
     .filter((text) => /\.[a-z0-9]+$/i.test(text))
 
   return [...new Set(files)].slice(0, 20)

@@ -167,7 +167,19 @@ function confidenceTitle(confidence: AfterAnalysisResult["confidence"]) {
   }
 }
 
-function recommendedActionLabel(action: AfterAnalysisResult["recommended_action"]) {
+function recommendedActionLabel(
+  action: AfterAnalysisResult["recommended_action"],
+  popupState?: AfterAnalysisResult["popup_state"]
+) {
+  if (popupState === "RESPONSE_STILL_STREAMING") {
+    return "Wait and re-run analysis"
+  }
+  if (popupState === "ANALYSIS_RAN_TOO_EARLY") {
+    return "Re-run analysis after the response finishes"
+  }
+  if (popupState === "ANALYSIS_FAILED_INTERNAL") {
+    return "Retry analysis after the response settles"
+  }
   switch (action) {
     case "PROCEED":
       return "Continue, no changes needed"
@@ -442,7 +454,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
   const decisionLabel = popupStateLabel(popupState, props.verdict.decision ?? "Not enough proof")
   const recommendedAction = props.verdict.recommended_action ?? "VALIDATE_FIRST"
-  const recommendedActionText = recommendedActionLabel(recommendedAction)
+  const recommendedActionText = recommendedActionLabel(recommendedAction, popupState)
   const confidenceLabel = props.verdict.confidence_label ?? confidenceTitle(props.verdict.confidence)
   const promptAllowedByState = isPromptAllowedForState(popupState)
   const promptVisibleByContent = isMeaningfulRecommendedPrompt(props.verdict.next_prompt ?? "")
