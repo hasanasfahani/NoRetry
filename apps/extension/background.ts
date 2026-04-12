@@ -267,19 +267,37 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
     confidence_reasons: [verdict.confidence_reason].filter(Boolean),
     inspection_depth: "summary_only",
     decision: verdict.status === "WRONG_DIRECTION" ? "Likely wrong direction" : verdict.status === "UNVERIFIED" ? "Not enough proof" : verdict.status === "PARTIAL" || verdict.status === "FAILED" ? "Needs refinement" : "Safe to proceed",
+    recommended_action:
+      verdict.status === "WRONG_DIRECTION"
+        ? "RESTART_WITH_PROMPT"
+        : verdict.status === "UNVERIFIED"
+          ? "VALIDATE_FIRST"
+          : verdict.status === "PARTIAL" || verdict.status === "FAILED"
+            ? "SEND_PROMPT"
+            : "PROCEED",
     why_bullets: verdict.findings.slice(0, 3),
     next_action:
       verdict.status === "WRONG_DIRECTION"
-        ? "Send a narrower correction prompt before you retry."
+        ? "Restart with this prompt."
         : verdict.status === "PARTIAL" || verdict.status === "FAILED"
-          ? "Fix the missing part before you retry."
+          ? "Send this prompt before continuing."
           : verdict.status === "UNVERIFIED"
-            ? "Ask for narrower validation before you retry."
-            : "Use the next prompt only if you want an extra validation pass.",
+            ? "Validate this before proceeding."
+            : "Continue, no changes needed.",
     findings: verdict.findings,
     issues: verdict.issues,
     next_prompt: nextPromptOutput.next_prompt,
     prompt_strategy: nextPromptOutput.prompt_strategy,
+    next_prompt_explanation:
+      nextPromptOutput.next_prompt_explanation ||
+      "This prompt focuses only on what still looks missing or risky.",
+    expected_outcome:
+      nextPromptOutput.expected_outcome ||
+      (verdict.status === "WRONG_DIRECTION"
+        ? "The assistant should return to the requested scope instead of continuing the drift."
+        : verdict.status === "PARTIAL" || verdict.status === "FAILED"
+          ? "The assistant should fix the unresolved part without redoing the whole solution."
+          : "The assistant should validate the unproven part before you trust the answer."),
     stage_1: stage1,
     stage_2: stage2,
     verdict,
@@ -300,7 +318,7 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
     response_summary: parsed.response_summary,
     helpful_feedback: {
       helpful: null,
-      next_prompt_useful: null
+      next_prompt_success: null
     },
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal

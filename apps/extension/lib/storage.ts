@@ -64,14 +64,15 @@ export type DeepArtifactTelemetryRecord = {
 }
 
 export type AfterExperienceEventRecord = {
-  eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt"
+  eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt_success"
   attemptId: string
   decision: AfterAnalysisResult["decision"]
+  recommendedAction: AfterAnalysisResult["recommended_action"]
   confidence: AfterAnalysisResult["confidence"]
   promptStrategy: AfterAnalysisResult["prompt_strategy"]
   reviewMode?: "quick" | "deep"
   userFeedbackHelpful?: boolean
-  userFeedbackNextPromptUseful?: boolean
+  userFeedbackNextPromptSuccess?: boolean
   createdAt: string
 }
 

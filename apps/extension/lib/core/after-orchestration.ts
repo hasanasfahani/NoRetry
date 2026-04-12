@@ -20,12 +20,15 @@ export function buildAfterPlaceholder(
     confidence_reasons: issues.slice(0, 3),
     inspection_depth: "summary_only",
     decision: "Not enough proof",
+    recommended_action: "VALIDATE_FIRST",
     why_bullets: [issues[0] || finding].filter(Boolean).slice(0, 3),
     next_action: nextPrompt ? "Refine the next retry before you send it." : "Wait for a real answer, then analyze again.",
     findings: [finding],
     issues,
     next_prompt: nextPrompt,
     prompt_strategy: "narrow_scope",
+    next_prompt_explanation: nextPrompt ? "This prompt narrows the next move before you retry." : "",
+    expected_outcome: nextPrompt ? "The assistant should respond with a narrower, less risky next step." : "",
     stage_1: {
       assistant_action_summary: finding,
       claimed_evidence: [],
@@ -80,7 +83,7 @@ export function buildAfterPlaceholder(
     },
     helpful_feedback: {
       helpful: null,
-      next_prompt_useful: null
+      next_prompt_success: null
     },
     used_fallback_intent: true,
     token_usage_total: 0

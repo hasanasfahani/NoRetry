@@ -80,7 +80,7 @@ export function buildStage3Prompts(input: AfterStage3Request) {
 export function buildStage4Prompts(input: AfterStage4Request) {
   return {
     system:
-      "Write the next best prompt for the user. Keep scope tight and focus only on what is still unresolved, unproven, or contradictory. Return JSON only with keys: next_prompt and prompt_strategy. prompt_strategy must be one of: validate, fix_missing, narrow_scope, resolve_contradiction.",
+      "Write the next best prompt for the user. Keep scope tight and focus only on what is still unresolved, unproven, or contradictory. Return JSON only with keys: next_prompt, prompt_strategy, next_prompt_explanation, expected_outcome. prompt_strategy must be one of: validate, fix_missing, narrow_scope, resolve_contradiction. next_prompt_explanation should briefly explain why this is the right next move. expected_outcome should state what the user should expect if they send this prompt.",
     user: JSON.stringify({
       optimized_prompt: input.optimized_prompt,
       intent: input.intent,

@@ -1650,11 +1650,15 @@ function buildDecisionNextPrompt(params: {
         contradictionCount > 0 && whyBullets.length ? `Resolve this contradiction first: ${whyBullets[0]}` : "",
         focusLine,
         "Do not broaden scope. Either explain the mismatch clearly or make the smallest correction needed.",
-        "Then list the exact evidence that proves the corrected result."
+        "Then list the exact evidence that proves the corrected result. If you still cannot prove it, say that plainly."
       ]
         .filter(Boolean)
         .join("\n\n"),
-      prompt_strategy: promptStrategy
+      prompt_strategy: promptStrategy,
+      next_prompt_explanation:
+        "This prompt forces the assistant to resolve the specific mismatch instead of continuing with a broad retry.",
+      expected_outcome:
+        "The assistant should either correct the contradiction or explain why the earlier claim and evidence disagreed."
     })
   }
 
@@ -1665,11 +1669,16 @@ function buildDecisionNextPrompt(params: {
         constraintsLine,
         "Fix only the missing part below. Do not rework the parts that already look correct.",
         focusLine,
+        "Do not broaden scope or restate the whole solution.",
         "After fixing it, tell me exactly what changed and what visible evidence proves each fixed item."
       ]
         .filter(Boolean)
         .join("\n\n"),
-      prompt_strategy: promptStrategy
+      prompt_strategy: promptStrategy,
+      next_prompt_explanation:
+        "This prompt isolates the missing requirement so the assistant does not touch parts that already look correct.",
+      expected_outcome:
+        "The assistant should fix only the missing step and return proof for that exact change."
     })
   }
 
@@ -1680,11 +1689,16 @@ function buildDecisionNextPrompt(params: {
         constraintsLine,
         "Return to the requested scope and ignore side work that does not directly satisfy it.",
         focusLine,
+        "Do not refactor unrelated files or redo parts that already look correct.",
         "Give the minimum correction needed, then summarize the concrete evidence for that correction."
       ]
         .filter(Boolean)
         .join("\n\n"),
-      prompt_strategy: promptStrategy
+      prompt_strategy: promptStrategy,
+      next_prompt_explanation:
+        "This prompt pulls the assistant back to the original requirement and blocks unrelated changes.",
+      expected_outcome:
+        "The assistant should return to the requested scope and produce the minimum correction needed."
     })
   }
 
@@ -1694,11 +1708,18 @@ function buildDecisionNextPrompt(params: {
       constraintsLine,
       "Do not change the implementation yet. Validate only the still-unproven parts below.",
       focusLine,
-      "For each item, say whether it is proven, what evidence supports it, or why it is still unproven."
+      "For each item, say whether it is proven, what evidence supports it, or why it is still unproven.",
+      "If you cannot prove a point, say that plainly instead of claiming success."
     ]
       .filter(Boolean)
       .join("\n\n"),
-    prompt_strategy: "validate"
+    prompt_strategy: "validate",
+    next_prompt_explanation:
+      "This prompt asks the assistant to prove the unresolved behavior before you make another broad retry.",
+    expected_outcome:
+      decision === "Safe to proceed"
+        ? "The assistant should confirm the remaining proof point without changing the implementation."
+        : "The assistant should clearly validate or disprove the unresolved behavior only."
   })
 }
 
@@ -1844,17 +1865,27 @@ function buildDecisionPresentation(params: {
     whyBullets
   })
 
+  const recommendedAction =
+    decision === "Safe to proceed"
+      ? "PROCEED"
+      : decision === "Needs refinement"
+        ? "SEND_PROMPT"
+        : decision === "Likely wrong direction"
+          ? "RESTART_WITH_PROMPT"
+          : "VALIDATE_FIRST"
+
   const nextAction =
-    promptStrategy === "resolve_contradiction"
-      ? "Send this contradiction-focused prompt before you retry."
-      : promptStrategy === "fix_missing"
-        ? "Send this fix-only prompt to close the missing part."
-        : promptStrategy === "narrow_scope"
-          ? "Send this narrower prompt to bring the assistant back on track."
-          : "Send this validation prompt before you trust the answer."
+    recommendedAction === "PROCEED"
+      ? "Continue, no changes needed."
+      : recommendedAction === "SEND_PROMPT"
+        ? "Send this prompt before continuing."
+        : recommendedAction === "RESTART_WITH_PROMPT"
+          ? "Restart with this prompt."
+          : "Validate this before proceeding."
 
   return {
     decision,
+    recommendedAction,
     whyBullets: dedupe(whyBullets, 3).slice(0, 3),
     nextAction,
     nextPromptOutput,
@@ -3759,12 +3790,15 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     confidence_reasons: decisionPresentation.confidenceReasons,
     inspection_depth: detailInspection.inspection_depth,
     decision: decisionPresentation.decision,
+    recommended_action: decisionPresentation.recommendedAction,
     why_bullets: decisionPresentation.whyBullets,
     next_action: decisionPresentation.nextAction,
     findings: safeVerdict.findings,
     issues: safeVerdict.issues,
     next_prompt: safeNextPrompt.next_prompt,
     prompt_strategy: safeNextPrompt.prompt_strategy,
+    next_prompt_explanation: safeNextPrompt.next_prompt_explanation,
+    expected_outcome: safeNextPrompt.expected_outcome,
     stage_1: safeStage1,
     stage_2: safeStage2,
     verdict: safeVerdict,
@@ -3780,7 +3814,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     contradiction_count: artifactAwareDeepEvaluation?.contradictionCount ?? 0,
     helpful_feedback: {
       helpful: null,
-      next_prompt_useful: null
+      next_prompt_success: null
     },
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal

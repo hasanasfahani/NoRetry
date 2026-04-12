@@ -425,11 +425,29 @@ async function main() {
       )
       assert(Boolean(quick.decision), `[${fixture.id}] quick decision is missing`)
       assert(Boolean(deep.decision), `[${fixture.id}] deep decision is missing`)
+      assert(Boolean(quick.recommended_action), `[${fixture.id}] quick recommended action is missing`)
+      assert(Boolean(deep.recommended_action), `[${fixture.id}] deep recommended action is missing`)
       assert(deep.why_bullets.length > 0, `[${fixture.id}] deep why bullets are missing`)
       assert(deep.checked_artifacts.length > 0, `[${fixture.id}] deep checked artifacts are missing`)
       assert(deep.confidence_reasons.length > 0, `[${fixture.id}] deep confidence reasons are missing`)
       assert(Boolean(deep.next_action.trim()), `[${fixture.id}] deep next action is missing`)
       assert(Boolean(deep.next_prompt.trim()), `[${fixture.id}] deep next prompt is missing`)
+      assert(Boolean(deep.next_prompt_explanation.trim()), `[${fixture.id}] deep next prompt explanation is missing`)
+      assert(Boolean(deep.expected_outcome.trim()), `[${fixture.id}] deep expected outcome is missing`)
+      assert(
+        deep.helpful_feedback.helpful === null && deep.helpful_feedback.next_prompt_success === null,
+        `[${fixture.id}] deep helpful feedback defaults drifted`
+      )
+      assert(
+        deep.decision === "Safe to proceed"
+          ? deep.recommended_action === "PROCEED"
+          : deep.decision === "Needs refinement"
+            ? deep.recommended_action === "SEND_PROMPT"
+            : deep.decision === "Likely wrong direction"
+              ? deep.recommended_action === "RESTART_WITH_PROMPT"
+              : deep.recommended_action === "VALIDATE_FIRST",
+        `[${fixture.id}] deep recommended action drifted from decision ${deep.decision}`
+      )
       assert(
         !(
           deep.findings.some((item) => /every acceptance criterion/i.test(item)) &&

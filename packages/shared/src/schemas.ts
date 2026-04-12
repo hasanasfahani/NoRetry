@@ -24,6 +24,12 @@ export const AfterDecisionSchema = z.enum([
   "Likely wrong direction",
   "Not enough proof"
 ])
+export const RecommendedActionSchema = z.enum([
+  "PROCEED",
+  "SEND_PROMPT",
+  "VALIDATE_FIRST",
+  "RESTART_WITH_PROMPT"
+])
 export const ReviewCriterionSourceSchema = z.enum([
   "submitted_prompt",
   "definition_of_done",
@@ -267,12 +273,14 @@ export const ReviewContractSchema = z.object({
 
 export const NextPromptOutputSchema = z.object({
   next_prompt: z.string(),
-  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "resolve_contradiction"])
+  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "resolve_contradiction"]),
+  next_prompt_explanation: z.string().max(220).default(""),
+  expected_outcome: z.string().max(220).default("")
 })
 
 export const HelpfulFeedbackSchema = z.object({
   helpful: z.boolean().nullable().default(null),
-  next_prompt_useful: z.boolean().nullable().default(null)
+  next_prompt_success: z.boolean().nullable().default(null)
 })
 
 export const AfterAnalysisResultSchema = z.object({
@@ -283,12 +291,15 @@ export const AfterAnalysisResultSchema = z.object({
   confidence_reasons: z.array(z.string().max(180)).max(3).default([]),
   inspection_depth: z.enum(["summary_only", "targeted_text", "targeted_code"]).default("summary_only"),
   decision: AfterDecisionSchema,
+  recommended_action: RecommendedActionSchema,
   why_bullets: z.array(z.string().max(220)).max(3).default([]),
   next_action: z.string().max(180).default(""),
   findings: z.array(z.string()).max(3).default([]),
   issues: z.array(z.string()).max(6).default([]),
   next_prompt: z.string(),
   prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "resolve_contradiction"]),
+  next_prompt_explanation: z.string().max(220).default(""),
+  expected_outcome: z.string().max(220).default(""),
   stage_1: Stage1OutputSchema,
   stage_2: Stage2OutputSchema,
   verdict: VerdictOutputSchema,
@@ -304,7 +315,7 @@ export const AfterAnalysisResultSchema = z.object({
   response_summary: ResponsePreprocessorOutputSchema,
   helpful_feedback: HelpfulFeedbackSchema.default({
     helpful: null,
-    next_prompt_useful: null
+    next_prompt_success: null
   }),
   used_fallback_intent: z.boolean().default(false),
   token_usage_total: z.number().int().min(0).default(0)

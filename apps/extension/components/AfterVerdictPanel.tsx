@@ -10,7 +10,8 @@ type AfterVerdictPanelProps = {
   displayedReviewMode: "quick" | "deep"
   deepDeltaNote?: string
   afterHelpfulFeedback: boolean | null
-  afterNextPromptUsefulFeedback: boolean | null
+  afterNextPromptSuccessFeedback: boolean | null
+  afterPromptActionTaken: boolean
   nextStepStarted: boolean
   planningGoal: string
   planningGoalNotice: string
@@ -40,7 +41,7 @@ type AfterVerdictPanelProps = {
   onCopyNextPrompt: () => void
   onProofDetailsExpanded: () => void
   onHelpfulFeedback: (helpful: boolean) => void
-  onNextPromptUsefulFeedback: (useful: boolean) => void
+  onNextPromptSuccessFeedback: (success: boolean) => void
   onStartNextStep: () => void
   onPlanningGoalChange: (value: string) => void
   onSuggestedDirectionClick: (chipId: string) => void
@@ -150,6 +151,34 @@ function confidenceTitle(confidence: AfterAnalysisResult["confidence"]) {
       return "Medium"
     default:
       return "Low"
+  }
+}
+
+function recommendedActionLabel(action: AfterAnalysisResult["recommended_action"]) {
+  switch (action) {
+    case "PROCEED":
+      return "Continue, no changes needed"
+    case "SEND_PROMPT":
+      return "Send this prompt before continuing"
+    case "VALIDATE_FIRST":
+      return "Validate this before proceeding"
+    case "RESTART_WITH_PROMPT":
+      return "Restart with this prompt"
+    default:
+      return "Validate this before proceeding"
+  }
+}
+
+function decisionSupportLabel(decision: AfterAnalysisResult["decision"]) {
+  switch (decision) {
+    case "Needs refinement":
+      return "Stop here and tighten the next move before you retry."
+    case "Likely wrong direction":
+      return "Stop here and reset the assistant back to the requested scope."
+    case "Not enough proof":
+      return "This looks plausible, but you still need proof before continuing."
+    default:
+      return "This looks safe enough to continue without another broad retry."
   }
 }
 
@@ -342,12 +371,18 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
   const promptStrategyDisplayLabel = promptStrategyLabel(props.verdict.prompt_strategy)
   const decisionLabel = props.verdict.decision ?? "Not enough proof"
+  const recommendedAction = props.verdict.recommended_action ?? "VALIDATE_FIRST"
+  const recommendedActionText = recommendedActionLabel(recommendedAction)
   const confidenceLabel = props.verdict.confidence_label ?? confidenceTitle(props.verdict.confidence)
   const confidenceReasons = props.verdict.confidence_reasons ?? []
   const whyBullets = props.verdict.why_bullets ?? []
   const checkedArtifacts = props.verdict.checked_artifacts ?? []
   const uncheckedArtifacts = props.verdict.unchecked_artifacts ?? []
   const blockedOrUnprovenItems = props.verdict.blocked_or_unproven_items ?? []
+  const nextPromptExplanation = props.verdict.next_prompt_explanation ?? ""
+  const expectedOutcome = props.verdict.expected_outcome ?? ""
+  const decisionSupportText = decisionSupportLabel(decisionLabel)
+  const showPromptAsPrimaryAction = recommendedAction !== "PROCEED"
   const deepReviewLimitedHint = ""
   const deepReviewEvidenceItems =
     activeReviewMode === "deep"
@@ -679,6 +714,12 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <span style={styles.badge(decisionTone.bg, decisionTone.fg)}>
                 {isPlannerOnlyState ? "No answer yet" : decisionLabel}
               </span>
+              {!isPlannerOnlyState ? (
+                <>
+                  <p style={styles.recommendedActionLine}>👉 Recommended: {recommendedActionText}</p>
+                  <p style={styles.recommendedActionSupport}>{decisionSupportText}</p>
+                </>
+              ) : null}
             </div>
             <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
               x
@@ -744,18 +785,39 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               </div>
               <span style={styles.strategyBadge}>{promptStrategyDisplayLabel}</span>
             </div>
-            <div style={styles.promptHeroCard}>
-              <pre style={styles.promptHeroText}>{props.verdict.next_prompt}</pre>
-            </div>
+            {showPromptAsPrimaryAction && nextPromptExplanation ? (
+              <div style={styles.promptSupportBlock}>
+                <p style={styles.promptSupportTitle}>Why this prompt</p>
+                <p style={styles.promptSupportBody}>{nextPromptExplanation}</p>
+              </div>
+            ) : null}
+            {showPromptAsPrimaryAction && expectedOutcome ? (
+              <div style={styles.promptSupportBlock}>
+                <p style={styles.promptSupportTitle}>Expected outcome</p>
+                <p style={styles.promptSupportBody}>{expectedOutcome}</p>
+              </div>
+            ) : null}
+            {showPromptAsPrimaryAction ? (
+              <div style={styles.promptHeroCard}>
+                <pre style={styles.promptHeroText}>{props.verdict.next_prompt}</pre>
+              </div>
+            ) : (
+              <div style={styles.promptSupportBlock}>
+                <p style={styles.promptSupportTitle}>No prompt needed</p>
+                <p style={styles.promptSupportBody}>This answer looks safe enough to keep moving. Use the prompt only if you want an extra validation pass.</p>
+              </div>
+            )}
             <div style={styles.checklistActions}>
-              <button
-                type="button"
-                style={styles.copyButton}
-                onClick={props.onCopyNextPrompt}
-                disabled={!props.verdict.next_prompt.trim()}
-              >
-                Copy Next Prompt
-              </button>
+              {showPromptAsPrimaryAction ? (
+                <button
+                  type="button"
+                  style={styles.copyButton}
+                  onClick={props.onCopyNextPrompt}
+                  disabled={!props.verdict.next_prompt.trim()}
+                >
+                  Copy Recommended Prompt
+                </button>
+              ) : null}
               {showStartNextStep ? (
                 <button
                   type="button"
@@ -929,25 +991,28 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   No
                 </button>
               </div>
-              {props.afterHelpfulFeedback !== null ? (
+              {props.afterPromptActionTaken ? (
                 <>
-                  <p style={styles.feedbackPromptSecondary}>Was the next prompt useful?</p>
+                  <p style={styles.feedbackPromptSecondary}>Did this next prompt fix your issue?</p>
                   <div style={styles.feedbackActions}>
                     <button
                       type="button"
-                      style={styles.feedbackButton(props.afterNextPromptUsefulFeedback === true)}
-                      onClick={() => props.onNextPromptUsefulFeedback(true)}
+                      style={styles.feedbackButton(props.afterNextPromptSuccessFeedback === true)}
+                      onClick={() => props.onNextPromptSuccessFeedback(true)}
                     >
                       Yes
                     </button>
                     <button
                       type="button"
-                      style={styles.feedbackButton(props.afterNextPromptUsefulFeedback === false)}
-                      onClick={() => props.onNextPromptUsefulFeedback(false)}
+                      style={styles.feedbackButton(props.afterNextPromptSuccessFeedback === false)}
+                      onClick={() => props.onNextPromptSuccessFeedback(false)}
                     >
                       No
                     </button>
                   </div>
+                  {props.afterNextPromptSuccessFeedback === true ? (
+                    <p style={styles.reinforcementText}>Good — this likely avoided a bad retry.</p>
+                  ) : null}
                 </>
               ) : null}
             </div>
@@ -1237,6 +1302,23 @@ const styles = {
     lineHeight: 1.6,
     color: "rgba(241,245,249,0.86)"
   } as CSSProperties,
+  promptSupportBlock: {
+    marginTop: 12
+  } as CSSProperties,
+  promptSupportTitle: {
+    margin: 0,
+    fontSize: 12,
+    fontWeight: 800,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase",
+    color: "rgba(199,210,254,0.92)"
+  } as CSSProperties,
+  promptSupportBody: {
+    margin: "4px 0 0",
+    fontSize: 13,
+    lineHeight: 1.55,
+    color: "rgba(241,245,249,0.84)"
+  } as CSSProperties,
   strategyBadge: {
     display: "inline-flex",
     alignItems: "center",
@@ -1380,6 +1462,19 @@ const styles = {
     cursor: "pointer",
     padding: 2,
     lineHeight: 1
+  } as CSSProperties,
+  recommendedActionLine: {
+    margin: "10px 0 0",
+    fontSize: 14,
+    lineHeight: 1.5,
+    fontWeight: 800,
+    color: "#0f172a"
+  } as CSSProperties,
+  recommendedActionSupport: {
+    margin: "6px 0 0",
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#475569"
   } as CSSProperties,
   block: {
     marginBottom: 14
@@ -1624,6 +1719,13 @@ const styles = {
     fontSize: 13,
     fontWeight: 700,
     color: "#334155"
+  } as CSSProperties,
+  reinforcementText: {
+    margin: "6px 0 0",
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: "#166534",
+    fontWeight: 700
   } as CSSProperties,
   feedbackActions: {
     display: "flex",

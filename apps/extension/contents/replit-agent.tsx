@@ -162,7 +162,8 @@ export default function PromptOptimizerApp() {
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
   const [afterDisplayedReviewMode, setAfterDisplayedReviewMode] = useState<"quick" | "deep">("quick")
   const [afterHelpfulFeedback, setAfterHelpfulFeedback] = useState<boolean | null>(null)
-  const [afterNextPromptUsefulFeedback, setAfterNextPromptUsefulFeedback] = useState<boolean | null>(null)
+  const [afterNextPromptSuccessFeedback, setAfterNextPromptSuccessFeedback] = useState<boolean | null>(null)
+  const [afterPromptActionTaken, setAfterPromptActionTaken] = useState(false)
   const [afterLoadingProgress, setAfterLoadingProgress] = useState<{
     percent: number
     label: string
@@ -618,20 +619,21 @@ export default function PromptOptimizerApp() {
   }
 
   function recordAfterExperienceEvent(input: {
-    eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt"
+    eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt_success"
     helpful?: boolean
-    nextPromptUseful?: boolean
+    nextPromptSuccess?: boolean
   }) {
     if (!afterAttempt || !afterVerdict) return
     void appendAfterExperienceEvent({
       eventType: input.eventType,
       attemptId: afterAttempt.attempt_id,
       decision: afterVerdict.decision,
+      recommendedAction: afterVerdict.recommended_action,
       confidence: afterVerdict.confidence,
       promptStrategy: afterVerdict.prompt_strategy,
       reviewMode: afterDisplayedReviewMode,
       userFeedbackHelpful: input.helpful,
-      userFeedbackNextPromptUseful: input.nextPromptUseful
+      userFeedbackNextPromptSuccess: input.nextPromptSuccess
     })
   }
 
@@ -1048,7 +1050,8 @@ export default function PromptOptimizerApp() {
 
   useEffect(() => {
     setAfterHelpfulFeedback(afterVerdict?.helpful_feedback?.helpful ?? null)
-    setAfterNextPromptUsefulFeedback(afterVerdict?.helpful_feedback?.next_prompt_useful ?? null)
+    setAfterNextPromptSuccessFeedback(afterVerdict?.helpful_feedback?.next_prompt_success ?? null)
+    setAfterPromptActionTaken(false)
   }, [afterVerdict?.next_prompt, afterVerdict?.decision, afterVerdict?.confidence])
 
   useEffect(() => {
@@ -1779,6 +1782,7 @@ export default function PromptOptimizerApp() {
   async function handleCopyAfterNextPrompt() {
     if (!afterVerdict?.next_prompt?.trim()) return
     await navigator.clipboard.writeText(afterVerdict.next_prompt.trim())
+    setAfterPromptActionTaken(true)
     recordAfterExperienceEvent({ eventType: "copy_next_prompt" })
   }
 
@@ -1800,19 +1804,23 @@ export default function PromptOptimizerApp() {
     recordAfterExperienceEvent({ eventType: "feedback_helpful", helpful })
   }
 
-  function handleAfterNextPromptUsefulFeedback(useful: boolean) {
-    setAfterNextPromptUsefulFeedback(useful)
+  function handleAfterNextPromptSuccessFeedback(success: boolean) {
+    setAfterNextPromptSuccessFeedback(success)
     if (afterVerdict) {
       setAfterVerdict({
         ...afterVerdict,
         helpful_feedback: {
           ...afterVerdict.helpful_feedback,
           helpful: afterHelpfulFeedback,
-          next_prompt_useful: useful
+          next_prompt_success: success
         }
       })
     }
-    recordAfterExperienceEvent({ eventType: "feedback_next_prompt", helpful: afterHelpfulFeedback ?? undefined, nextPromptUseful: useful })
+    recordAfterExperienceEvent({
+      eventType: "feedback_next_prompt_success",
+      helpful: afterHelpfulFeedback ?? undefined,
+      nextPromptSuccess: success
+    })
   }
 
   async function handleStartNextStep() {
@@ -2174,6 +2182,7 @@ export default function PromptOptimizerApp() {
     if (!draftSnapshot.exists || !afterNextPromptReady || !afterNextPromptDraft.trim()) return
 
     const normalizedNextPrompt = afterNextPromptDraft.trim()
+    setAfterPromptActionTaken(true)
     lastStablePromptValueRef.current = normalizedNextPrompt
     getActiveSurfaceAdapter().writeDraftPrompt(normalizedNextPrompt)
     const sourcePrompt = promptPreview || getCurrentDraftSnapshot().text
@@ -2854,7 +2863,8 @@ export default function PromptOptimizerApp() {
           displayedReviewMode={afterDisplayedReviewMode}
           deepDeltaNote={deepDeltaNote}
           afterHelpfulFeedback={afterHelpfulFeedback}
-          afterNextPromptUsefulFeedback={afterNextPromptUsefulFeedback}
+          afterNextPromptSuccessFeedback={afterNextPromptSuccessFeedback}
+          afterPromptActionTaken={afterPromptActionTaken}
           nextStepStarted={afterNextStepStarted}
           planningGoal={afterPlanningGoal}
           planningGoalNotice={planningGoalNotice}
@@ -2884,7 +2894,7 @@ export default function PromptOptimizerApp() {
           onCopyNextPrompt={() => void handleCopyAfterNextPrompt()}
           onProofDetailsExpanded={() => handleAfterProofDetailsExpanded()}
           onHelpfulFeedback={(helpful) => handleAfterHelpfulFeedback(helpful)}
-          onNextPromptUsefulFeedback={(useful) => handleAfterNextPromptUsefulFeedback(useful)}
+          onNextPromptSuccessFeedback={(success) => handleAfterNextPromptSuccessFeedback(success)}
           onStartNextStep={() => void handleStartNextStep()}
           onPlanningGoalChange={setAfterPlanningGoal}
           onSuggestedDirectionClick={(chipId) => void handleSuggestedDirectionClick(chipId)}
