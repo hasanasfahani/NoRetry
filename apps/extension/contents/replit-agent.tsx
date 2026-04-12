@@ -87,6 +87,7 @@ import {
   writePromptValue
 } from "../lib/replit"
 import {
+  appendAfterExperienceEvent,
   appendDeepArtifactEvent,
   deriveProjectMemoryIdentity,
   getAfterReviewCache,
@@ -160,6 +161,8 @@ export default function PromptOptimizerApp() {
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
   const [afterDisplayedReviewMode, setAfterDisplayedReviewMode] = useState<"quick" | "deep">("quick")
+  const [afterHelpfulFeedback, setAfterHelpfulFeedback] = useState<boolean | null>(null)
+  const [afterNextPromptUsefulFeedback, setAfterNextPromptUsefulFeedback] = useState<boolean | null>(null)
   const [afterLoadingProgress, setAfterLoadingProgress] = useState<{
     percent: number
     label: string
@@ -230,6 +233,7 @@ export default function PromptOptimizerApp() {
   const lastDraftTelemetrySignatureRef = useRef("")
   const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
+  const lastAfterDecisionLogKeyRef = useRef("")
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -610,6 +614,24 @@ export default function PromptOptimizerApp() {
       threadIdentity,
       responseIdentity: input.responseIdentity,
       route: window.location.href
+    })
+  }
+
+  function recordAfterExperienceEvent(input: {
+    eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt"
+    helpful?: boolean
+    nextPromptUseful?: boolean
+  }) {
+    if (!afterAttempt || !afterVerdict) return
+    void appendAfterExperienceEvent({
+      eventType: input.eventType,
+      attemptId: afterAttempt.attempt_id,
+      decision: afterVerdict.decision,
+      confidence: afterVerdict.confidence,
+      promptStrategy: afterVerdict.prompt_strategy,
+      reviewMode: afterDisplayedReviewMode,
+      userFeedbackHelpful: input.helpful,
+      userFeedbackNextPromptUseful: input.nextPromptUseful
     })
   }
 
@@ -1023,6 +1045,25 @@ export default function PromptOptimizerApp() {
     afterReviewCacheRef.current?.quick ?? null,
     afterReviewCacheRef.current?.deep ?? null
   )
+
+  useEffect(() => {
+    setAfterHelpfulFeedback(afterVerdict?.helpful_feedback?.helpful ?? null)
+    setAfterNextPromptUsefulFeedback(afterVerdict?.helpful_feedback?.next_prompt_useful ?? null)
+  }, [afterVerdict?.next_prompt, afterVerdict?.decision, afterVerdict?.confidence])
+
+  useEffect(() => {
+    if (!afterPanelOpen || !afterVerdict || !afterAttempt) return
+    const logKey = [
+      afterAttempt.attempt_id,
+      afterDisplayedReviewMode,
+      afterVerdict.decision,
+      afterVerdict.prompt_strategy,
+      afterVerdict.confidence
+    ].join("::")
+    if (lastAfterDecisionLogKeyRef.current === logKey) return
+    lastAfterDecisionLogKeyRef.current = logKey
+    recordAfterExperienceEvent({ eventType: "decision_shown" })
+  }, [afterPanelOpen, afterVerdict, afterAttempt, afterDisplayedReviewMode])
 
   useEffect(() => {
     if (!isSupportedPromptPage()) return
@@ -1733,6 +1774,45 @@ export default function PromptOptimizerApp() {
       stopAfterLoadingProgress()
       setIsEvaluatingAfterResponse(false)
     }
+  }
+
+  async function handleCopyAfterNextPrompt() {
+    if (!afterVerdict?.next_prompt?.trim()) return
+    await navigator.clipboard.writeText(afterVerdict.next_prompt.trim())
+    recordAfterExperienceEvent({ eventType: "copy_next_prompt" })
+  }
+
+  function handleAfterProofDetailsExpanded() {
+    recordAfterExperienceEvent({ eventType: "popup_expanded" })
+  }
+
+  function handleAfterHelpfulFeedback(helpful: boolean) {
+    setAfterHelpfulFeedback(helpful)
+    if (afterVerdict) {
+      setAfterVerdict({
+        ...afterVerdict,
+        helpful_feedback: {
+          ...afterVerdict.helpful_feedback,
+          helpful
+        }
+      })
+    }
+    recordAfterExperienceEvent({ eventType: "feedback_helpful", helpful })
+  }
+
+  function handleAfterNextPromptUsefulFeedback(useful: boolean) {
+    setAfterNextPromptUsefulFeedback(useful)
+    if (afterVerdict) {
+      setAfterVerdict({
+        ...afterVerdict,
+        helpful_feedback: {
+          ...afterVerdict.helpful_feedback,
+          helpful: afterHelpfulFeedback,
+          next_prompt_useful: useful
+        }
+      })
+    }
+    recordAfterExperienceEvent({ eventType: "feedback_next_prompt", helpful: afterHelpfulFeedback ?? undefined, nextPromptUseful: useful })
   }
 
   async function handleStartNextStep() {
@@ -2773,6 +2853,8 @@ export default function PromptOptimizerApp() {
           codeAnalysisMode={codeAnalysisMode}
           displayedReviewMode={afterDisplayedReviewMode}
           deepDeltaNote={deepDeltaNote}
+          afterHelpfulFeedback={afterHelpfulFeedback}
+          afterNextPromptUsefulFeedback={afterNextPromptUsefulFeedback}
           nextStepStarted={afterNextStepStarted}
           planningGoal={afterPlanningGoal}
           planningGoalNotice={planningGoalNotice}
@@ -2799,6 +2881,10 @@ export default function PromptOptimizerApp() {
           isSavingProjectMemory={isSavingProjectMemory}
           onRunDeepAnalysis={() => void handleRunDeepAnalysis()}
           onSelectCodeAnalysisMode={(mode) => void handleSelectCodeAnalysisMode(mode)}
+          onCopyNextPrompt={() => void handleCopyAfterNextPrompt()}
+          onProofDetailsExpanded={() => handleAfterProofDetailsExpanded()}
+          onHelpfulFeedback={(helpful) => handleAfterHelpfulFeedback(helpful)}
+          onNextPromptUsefulFeedback={(useful) => handleAfterNextPromptUsefulFeedback(useful)}
           onStartNextStep={() => void handleStartNextStep()}
           onPlanningGoalChange={setAfterPlanningGoal}
           onSuggestedDirectionClick={(chipId) => void handleSuggestedDirectionClick(chipId)}

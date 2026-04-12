@@ -418,9 +418,18 @@ async function main() {
         `[${fixture.id}] deep confidence drifted: expected ${fixture.expectedDeepConfidence}, got ${deep.confidence}`
       )
       assert(
-        CONFIDENCE_RANK[deep.confidence] >= CONFIDENCE_RANK[quick.confidence],
-        `[${fixture.id}] deep confidence regressed below quick`
+        CONFIDENCE_RANK[deep.confidence] >= CONFIDENCE_RANK[quick.confidence] ||
+          deep.decision === "Not enough proof" ||
+          deep.next_prompt_output.prompt_strategy === "resolve_contradiction",
+        `[${fixture.id}] deep confidence regressed below quick without a proof-boundary or contradiction reason`
       )
+      assert(Boolean(quick.decision), `[${fixture.id}] quick decision is missing`)
+      assert(Boolean(deep.decision), `[${fixture.id}] deep decision is missing`)
+      assert(deep.why_bullets.length > 0, `[${fixture.id}] deep why bullets are missing`)
+      assert(deep.checked_artifacts.length > 0, `[${fixture.id}] deep checked artifacts are missing`)
+      assert(deep.confidence_reasons.length > 0, `[${fixture.id}] deep confidence reasons are missing`)
+      assert(Boolean(deep.next_action.trim()), `[${fixture.id}] deep next action is missing`)
+      assert(Boolean(deep.next_prompt.trim()), `[${fixture.id}] deep next prompt is missing`)
       assert(
         !(
           deep.findings.some((item) => /every acceptance criterion/i.test(item)) &&
@@ -442,12 +451,28 @@ async function main() {
           `[${fixture.id}] deep success should produce a validate next prompt, got ${deep.next_prompt_output.prompt_strategy}`
         )
         assert(
+          deep.decision === "Safe to proceed",
+          `[${fixture.id}] deep success should map to Safe to proceed, got ${deep.decision}`
+        )
+        assert(
           deep.findings.every((item) => !/could not|does not clearly show|remain unverified/i.test(item)),
           `[${fixture.id}] deep success still contains unresolved-language findings: ${JSON.stringify(deep.findings)}`
         )
         assert(
           deep.stage_2.analysis_notes.every((item) => !/could not|does not clearly show|remain unverified/i.test(item)),
           `[${fixture.id}] deep success still contains unresolved-language stage_2 notes: ${JSON.stringify(deep.stage_2.analysis_notes)}`
+        )
+      }
+      if (fixture.expectedBlockedCriteria?.length) {
+        assert(
+          deep.decision === "Not enough proof",
+          `[${fixture.id}] blocked deep review should map to Not enough proof, got ${deep.decision}`
+        )
+      }
+      if ((fixture.minDeepContradictions ?? 0) > 0) {
+        assert(
+          deep.next_prompt_output.prompt_strategy === "resolve_contradiction",
+          `[${fixture.id}] contradictory deep review should produce a resolve_contradiction prompt, got ${deep.next_prompt_output.prompt_strategy}`
         )
       }
     } catch (error) {

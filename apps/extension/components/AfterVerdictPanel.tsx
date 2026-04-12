@@ -9,6 +9,8 @@ type AfterVerdictPanelProps = {
   codeAnalysisMode: "quick" | "deep"
   displayedReviewMode: "quick" | "deep"
   deepDeltaNote?: string
+  afterHelpfulFeedback: boolean | null
+  afterNextPromptUsefulFeedback: boolean | null
   nextStepStarted: boolean
   planningGoal: string
   planningGoalNotice: string
@@ -35,6 +37,10 @@ type AfterVerdictPanelProps = {
   recentlyAnsweredQuestionId: string | null
   onRunDeepAnalysis: () => void
   onSelectCodeAnalysisMode: (mode: "quick" | "deep") => void
+  onCopyNextPrompt: () => void
+  onProofDetailsExpanded: () => void
+  onHelpfulFeedback: (helpful: boolean) => void
+  onNextPromptUsefulFeedback: (useful: boolean) => void
   onStartNextStep: () => void
   onPlanningGoalChange: (value: string) => void
   onSuggestedDirectionClick: (chipId: string) => void
@@ -105,6 +111,32 @@ function userFacingEvidenceLabel(confidence: AfterAnalysisResult["confidence"]) 
       return "moderate"
     default:
       return "limited"
+  }
+}
+
+function toneForDecision(decision: AfterAnalysisResult["decision"]) {
+  switch (decision) {
+    case "Safe to proceed":
+      return { bg: "#dcfce7", fg: "#166534", border: "rgba(22,101,52,0.16)" }
+    case "Likely wrong direction":
+      return { bg: "#fee2e2", fg: "#b91c1c", border: "rgba(185,28,28,0.16)" }
+    case "Needs refinement":
+      return { bg: "#fef3c7", fg: "#b45309", border: "rgba(180,83,9,0.16)" }
+    default:
+      return { bg: "#e0e7ff", fg: "#4338ca", border: "rgba(67,56,202,0.16)" }
+  }
+}
+
+function promptStrategyLabel(strategy: AfterAnalysisResult["prompt_strategy"]) {
+  switch (strategy) {
+    case "validate":
+      return "Validate"
+    case "fix_missing":
+      return "Fix missing part"
+    case "narrow_scope":
+      return "Narrow scope"
+    default:
+      return "Resolve contradiction"
   }
 }
 
@@ -262,9 +294,11 @@ function collapseForPreview(value: string, threshold = 220) {
 export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const otherOption = "Other"
   const [summaryExpanded, setSummaryExpanded] = useState(false)
+  const [detailsExpanded, setDetailsExpanded] = useState(false)
   const [expandedChecklistLabels, setExpandedChecklistLabels] = useState<Record<string, boolean>>({})
   const tone = toneForStatus(props.verdict.status)
   const statusLabel = userFacingStatusLabel(props.verdict.status)
+  const decisionTone = toneForDecision(props.verdict.decision)
   const isInitialChecking =
     props.isEvaluating &&
     !props.isDeepAnalyzing &&
@@ -293,6 +327,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const activeReviewMode = props.displayedReviewMode
   const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
+  const promptStrategyDisplayLabel = promptStrategyLabel(props.verdict.prompt_strategy)
   const deepReviewLimitedHint = ""
   const deepReviewEvidenceItems =
     activeReviewMode === "deep"
@@ -381,6 +416,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   useEffect(() => {
     setSummaryExpanded(false)
   }, [summarySentence])
+
+  useEffect(() => {
+    setDetailsExpanded(false)
+  }, [props.verdict.decision, props.verdict.next_prompt, props.displayedReviewMode])
 
   useEffect(() => {
     if (!props.nextStepStarted || !nextStepSectionRef.current) return
@@ -617,45 +656,51 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
           <div style={styles.header}>
             <div>
               <p style={styles.eyebrow}>After response</p>
-            <span style={styles.badge(tone.badgeBg, tone.badgeFg)}>
-              {isPlannerOnlyState ? "No answer yet" : statusLabel}
-            </span>
+              <span style={styles.badge(decisionTone.bg, decisionTone.fg)}>
+                {isPlannerOnlyState ? "No answer yet" : props.verdict.decision}
+              </span>
             </div>
             <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
               x
             </button>
           </div>
 
+          <div style={styles.footer}>
+            <div style={styles.confidenceBlock}>
+              <p style={styles.statusMeta}>
+                <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
+                  Confidence: {props.verdict.confidence_label}
+                </span>
+                <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
+                  Review: {reviewTone.label}
+                </span>
+                <span style={styles.metaChip("#eff6ff", "#1d4ed8", "rgba(29,78,216,0.16)")}>
+                  Strategy: {promptStrategyDisplayLabel}
+                </span>
+              </p>
+              {props.verdict.confidence_reasons.length ? (
+                <p style={styles.statusHint}>{props.verdict.confidence_reasons[0]}</p>
+              ) : shouldShowDeepReviewEvidenceHint ? (
+                <p style={styles.statusHint}>{deepReviewEvidenceHint}</p>
+              ) : null}
+            </div>
+          </div>
+
           <div style={styles.block}>
-            <p style={styles.blockTitle}>Analysis Summary</p>
+            <p style={styles.blockTitle}>Why</p>
             {hasRealReview ? (
-              <p style={styles.summaryContext}>Based on your latest submitted prompt and latest visible answer.</p>
+              <p style={styles.summaryContext}>Decide whether to trust this answer or refine it before you retry.</p>
             ) : isPlannerOnlyState ? (
               <p style={styles.summaryContext}>NoRetry is ready to help shape the next prompt before any answer exists.</p>
             ) : null}
-            <div style={styles.summaryRow}>
-              <p style={styles.summarySentence}>
-                {displayedSummarySentence}
-                {props.isEvaluating && !props.isDeepAnalyzing ? (
-                  <span style={styles.inlinePulseWrap}>
-                    <span style={styles.pulseBadge}>
-                      <span style={styles.pulseInner}>
-                        <LightningPulseIcon />
-                      </span>
-                    </span>
-                  </span>
-                ) : null}
-              </p>
-            </div>
-            {summaryNeedsExpand ? (
-              <button
-                type="button"
-                style={styles.expandButton}
-                onClick={() => setSummaryExpanded((current) => !current)}
-              >
-                {summaryExpanded ? "See less" : "See more"}
-              </button>
-            ) : null}
+            <ul style={styles.decisionBullets}>
+              {(props.verdict.why_bullets.length ? props.verdict.why_bullets : [displayedSummarySentence]).slice(0, 3).map((item) => (
+                <li key={item} style={styles.decisionBulletItem}>
+                  <span style={styles.leadingBullet}>•</span>
+                  <span style={styles.listText}>{item}</span>
+                </li>
+              ))}
+            </ul>
             {shouldShowLoadingProgress ? (
               <div style={styles.loadingProgressWrap}>
                 <div style={styles.loadingProgressMeta}>
@@ -671,93 +716,223 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             ) : null}
           </div>
 
-          <div style={styles.footer}>
-            <div style={styles.confidenceBlock}>
-              <p style={styles.blockTitle}>Analysis Status</p>
-              <p style={styles.statusMeta}>
-                <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
-                  Evidence: {evidenceLabel}
-                </span>
-                <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
-                  Review: {reviewTone.label}
-                </span>
-              </p>
-              {shouldShowDeepReviewEvidenceHint ? <p style={styles.statusHint}>{deepReviewEvidenceHint}</p> : null}
-              {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
+          <div style={styles.nextActionCard}>
+            <div style={styles.nextActionHeader}>
+              <div>
+                <p style={styles.blockTitle}>Next action</p>
+                <p style={styles.nextActionCopy}>{props.verdict.next_action}</p>
+              </div>
+              <span style={styles.strategyBadge}>{promptStrategyDisplayLabel}</span>
             </div>
-          </div>
-        </div>
-
-        {checklistItems.length ? (
-          <div style={styles.subtleSurface}>
-            <p style={styles.criteriaCaption}>Checked against your submitted prompt</p>
-            {activeReviewMode === "deep" && props.deepDeltaNote ? (
-              <p style={styles.criteriaNote}>{props.deepDeltaNote}</p>
-            ) : null}
-            {activeReviewMode === "deep" && deepReviewEvidenceHint ? (
-              <p style={styles.criteriaNote}>{deepReviewEvidenceHint}</p>
-            ) : null}
-            <ul style={styles.list}>
-              {checklistItems.map((item) => (
-                <li key={item.label} style={styles.listItem}>
-                  <span style={styles.leadingBullet}>•</span>
-                  <span style={styles.listText}>
-                    {expandedChecklistLabels[item.label] || !needsExpansionControl(item.label, 110)
-                      ? item.label
-                      : collapseForPreview(item.label, 110)}
-                    <span style={styles.inlineMarker}> {item.marker}</span>
-                    {needsExpansionControl(item.label, 110) ? (
-                      <button
-                        type="button"
-                        style={styles.inlineExpandButton}
-                        onClick={() =>
-                          setExpandedChecklistLabels((current) => ({
-                            ...current,
-                            [item.label]: !current[item.label]
-                          }))
-                        }
-                      >
-                        {expandedChecklistLabels[item.label] ? "See less" : "See more"}
-                      </button>
-                    ) : null}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <div style={styles.promptHeroCard}>
+              <pre style={styles.promptHeroText}>{props.verdict.next_prompt}</pre>
+            </div>
             <div style={styles.checklistActions}>
-              {showModeToggle ? (
-                <div style={styles.modeToggle}>
-                  <button
-                    type="button"
-                    style={styles.modeButton(activeReviewMode === "quick")}
-                    onClick={() => props.onSelectCodeAnalysisMode("quick")}
-                    disabled={props.isEvaluating || props.isDeepAnalyzing}
-                  >
-                    Quick
-                  </button>
-                  <button
-                    type="button"
-                    style={styles.modeButton(activeReviewMode === "deep")}
-                    onClick={() => props.onSelectCodeAnalysisMode("deep")}
-                    disabled={props.isEvaluating || props.isDeepAnalyzing}
-                  >
-                    {props.isDeepAnalyzing && activeReviewMode === "deep" ? "Digging deeper..." : "Deep"}
-                  </button>
-                </div>
-              ) : null}
+              <button
+                type="button"
+                style={styles.copyButton}
+                onClick={props.onCopyNextPrompt}
+                disabled={!props.verdict.next_prompt.trim()}
+              >
+                Copy Next Prompt
+              </button>
               {showStartNextStep ? (
                 <button
                   type="button"
-                  style={styles.copyButton}
+                  style={styles.secondaryButton}
                   onClick={props.onStartNextStep}
                   disabled={props.isEvaluating || props.isDeepAnalyzing}
                 >
-                  Start Next Step
+                  Refine it further
                 </button>
               ) : null}
             </div>
           </div>
-        ) : null}
+        </div>
+
+        <div style={styles.subtleSurface}>
+          <button
+            type="button"
+            style={styles.expandDetailsButton}
+            onClick={() => {
+              const nextExpanded = !detailsExpanded
+              setDetailsExpanded(nextExpanded)
+              if (nextExpanded) props.onProofDetailsExpanded()
+            }}
+          >
+            {detailsExpanded ? "Hide proof details" : "Show proof details"}
+          </button>
+          {detailsExpanded ? (
+            <>
+              <div style={styles.detailsBlock}>
+                <p style={styles.criteriaCaption}>Proof checked</p>
+                <p style={styles.criteriaNote}>
+                  Checked: {props.verdict.checked_artifacts.length ? props.verdict.checked_artifacts.join(", ") : "response only"}
+                </p>
+                <p style={styles.criteriaNote}>
+                  Not checked: {props.verdict.unchecked_artifacts.length ? props.verdict.unchecked_artifacts.join(", ") : "nothing important was left unchecked in this view"}
+                </p>
+              </div>
+
+              {props.verdict.blocked_or_unproven_items.length ? (
+                <div style={styles.detailsBlock}>
+                  <p style={styles.criteriaCaption}>Still blocked or unproven</p>
+                  <ul style={styles.list}>
+                    {props.verdict.blocked_or_unproven_items.map((item) => (
+                      <li key={item} style={styles.listItem}>
+                        <span style={styles.leadingBullet}>•</span>
+                        <span style={styles.listText}>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div style={styles.detailsBlock}>
+                <p style={styles.criteriaCaption}>Why confidence is {props.verdict.confidence_label.toLowerCase()}</p>
+                <ul style={styles.list}>
+                  {props.verdict.confidence_reasons.map((item) => (
+                    <li key={item} style={styles.listItem}>
+                      <span style={styles.leadingBullet}>•</span>
+                      <span style={styles.listText}>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {checklistItems.length ? (
+                <div style={styles.detailsBlock}>
+                  <p style={styles.criteriaCaption}>Checked against your submitted prompt</p>
+                  {activeReviewMode === "deep" && props.deepDeltaNote ? (
+                    <p style={styles.criteriaNote}>{props.deepDeltaNote}</p>
+                  ) : null}
+                  {activeReviewMode === "deep" && deepReviewEvidenceHint ? (
+                    <p style={styles.criteriaNote}>{deepReviewEvidenceHint}</p>
+                  ) : null}
+                  <ul style={styles.list}>
+                    {checklistItems.map((item) => (
+                      <li key={item.label} style={styles.listItem}>
+                        <span style={styles.leadingBullet}>•</span>
+                        <span style={styles.listText}>
+                          {expandedChecklistLabels[item.label] || !needsExpansionControl(item.label, 110)
+                            ? item.label
+                            : collapseForPreview(item.label, 110)}
+                          <span style={styles.inlineMarker}> {item.marker}</span>
+                          {needsExpansionControl(item.label, 110) ? (
+                            <button
+                              type="button"
+                              style={styles.inlineExpandButton}
+                              onClick={() =>
+                                setExpandedChecklistLabels((current) => ({
+                                  ...current,
+                                  [item.label]: !current[item.label]
+                                }))
+                              }
+                            >
+                              {expandedChecklistLabels[item.label] ? "See less" : "See more"}
+                            </button>
+                          ) : null}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div style={styles.detailsBlock}>
+                <p style={styles.criteriaCaption}>Analysis summary</p>
+                <p style={styles.summarySentence}>
+                  {displayedSummarySentence}
+                  {props.isEvaluating && !props.isDeepAnalyzing ? (
+                    <span style={styles.inlinePulseWrap}>
+                      <span style={styles.pulseBadge}>
+                        <span style={styles.pulseInner}>
+                          <LightningPulseIcon />
+                        </span>
+                      </span>
+                    </span>
+                  ) : null}
+                </p>
+                {summaryNeedsExpand ? (
+                  <button
+                    type="button"
+                    style={styles.expandButton}
+                    onClick={() => setSummaryExpanded((current) => !current)}
+                  >
+                    {summaryExpanded ? "See less" : "See more"}
+                  </button>
+                ) : null}
+                {shouldShowDeepReviewEvidenceHint ? <p style={styles.statusHint}>{deepReviewEvidenceHint}</p> : null}
+                {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
+                <p style={styles.statusHint}>Evidence level: {evidenceLabel}. Quick label: {statusLabel}.</p>
+              </div>
+            </>
+          ) : null}
+
+          <div style={styles.detailsFooter}>
+            {showModeToggle ? (
+              <div style={styles.modeToggle}>
+                <button
+                  type="button"
+                  style={styles.modeButton(activeReviewMode === "quick")}
+                  onClick={() => props.onSelectCodeAnalysisMode("quick")}
+                  disabled={props.isEvaluating || props.isDeepAnalyzing}
+                >
+                  Quick
+                </button>
+                <button
+                  type="button"
+                  style={styles.modeButton(activeReviewMode === "deep")}
+                  onClick={() => props.onSelectCodeAnalysisMode("deep")}
+                  disabled={props.isEvaluating || props.isDeepAnalyzing}
+                >
+                  {props.isDeepAnalyzing && activeReviewMode === "deep" ? "Digging deeper..." : "Deep"}
+                </button>
+              </div>
+            ) : null}
+
+            <div style={styles.feedbackCluster}>
+              <p style={styles.feedbackPrompt}>Did this actually help you avoid a bad retry?</p>
+              <div style={styles.feedbackActions}>
+                <button
+                  type="button"
+                  style={styles.feedbackButton(props.afterHelpfulFeedback === true)}
+                  onClick={() => props.onHelpfulFeedback(true)}
+                >
+                  Yes
+                </button>
+                <button
+                  type="button"
+                  style={styles.feedbackButton(props.afterHelpfulFeedback === false)}
+                  onClick={() => props.onHelpfulFeedback(false)}
+                >
+                  No
+                </button>
+              </div>
+              {props.afterHelpfulFeedback !== null ? (
+                <>
+                  <p style={styles.feedbackPromptSecondary}>Was the next prompt useful?</p>
+                  <div style={styles.feedbackActions}>
+                    <button
+                      type="button"
+                      style={styles.feedbackButton(props.afterNextPromptUsefulFeedback === true)}
+                      onClick={() => props.onNextPromptUsefulFeedback(true)}
+                    >
+                      Yes
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.feedbackButton(props.afterNextPromptUsefulFeedback === false)}
+                      onClick={() => props.onNextPromptUsefulFeedback(false)}
+                    >
+                      No
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
 
         {props.nextStepStarted ? (
           <div ref={nextStepSectionRef} style={styles.nextStepSection}>
@@ -1007,6 +1182,69 @@ const styles = {
     border: "1px solid rgba(148,163,184,0.12)",
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)"
   } as CSSProperties,
+  decisionBullets: {
+    margin: "10px 0 0",
+    padding: 0,
+    listStyle: "none",
+    display: "grid",
+    gap: 10
+  } as CSSProperties,
+  decisionBulletItem: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 10,
+    color: "#1e293b",
+    fontSize: 15,
+    lineHeight: 1.55
+  } as CSSProperties,
+  nextActionCard: {
+    marginTop: 16,
+    padding: 16,
+    borderRadius: 22,
+    background: "linear-gradient(180deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%)",
+    color: "#f8fafc",
+    boxShadow: "0 18px 36px rgba(15,23,42,0.16)"
+  } as CSSProperties,
+  nextActionHeader: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12
+  } as CSSProperties,
+  nextActionCopy: {
+    margin: "6px 0 0",
+    fontSize: 14,
+    lineHeight: 1.6,
+    color: "rgba(241,245,249,0.86)"
+  } as CSSProperties,
+  strategyBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "8px 12px",
+    borderRadius: 999,
+    background: "rgba(129,140,248,0.16)",
+    border: "1px solid rgba(165,180,252,0.22)",
+    color: "#c7d2fe",
+    fontSize: 12,
+    fontWeight: 800,
+    whiteSpace: "nowrap"
+  } as CSSProperties,
+  promptHeroCard: {
+    marginTop: 14,
+    padding: 14,
+    borderRadius: 18,
+    background: "rgba(15,23,42,0.34)",
+    border: "1px solid rgba(148,163,184,0.14)"
+  } as CSSProperties,
+  promptHeroText: {
+    margin: 0,
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 13,
+    lineHeight: 1.65,
+    color: "#f8fafc"
+  } as CSSProperties,
   contextSetupSurface: {
     display: "flex",
     flexDirection: "column",
@@ -1077,6 +1315,15 @@ const styles = {
     background: "rgba(255,255,255,0.72)",
     border: "1px solid rgba(148,163,184,0.12)"
   } as CSSProperties,
+  expandDetailsButton: {
+    border: "none",
+    background: "transparent",
+    color: "#4338ca",
+    fontSize: 14,
+    fontWeight: 800,
+    cursor: "pointer",
+    padding: 0
+  } as CSSProperties,
   header: {
     display: "flex",
     alignItems: "flex-start",
@@ -1140,6 +1387,11 @@ const styles = {
     fontSize: 12,
     lineHeight: 1.55,
     color: "#64748b"
+  } as CSSProperties,
+  detailsBlock: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTop: "1px solid rgba(148,163,184,0.14)"
   } as CSSProperties,
   summarySentence: {
     margin: 0,
@@ -1332,6 +1584,42 @@ const styles = {
     flexWrap: "wrap",
     marginTop: 16
   } as CSSProperties,
+  detailsFooter: {
+    marginTop: 18,
+    display: "grid",
+    gap: 16
+  } as CSSProperties,
+  feedbackCluster: {
+    display: "grid",
+    gap: 8
+  } as CSSProperties,
+  feedbackPrompt: {
+    margin: 0,
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#0f172a"
+  } as CSSProperties,
+  feedbackPromptSecondary: {
+    margin: "4px 0 0",
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#334155"
+  } as CSSProperties,
+  feedbackActions: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap"
+  } as CSSProperties,
+  feedbackButton: (active: boolean): CSSProperties => ({
+    border: active ? "1px solid rgba(79,70,229,0.28)" : "1px solid rgba(148,163,184,0.18)",
+    background: active ? "rgba(79,70,229,0.08)" : "#ffffff",
+    color: active ? "#4338ca" : "#334155",
+    borderRadius: 999,
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 800,
+    cursor: "pointer"
+  }),
   nextStepSection: {
     marginTop: 18,
     padding: 18,

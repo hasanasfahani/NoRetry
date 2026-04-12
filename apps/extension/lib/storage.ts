@@ -9,6 +9,7 @@ const PROJECT_MEMORY_PREFIX = "prompt-optimizer:project-memory:"
 const AFTER_REVIEW_CACHE_PREFIX = "prompt-optimizer:after-review:"
 const DEEP_ARTIFACT_TELEMETRY_PREFIX = "prompt-optimizer:deep-artifact-telemetry:"
 const GLOBAL_POPUP_TELEMETRY_KEY = `${DEEP_ARTIFACT_TELEMETRY_PREFIX}popup-global`
+const AFTER_EXPERIENCE_EVENT_LOG_KEY = "prompt-optimizer:after-experience-events"
 
 export type ProjectMemoryRecord = {
   projectKey: string
@@ -60,6 +61,18 @@ export type DeepArtifactTelemetryRecord = {
   events: DeepArtifactEventRecord[]
   popupSnapshots: PopupArtifactSnapshot[]
   updatedAt: string
+}
+
+export type AfterExperienceEventRecord = {
+  eventType: "decision_shown" | "copy_next_prompt" | "popup_expanded" | "feedback_helpful" | "feedback_next_prompt"
+  attemptId: string
+  decision: AfterAnalysisResult["decision"]
+  confidence: AfterAnalysisResult["confidence"]
+  promptStrategy: AfterAnalysisResult["prompt_strategy"]
+  reviewMode?: "quick" | "deep"
+  userFeedbackHelpful?: boolean
+  userFeedbackNextPromptUseful?: boolean
+  createdAt: string
 }
 
 export async function hasSeenOnboarding() {
@@ -280,4 +293,18 @@ export async function savePopupArtifactSnapshot(input: {
 export async function getGlobalPopupArtifactTelemetry() {
   return ((await storage.get<DeepArtifactTelemetryRecord>(GLOBAL_POPUP_TELEMETRY_KEY)) ??
     null) as DeepArtifactTelemetryRecord | null
+}
+
+export async function appendAfterExperienceEvent(
+  input: Omit<AfterExperienceEventRecord, "createdAt">
+) {
+  const existing = ((await storage.get<AfterExperienceEventRecord[]>(AFTER_EXPERIENCE_EVENT_LOG_KEY)) ??
+    []) as AfterExperienceEventRecord[]
+  const record: AfterExperienceEventRecord = {
+    ...input,
+    createdAt: new Date().toISOString()
+  }
+  const next = [...existing, record].slice(-120)
+  await storage.set(AFTER_EXPERIENCE_EVENT_LOG_KEY, next)
+  return record
 }

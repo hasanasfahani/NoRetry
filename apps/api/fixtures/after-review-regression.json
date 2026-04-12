@@ -17,7 +17,7 @@
     "expectedQuickStatus": "PARTIAL",
     "expectedDeepStatus": "PARTIAL",
     "expectedQuickConfidence": "medium",
-    "expectedDeepConfidence": "high",
+    "expectedDeepConfidence": "low",
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
@@ -232,7 +232,7 @@
     "expectedQuickStatus": "LIKELY_SUCCESS",
     "expectedDeepStatus": "PARTIAL",
     "expectedQuickConfidence": "medium",
-    "expectedDeepConfidence": "medium",
+    "expectedDeepConfidence": "low",
     "expectedCheckedArtifactTypes": [
       "response_text",
       "popup_state_snapshot",
@@ -278,7 +278,7 @@
     "expectedQuickStatus": "LIKELY_SUCCESS",
     "expectedDeepStatus": "PARTIAL",
     "expectedQuickConfidence": "medium",
-    "expectedDeepConfidence": "high",
+    "expectedDeepConfidence": "low",
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",

@@ -261,8 +261,21 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
   return AfterAnalysisResultSchema.parse({
     status: verdict.status,
     confidence: verdict.confidence,
+    confidence_label:
+      verdict.confidence === "high" ? "High" : verdict.confidence === "medium" ? "Medium" : "Low",
     confidence_reason: verdict.confidence_reason,
+    confidence_reasons: [verdict.confidence_reason].filter(Boolean),
     inspection_depth: "summary_only",
+    decision: verdict.status === "WRONG_DIRECTION" ? "Likely wrong direction" : verdict.status === "UNVERIFIED" ? "Not enough proof" : verdict.status === "PARTIAL" || verdict.status === "FAILED" ? "Needs refinement" : "Safe to proceed",
+    why_bullets: verdict.findings.slice(0, 3),
+    next_action:
+      verdict.status === "WRONG_DIRECTION"
+        ? "Send a narrower correction prompt before you retry."
+        : verdict.status === "PARTIAL" || verdict.status === "FAILED"
+          ? "Fix the missing part before you retry."
+          : verdict.status === "UNVERIFIED"
+            ? "Ask for narrower validation before you retry."
+            : "Use the next prompt only if you want an extra validation pass.",
     findings: verdict.findings,
     issues: verdict.issues,
     next_prompt: nextPromptOutput.next_prompt,
@@ -273,6 +286,9 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
     next_prompt_output: nextPromptOutput,
     acceptance_checklist: [],
     checked_artifact_types: [],
+    checked_artifacts: ["response"],
+    unchecked_artifacts: ["DOM signals", "interaction telemetry", "popup telemetry", "live runtime in the workspace"],
+    blocked_or_unproven_items: verdict.issues.slice(0, 6),
     deep_criterion_verifications: [],
     contradiction_count: 0,
     review_contract: {
@@ -282,6 +298,10 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
       criteria: []
     },
     response_summary: parsed.response_summary,
+    helpful_feedback: {
+      helpful: null,
+      next_prompt_useful: null
+    },
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal
   })

@@ -18,6 +18,12 @@ export const VerdictStatusSchema = z.enum([
   "WRONG_DIRECTION",
   "UNVERIFIED"
 ])
+export const AfterDecisionSchema = z.enum([
+  "Safe to proceed",
+  "Needs refinement",
+  "Likely wrong direction",
+  "Not enough proof"
+])
 export const ReviewCriterionSourceSchema = z.enum([
   "submitted_prompt",
   "definition_of_done",
@@ -261,28 +267,45 @@ export const ReviewContractSchema = z.object({
 
 export const NextPromptOutputSchema = z.object({
   next_prompt: z.string(),
-  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "retry_cleanly"])
+  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "resolve_contradiction"])
+})
+
+export const HelpfulFeedbackSchema = z.object({
+  helpful: z.boolean().nullable().default(null),
+  next_prompt_useful: z.boolean().nullable().default(null)
 })
 
 export const AfterAnalysisResultSchema = z.object({
   status: VerdictStatusSchema,
   confidence: AfterConfidenceSchema,
+  confidence_label: z.enum(["Low", "Medium", "High"]).default("Low"),
   confidence_reason: z.string().max(180).default(""),
+  confidence_reasons: z.array(z.string().max(180)).max(3).default([]),
   inspection_depth: z.enum(["summary_only", "targeted_text", "targeted_code"]).default("summary_only"),
+  decision: AfterDecisionSchema,
+  why_bullets: z.array(z.string().max(220)).max(3).default([]),
+  next_action: z.string().max(180).default(""),
   findings: z.array(z.string()).max(3).default([]),
   issues: z.array(z.string()).max(6).default([]),
   next_prompt: z.string(),
-  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "retry_cleanly"]),
+  prompt_strategy: z.enum(["validate", "fix_missing", "narrow_scope", "resolve_contradiction"]),
   stage_1: Stage1OutputSchema,
   stage_2: Stage2OutputSchema,
   verdict: VerdictOutputSchema,
   next_prompt_output: NextPromptOutputSchema,
   acceptance_checklist: z.array(AcceptanceChecklistItemSchema).max(6).default([]),
   checked_artifact_types: z.array(ArtifactTypeSchema).max(8).default([]),
+  checked_artifacts: z.array(z.string().max(120)).max(8).default([]),
+  unchecked_artifacts: z.array(z.string().max(120)).max(8).default([]),
+  blocked_or_unproven_items: z.array(z.string().max(240)).max(6).default([]),
   deep_criterion_verifications: z.array(DeepCriterionVerificationSchema).max(6).default([]),
   contradiction_count: z.number().int().min(0).default(0),
   review_contract: ReviewContractSchema,
   response_summary: ResponsePreprocessorOutputSchema,
+  helpful_feedback: HelpfulFeedbackSchema.default({
+    helpful: null,
+    next_prompt_useful: null
+  }),
   used_fallback_intent: z.boolean().default(false),
   token_usage_total: z.number().int().min(0).default(0)
 })

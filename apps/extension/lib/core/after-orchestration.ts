@@ -15,12 +15,17 @@ export function buildAfterPlaceholder(
   return {
     status: "UNVERIFIED",
     confidence: "low",
+    confidence_label: "Low",
     confidence_reason: issues[0] || "",
+    confidence_reasons: issues.slice(0, 3),
     inspection_depth: "summary_only",
+    decision: "Not enough proof",
+    why_bullets: [issues[0] || finding].filter(Boolean).slice(0, 3),
+    next_action: nextPrompt ? "Refine the next retry before you send it." : "Wait for a real answer, then analyze again.",
     findings: [finding],
     issues,
     next_prompt: nextPrompt,
-    prompt_strategy: "retry_cleanly",
+    prompt_strategy: "narrow_scope",
     stage_1: {
       assistant_action_summary: finding,
       claimed_evidence: [],
@@ -43,10 +48,13 @@ export function buildAfterPlaceholder(
     },
     next_prompt_output: {
       next_prompt: nextPrompt,
-      prompt_strategy: "retry_cleanly"
+      prompt_strategy: "narrow_scope"
     },
     acceptance_checklist: [],
     checked_artifact_types: [],
+    checked_artifacts: [],
+    unchecked_artifacts: [],
+    blocked_or_unproven_items: issues.slice(0, 6),
     deep_criterion_verifications: [],
     contradiction_count: 0,
     review_contract: {
@@ -69,6 +77,10 @@ export function buildAfterPlaceholder(
       uncertainty_signals: [],
       success_signals: [],
       failure_signals: []
+    },
+    helpful_feedback: {
+      helpful: null,
+      next_prompt_useful: null
     },
     used_fallback_intent: true,
     token_usage_total: 0

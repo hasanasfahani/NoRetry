@@ -1523,6 +1523,350 @@ function summarizeChecklistStatusForFinding(status: ChecklistItem["status"]) {
   return "left unresolved"
 }
 
+function friendlyArtifactLabel(type: ArtifactType) {
+  switch (type) {
+    case "response_text":
+      return "response"
+    case "response_code_blocks":
+      return "code blocks"
+    case "dom_observations":
+      return "DOM signals"
+    case "extension_event_trace":
+      return "interaction telemetry"
+    case "popup_state_snapshot":
+      return "popup telemetry"
+    case "visible_output_snippet":
+      return "visible output snippets"
+    case "visible_error_summary":
+      return "visible error summary"
+    case "visible_build_or_test_text":
+      return "visible build/test snippets"
+    case "visible_runtime_signals":
+      return "visible runtime signals"
+    case "changed_file_labels":
+      return "changed file labels"
+    default:
+      return String(type).replace(/_/g, " ")
+  }
+}
+
+function titleCaseConfidence(confidence: "low" | "medium" | "high") {
+  if (confidence === "high") return "High"
+  if (confidence === "medium") return "Medium"
+  return "Low"
+}
+
+function buildCheckedArtifactLabels(
+  deepAnalysisRequested: boolean,
+  bundle: NormalizedArtifactBundle,
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  if (deepAnalysisRequested) {
+    return dedupe(bundle.checkedArtifactTypes.map((type) => friendlyArtifactLabel(type)), 8)
+  }
+
+  const labels = ["response"]
+  if (responseSummary.has_code_blocks) labels.push("code blocks")
+  if (responseSummary.mentioned_files.length) labels.push("mentioned files")
+  return dedupe(labels, 8)
+}
+
+function buildUncheckedArtifactLabels(
+  deepAnalysisRequested: boolean,
+  bundle: NormalizedArtifactBundle,
+  reviewContract: ReviewContract
+) {
+  const unchecked: string[] = []
+  const checked = new Set(bundle.checkedArtifactTypes)
+  const needsEvidenceType = (evidenceType: DeepCriterionEvidenceType) =>
+    reviewContract.criteria.some((criterion) => {
+      const policy = evidencePolicyForCriterion(criterion.label)
+      return policy.primary.includes(evidenceType) || (policy.fallbackIfPrimaryUnavailable ?? []).includes(evidenceType)
+    })
+
+  if (!deepAnalysisRequested) {
+    return [
+      "DOM/UI signals",
+      "interaction telemetry",
+      "popup telemetry",
+      "live runtime in the workspace"
+    ]
+  }
+
+  if (needsEvidenceType("dom_ui_state") && !checked.has("dom_observations")) {
+    unchecked.push("visible UI state on the page")
+  }
+  if (needsEvidenceType("interaction_trace") && !checked.has("extension_event_trace")) {
+    unchecked.push("interaction telemetry for the user flow")
+  }
+  if (needsEvidenceType("popup_state") && !checked.has("popup_state_snapshot")) {
+    unchecked.push("popup-open behavior")
+  }
+  if (needsEvidenceType("runtime_error_state") && !checked.has("visible_runtime_signals") && !checked.has("visible_error_summary")) {
+    unchecked.push("live runtime behavior in the workspace")
+  }
+  if (needsEvidenceType("build_or_test_output") && !checked.has("visible_build_or_test_text")) {
+    unchecked.push("actual workspace build/test output")
+  }
+  if (checked.size > 0) {
+    unchecked.push("live runtime in the Replit workspace")
+  }
+
+  return dedupe(unchecked, 8)
+}
+
+function buildBlockedOrUnprovenItems(checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>) {
+  return checklist
+    .filter((item) => item.status !== "met")
+    .map((item) => normalizeCriterionLabel(item.label))
+    .slice(0, 6)
+}
+
+function buildDecisionNextPrompt(params: {
+  optimizedPrompt: string
+  reviewContract: ReviewContract
+  intent: AttemptIntent
+  decision: z.infer<typeof AfterPipelineResponseSchema>["decision"]
+  promptStrategy: z.infer<typeof NextPromptOutputSchema>["prompt_strategy"]
+  blockedOrUnprovenItems: string[]
+  contradictionCount: number
+  whyBullets: string[]
+}) {
+  const { reviewContract, intent, decision, promptStrategy, blockedOrUnprovenItems, contradictionCount, whyBullets } = params
+  const focusItems = blockedOrUnprovenItems.slice(0, 2)
+  const constraints = intent.constraints.filter(Boolean).slice(0, 3)
+  const goalLine = `Stay inside the original goal: ${reviewContract.goal}.`
+  const constraintsLine = constraints.length ? `Keep these constraints: ${constraints.join(" | ")}.` : ""
+  const focusLine = focusItems.length
+    ? `Focus only on these items:\n${focusItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
+    : "Focus only on the part that still lacks proof."
+
+  if (promptStrategy === "resolve_contradiction") {
+    return NextPromptOutputSchema.parse({
+      next_prompt: [
+        goalLine,
+        constraintsLine,
+        "Your last answer and the observed evidence do not agree.",
+        contradictionCount > 0 && whyBullets.length ? `Resolve this contradiction first: ${whyBullets[0]}` : "",
+        focusLine,
+        "Do not broaden scope. Either explain the mismatch clearly or make the smallest correction needed.",
+        "Then list the exact evidence that proves the corrected result."
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      prompt_strategy: promptStrategy
+    })
+  }
+
+  if (promptStrategy === "fix_missing") {
+    return NextPromptOutputSchema.parse({
+      next_prompt: [
+        goalLine,
+        constraintsLine,
+        "Fix only the missing part below. Do not rework the parts that already look correct.",
+        focusLine,
+        "After fixing it, tell me exactly what changed and what visible evidence proves each fixed item."
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      prompt_strategy: promptStrategy
+    })
+  }
+
+  if (promptStrategy === "narrow_scope") {
+    return NextPromptOutputSchema.parse({
+      next_prompt: [
+        goalLine,
+        constraintsLine,
+        "Return to the requested scope and ignore side work that does not directly satisfy it.",
+        focusLine,
+        "Give the minimum correction needed, then summarize the concrete evidence for that correction."
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      prompt_strategy: promptStrategy
+    })
+  }
+
+  return NextPromptOutputSchema.parse({
+    next_prompt: [
+      goalLine,
+      constraintsLine,
+      "Do not change the implementation yet. Validate only the still-unproven parts below.",
+      focusLine,
+      "For each item, say whether it is proven, what evidence supports it, or why it is still unproven."
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    prompt_strategy: "validate"
+  })
+}
+
+function buildDecisionPresentation(params: {
+  verdict: ReturnType<typeof VerdictOutputSchema.parse>
+  checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>
+  reviewContract: ReviewContract
+  verifications: z.infer<typeof DeepCriterionVerificationSchema>[]
+  contradictionCount: number
+  deepAnalysisRequested: boolean
+  bundle: NormalizedArtifactBundle
+  responseSummary: AfterPipelineRequest["response_summary"]
+  intent: AttemptIntent
+  usedFallbackIntent: boolean
+  detailInspection: ReturnType<typeof DetailInspectionSchema.parse>
+  optimizedPrompt: string
+}) {
+  const {
+    verdict,
+    checklist,
+    reviewContract,
+    verifications,
+    contradictionCount,
+    deepAnalysisRequested,
+    bundle,
+    responseSummary,
+    intent,
+    usedFallbackIntent,
+    detailInspection,
+    optimizedPrompt
+  } = params
+
+  const blockedItems = checklist.filter((item) => item.status === "blocked")
+  const missedItems = checklist.filter((item) => item.status === "missed")
+  const unresolvedItems = checklist.filter((item) => item.status === "not_sure")
+  const metItems = checklist.filter((item) => item.status === "met")
+  const coreBlocked = blockedItems.filter((item) => item.layer === "core")
+  const coreMissed = missedItems.filter((item) => item.layer === "core")
+  const allCriteriaMet = checklist.length > 0 && checklist.every((item) => item.status === "met")
+  const checkedArtifacts = buildCheckedArtifactLabels(deepAnalysisRequested, bundle, responseSummary)
+  const uncheckedArtifacts = buildUncheckedArtifactLabels(deepAnalysisRequested, bundle, reviewContract)
+  const blockedOrUnprovenItems = buildBlockedOrUnprovenItems(checklist)
+
+  let decision: z.infer<typeof AfterPipelineResponseSchema>["decision"] = "Needs refinement"
+  if (verdict.status === "WRONG_DIRECTION") {
+    decision = "Likely wrong direction"
+  } else if (verdict.status === "UNVERIFIED" || coreBlocked.length > 0 || (blockedItems.length > 0 && coreMissed.length === 0)) {
+    decision = "Not enough proof"
+  } else if ((verdict.status === "SUCCESS" || verdict.status === "LIKELY_SUCCESS") && allCriteriaMet && contradictionCount === 0) {
+    decision = "Safe to proceed"
+  } else if (verdict.status === "PARTIAL" || verdict.status === "FAILED") {
+    decision = "Needs refinement"
+  } else if (verdict.status === "LIKELY_SUCCESS") {
+    decision = blockedItems.length > 0 ? "Not enough proof" : "Safe to proceed"
+  }
+
+  let confidence: "low" | "medium" | "high" = "low"
+  const confidenceReasons: string[] = []
+  const evidenceRich =
+    bundle.checkedArtifactTypes.includes("dom_observations") ||
+    bundle.checkedArtifactTypes.includes("extension_event_trace") ||
+    bundle.checkedArtifactTypes.includes("popup_state_snapshot")
+
+  if (contradictionCount > 0) {
+    confidence = "low"
+    confidenceReasons.push("Artifact signals contradicted part of the answer.")
+  } else if (decision === "Safe to proceed" && allCriteriaMet && evidenceRich && blockedItems.length === 0 && !usedFallbackIntent) {
+    confidence = "high"
+    confidenceReasons.push("The answer aligned with all requested criteria.")
+    confidenceReasons.push("Available artifacts supported the claimed behavior.")
+    confidenceReasons.push("No contradictions were detected.")
+  } else if (decision === "Safe to proceed") {
+    confidence = "medium"
+    confidenceReasons.push("The answer looks aligned with the requested fix.")
+    confidenceReasons.push("The checked artifacts supported the visible flow.")
+    confidenceReasons.push("Live runtime behavior in the workspace was not directly verified.")
+  } else if (decision === "Not enough proof") {
+    confidence = blockedItems.length > 0 || unresolvedItems.length > 0 ? "medium" : "low"
+    confidenceReasons.push("Some required criteria could not be verified from the available artifacts.")
+    if (uncheckedArtifacts.length) {
+      confidenceReasons.push(`This review did not check ${uncheckedArtifacts[0]}.`)
+    }
+    if (usedFallbackIntent) {
+      confidenceReasons.push("The original intent had to be inferred, so the review stayed cautious.")
+    }
+  } else {
+    confidence = coreMissed.length > 0 || contradictionCount > 0 ? "low" : "medium"
+    if (coreMissed.length > 0) {
+      confidenceReasons.push(`A required part still looks missing: ${normalizeCriterionLabel(coreMissed[0].label)}.`)
+    } else if (missedItems.length > 0) {
+      confidenceReasons.push(`At least one requested check is still unresolved: ${normalizeCriterionLabel(missedItems[0].label)}.`)
+    }
+    if (metItems.length > 0) {
+      confidenceReasons.push(`Some of the flow does look supported: ${normalizeCriterionLabel(metItems[0].label)}.`)
+    }
+    if (uncheckedArtifacts.length) {
+      confidenceReasons.push(`This review did not check ${uncheckedArtifacts[0]}.`)
+    }
+  }
+
+  const whyBullets: string[] = []
+  const contradiction = detailInspection.contradictions[0]
+  if (contradiction) {
+    whyBullets.push(limitText(contradiction, 220))
+  }
+  const firstMissed = verifications.find((item) => item.judgment === "missed")
+  if (firstMissed) {
+    whyBullets.push(limitText(firstMissed.explanation || `Could not confirm: ${firstMissed.criterion_label}.`, 220))
+  }
+  const firstBlocked = verifications.find((item) => item.judgment === "blocked")
+  if (firstBlocked) {
+    whyBullets.push(limitText(firstBlocked.explanation || `Could not verify: ${firstBlocked.criterion_label}.`, 220))
+  }
+  const firstMet = verifications.find((item) => item.judgment === "met")
+  if (firstMet && whyBullets.length < 3) {
+    whyBullets.push(limitText(firstMet.explanation || `Observed support for: ${firstMet.criterion_label}.`, 220))
+  }
+  if (!whyBullets.length) {
+    whyBullets.push(...verdict.findings.slice(0, 3).map((item) => limitText(item, 220)))
+  }
+
+  let promptStrategy: z.infer<typeof NextPromptOutputSchema>["prompt_strategy"] = "validate"
+  if (contradictionCount > 0) {
+    promptStrategy = "resolve_contradiction"
+  } else if (decision === "Likely wrong direction") {
+    promptStrategy = "narrow_scope"
+  } else if (missedItems.length > 0 && missedItems.length <= 2) {
+    promptStrategy = "fix_missing"
+  } else if (decision === "Needs refinement") {
+    promptStrategy = "narrow_scope"
+  } else {
+    promptStrategy = "validate"
+  }
+
+  const nextPromptOutput = buildDecisionNextPrompt({
+    optimizedPrompt,
+    reviewContract,
+    intent,
+    decision,
+    promptStrategy,
+    blockedOrUnprovenItems,
+    contradictionCount,
+    whyBullets
+  })
+
+  const nextAction =
+    promptStrategy === "resolve_contradiction"
+      ? "Send this contradiction-focused prompt before you retry."
+      : promptStrategy === "fix_missing"
+        ? "Send this fix-only prompt to close the missing part."
+        : promptStrategy === "narrow_scope"
+          ? "Send this narrower prompt to bring the assistant back on track."
+          : "Send this validation prompt before you trust the answer."
+
+  return {
+    decision,
+    whyBullets: dedupe(whyBullets, 3).slice(0, 3),
+    nextAction,
+    nextPromptOutput,
+    checkedArtifacts,
+    uncheckedArtifacts,
+    blockedOrUnprovenItems,
+    confidence,
+    confidenceLabel: titleCaseConfidence(confidence),
+    confidenceReasons: dedupe(confidenceReasons, 3).slice(0, 3)
+  }
+}
+
 function verifyCriterionAgainstArtifacts(
   criterion: ReviewCriterion,
   bundle: NormalizedArtifactBundle,
@@ -2257,7 +2601,7 @@ function buildStage5Prompts(
 ) {
   return {
     system:
-      "Write the next best prompt for the user. Keep scope tight and focus only on what is missing or risky. Return JSON only with keys: next_prompt, prompt_strategy.",
+      "Write the next best prompt for the user. Keep scope tight and focus only on what is still unresolved, unproven, or contradictory. Return JSON only with keys: next_prompt and prompt_strategy. prompt_strategy must be one of: validate, fix_missing, narrow_scope, resolve_contradiction.",
     user: JSON.stringify({
       optimized_prompt: optimizedPrompt,
       intent,
@@ -2867,8 +3211,8 @@ function fallbackNextPrompt(
     "validate the result against the original request"
 
   const strategy =
-    verdict.status === "FAILED"
-      ? "retry_cleanly"
+    verdict.status === "FAILED" || verdict.status === "WRONG_DIRECTION"
+      ? "resolve_contradiction"
       : stage2.constraint_risks.length
         ? "narrow_scope"
         : stage2.missing_criteria.length
@@ -3386,11 +3730,37 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     })
   }
 
+  const decisionPresentation = buildDecisionPresentation({
+    verdict: safeVerdict,
+    checklist: acceptanceChecklist,
+    reviewContract,
+    verifications: artifactAwareDeepEvaluation?.verifications ?? [],
+    contradictionCount: artifactAwareDeepEvaluation?.contradictionCount ?? 0,
+    deepAnalysisRequested,
+    bundle: artifactBundle,
+    responseSummary: parsed.response_summary,
+    intent,
+    usedFallbackIntent,
+    detailInspection,
+    optimizedPrompt: parsed.attempt.optimized_prompt
+  })
+  safeVerdict = VerdictOutputSchema.parse({
+    ...safeVerdict,
+    confidence: decisionPresentation.confidence,
+    confidence_reason: decisionPresentation.confidenceReasons[0] ?? safeVerdict.confidence_reason
+  })
+  safeNextPrompt = decisionPresentation.nextPromptOutput
+
   return AfterPipelineResponseSchema.parse({
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
+    confidence_label: decisionPresentation.confidenceLabel,
     confidence_reason: safeVerdict.confidence_reason,
+    confidence_reasons: decisionPresentation.confidenceReasons,
     inspection_depth: detailInspection.inspection_depth,
+    decision: decisionPresentation.decision,
+    why_bullets: decisionPresentation.whyBullets,
+    next_action: decisionPresentation.nextAction,
     findings: safeVerdict.findings,
     issues: safeVerdict.issues,
     next_prompt: safeNextPrompt.next_prompt,
@@ -3403,8 +3773,15 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     review_contract: reviewContract,
     response_summary: parsed.response_summary,
     checked_artifact_types: artifactAwareDeepEvaluation?.checkedArtifactTypes ?? [],
+    checked_artifacts: decisionPresentation.checkedArtifacts,
+    unchecked_artifacts: decisionPresentation.uncheckedArtifacts,
+    blocked_or_unproven_items: decisionPresentation.blockedOrUnprovenItems,
     deep_criterion_verifications: artifactAwareDeepEvaluation?.verifications ?? [],
     contradiction_count: artifactAwareDeepEvaluation?.contradictionCount ?? 0,
+    helpful_feedback: {
+      helpful: null,
+      next_prompt_useful: null
+    },
     used_fallback_intent: usedFallbackIntent,
     token_usage_total: tokenUsageTotal
   })
