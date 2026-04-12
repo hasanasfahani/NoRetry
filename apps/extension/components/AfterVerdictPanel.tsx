@@ -135,8 +135,21 @@ function promptStrategyLabel(strategy: AfterAnalysisResult["prompt_strategy"]) {
       return "Fix missing part"
     case "narrow_scope":
       return "Narrow scope"
-    default:
+    case "resolve_contradiction":
       return "Resolve contradiction"
+    default:
+      return "Validate"
+  }
+}
+
+function confidenceTitle(confidence: AfterAnalysisResult["confidence"]) {
+  switch (confidence) {
+    case "high":
+      return "High"
+    case "medium":
+      return "Medium"
+    default:
+      return "Low"
   }
 }
 
@@ -328,6 +341,13 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const activeReviewMode = props.displayedReviewMode
   const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
   const promptStrategyDisplayLabel = promptStrategyLabel(props.verdict.prompt_strategy)
+  const decisionLabel = props.verdict.decision ?? "Not enough proof"
+  const confidenceLabel = props.verdict.confidence_label ?? confidenceTitle(props.verdict.confidence)
+  const confidenceReasons = props.verdict.confidence_reasons ?? []
+  const whyBullets = props.verdict.why_bullets ?? []
+  const checkedArtifacts = props.verdict.checked_artifacts ?? []
+  const uncheckedArtifacts = props.verdict.unchecked_artifacts ?? []
+  const blockedOrUnprovenItems = props.verdict.blocked_or_unproven_items ?? []
   const deepReviewLimitedHint = ""
   const deepReviewEvidenceItems =
     activeReviewMode === "deep"
@@ -657,7 +677,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             <div>
               <p style={styles.eyebrow}>After response</p>
               <span style={styles.badge(decisionTone.bg, decisionTone.fg)}>
-                {isPlannerOnlyState ? "No answer yet" : props.verdict.decision}
+                {isPlannerOnlyState ? "No answer yet" : decisionLabel}
               </span>
             </div>
             <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
@@ -669,7 +689,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             <div style={styles.confidenceBlock}>
               <p style={styles.statusMeta}>
                 <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
-                  Confidence: {props.verdict.confidence_label}
+                  Confidence: {confidenceLabel}
                 </span>
                 <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
                   Review: {reviewTone.label}
@@ -678,8 +698,8 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   Strategy: {promptStrategyDisplayLabel}
                 </span>
               </p>
-              {props.verdict.confidence_reasons.length ? (
-                <p style={styles.statusHint}>{props.verdict.confidence_reasons[0]}</p>
+              {confidenceReasons.length ? (
+                <p style={styles.statusHint}>{confidenceReasons[0]}</p>
               ) : shouldShowDeepReviewEvidenceHint ? (
                 <p style={styles.statusHint}>{deepReviewEvidenceHint}</p>
               ) : null}
@@ -694,7 +714,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <p style={styles.summaryContext}>NoRetry is ready to help shape the next prompt before any answer exists.</p>
             ) : null}
             <ul style={styles.decisionBullets}>
-              {(props.verdict.why_bullets.length ? props.verdict.why_bullets : [displayedSummarySentence]).slice(0, 3).map((item) => (
+              {(whyBullets.length ? whyBullets : [displayedSummarySentence]).slice(0, 3).map((item) => (
                 <li key={item} style={styles.decisionBulletItem}>
                   <span style={styles.leadingBullet}>•</span>
                   <span style={styles.listText}>{item}</span>
@@ -767,18 +787,18 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <div style={styles.detailsBlock}>
                 <p style={styles.criteriaCaption}>Proof checked</p>
                 <p style={styles.criteriaNote}>
-                  Checked: {props.verdict.checked_artifacts.length ? props.verdict.checked_artifacts.join(", ") : "response only"}
+                  Checked: {checkedArtifacts.length ? checkedArtifacts.join(", ") : "response only"}
                 </p>
                 <p style={styles.criteriaNote}>
-                  Not checked: {props.verdict.unchecked_artifacts.length ? props.verdict.unchecked_artifacts.join(", ") : "nothing important was left unchecked in this view"}
+                  Not checked: {uncheckedArtifacts.length ? uncheckedArtifacts.join(", ") : "nothing important was left unchecked in this view"}
                 </p>
               </div>
 
-              {props.verdict.blocked_or_unproven_items.length ? (
+              {blockedOrUnprovenItems.length ? (
                 <div style={styles.detailsBlock}>
                   <p style={styles.criteriaCaption}>Still blocked or unproven</p>
                   <ul style={styles.list}>
-                    {props.verdict.blocked_or_unproven_items.map((item) => (
+                    {blockedOrUnprovenItems.map((item) => (
                       <li key={item} style={styles.listItem}>
                         <span style={styles.leadingBullet}>•</span>
                         <span style={styles.listText}>{item}</span>
@@ -789,9 +809,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               ) : null}
 
               <div style={styles.detailsBlock}>
-                <p style={styles.criteriaCaption}>Why confidence is {props.verdict.confidence_label.toLowerCase()}</p>
+                <p style={styles.criteriaCaption}>Why confidence is {confidenceLabel.toLowerCase()}</p>
                 <ul style={styles.list}>
-                  {props.verdict.confidence_reasons.map((item) => (
+                  {confidenceReasons.map((item) => (
                     <li key={item} style={styles.listItem}>
                       <span style={styles.leadingBullet}>•</span>
                       <span style={styles.listText}>{item}</span>
