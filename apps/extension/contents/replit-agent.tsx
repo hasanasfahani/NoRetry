@@ -733,7 +733,19 @@ export default function PromptOptimizerApp() {
       return Boolean(previousStatus) && previousStatus !== item.status
     })
 
-    if (!changedItems.length) return ""
+    if (!changedItems.length) {
+      const confidenceRank: Record<AfterAnalysisResult["confidence"], number> = {
+        low: 1,
+        medium: 2,
+        high: 3
+      }
+      const statusChanged = quick.status !== deep.status
+      const confidenceChanged = confidenceRank[deep.confidence] > confidenceRank[quick.confidence]
+
+      if (!statusChanged && !confidenceChanged) return ""
+
+      return `Deep review kept the same checklist but tightened the conclusion from ${quick.status.toLowerCase()} (${quick.confidence}) to ${deep.status.toLowerCase()} (${deep.confidence}).`
+    }
 
     const sample = changedItems[0]
     const sampleVerdict =

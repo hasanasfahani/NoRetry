@@ -1548,6 +1548,59 @@ function buildAcceptanceChecklist(
   )
 }
 
+function alignStage2WithChecklist(
+  stage2: ReturnType<typeof Stage2OutputSchema.parse>,
+  checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
+  reviewContract: ReviewContract
+) {
+  const checklistByLabel = new Map(checklist.map((item) => [normalizeForMatch(item.label), item.status]))
+  const addressedCriteria = reviewContract.criteria
+    .filter((criterion) => checklistByLabel.get(normalizeForMatch(criterion.label)) === "met")
+    .map((criterion) => criterion.label)
+  const missingCriteria = reviewContract.criteria
+    .filter((criterion) => {
+      const status = checklistByLabel.get(normalizeForMatch(criterion.label))
+      return status === "missed" || status === "not_sure"
+    })
+    .map((criterion) => criterion.label)
+
+  const constraintRisks = missingCriteria.length
+    ? stage2.constraint_risks.filter((risk) => {
+        const normalizedRisk = normalizeForMatch(risk)
+        const matchedCriterion = reviewContract.criteria.find((criterion) =>
+          normalizedRisk.includes(normalizeForMatch(criterion.label))
+        )
+
+        if (!matchedCriterion) return true
+        return missingCriteria.includes(matchedCriterion.label)
+      })
+    : []
+
+  const analysisNotes = dedupe(
+    stage2.analysis_notes.filter((note) => {
+      const normalized = note.trim().toLowerCase()
+      if (!missingCriteria.length) {
+        return (
+          !normalized.includes("some acceptance criteria remain unverified") &&
+          !normalized.includes("still does not clearly show") &&
+          !normalized.includes("needs proof")
+        )
+      }
+
+      return true
+    }),
+    4
+  )
+
+  return Stage2OutputSchema.parse({
+    ...stage2,
+    addressed_criteria: addressedCriteria,
+    missing_criteria: missingCriteria,
+    constraint_risks: constraintRisks,
+    analysis_notes: analysisNotes
+  })
+}
+
 function reconcileVerdictWithChecklist(
   verdict: ReturnType<typeof VerdictOutputSchema.parse>,
   checklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>,
@@ -1996,7 +2049,7 @@ function buildDeepDeltaFinding(
   })
 
   if (!changed.length) {
-    return "Deep review checked the same fixed criteria and kept the same conclusion."
+    return "Deep review checked the same fixed criteria with tighter evidence and did not need to change checklist outcomes."
   }
 
   const sample = changed[0]
@@ -2260,6 +2313,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     parsed.response_summary,
     deepAnalysisRequested
   )
+  if (deepAnalysisRequested) {
+    safeStage2 = alignStage2WithChecklist(safeStage2, acceptanceChecklist, reviewContract)
+  }
   safeVerdict = reconcileVerdictWithChecklist(
     safeVerdict,
     acceptanceChecklist,
@@ -2268,6 +2324,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     detailInspection,
     deepAnalysisRequested
   )
+  if (deepAnalysisRequested) {
+    safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
+  }
 
   const checklistDrivenPrimaryFinding = buildChecklistDrivenPrimaryFinding(
     acceptanceChecklist,

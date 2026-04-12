@@ -189,6 +189,27 @@ async function main() {
         CONFIDENCE_RANK[deep.confidence] >= CONFIDENCE_RANK[quick.confidence],
         `[${fixture.id}] deep confidence regressed below quick`
       )
+      assert(
+        !(
+          deep.findings.some((item) => /every acceptance criterion/i.test(item)) &&
+          deep.findings.some((item) => /could not|does not clearly show|remain unverified/i.test(item))
+        ),
+        `[${fixture.id}] deep findings contradict the final checklist/verdict: ${JSON.stringify(deep.findings)}`
+      )
+      if (deep.status === "SUCCESS") {
+        assert(
+          deep.stage_2.missing_criteria.length === 0,
+          `[${fixture.id}] deep success still reports missing criteria: ${JSON.stringify(deep.stage_2.missing_criteria)}`
+        )
+        assert(
+          deep.next_prompt_output.prompt_strategy === "validate",
+          `[${fixture.id}] deep success should produce a validate next prompt, got ${deep.next_prompt_output.prompt_strategy}`
+        )
+        assert(
+          deep.findings.every((item) => !/could not|does not clearly show|remain unverified/i.test(item)),
+          `[${fixture.id}] deep success still contains unresolved-language findings: ${JSON.stringify(deep.findings)}`
+        )
+      }
     } catch (error) {
       failures.push(error instanceof Error ? error.message : `[${fixture.id}] unknown failure`)
     }
