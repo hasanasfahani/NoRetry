@@ -1,12 +1,40 @@
 import { useEffect, useState, type CSSProperties } from "react"
-import type { SessionSummary } from "@prompt-optimizer/shared/src/schemas"
-import { getSessionSummary, resetOnboardingState } from "./lib/storage"
+import type { SessionSummary } from "@prompt-optimizer/shared"
+import { getSessionSummary, resetOnboardingState, savePopupArtifactSnapshot } from "./lib/storage"
 
 export default function Popup() {
   const [summary, setSummary] = useState<SessionSummary | null>(null)
 
   useEffect(() => {
-    void getSessionSummary().then(setSummary)
+    void getSessionSummary().then(async (nextSummary) => {
+      setSummary(nextSummary)
+
+      const shellText = [
+        "NoRetry popup opened.",
+        `Status: ${nextSummary?.lastProbableStatus ?? "UNKNOWN"}`,
+        `Retries: ${nextSummary?.retryCount ?? 0}`,
+        `Last intent: ${nextSummary?.lastIntent ?? "OTHER"}`
+      ].join(" ")
+
+      let hostHint = ""
+      try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+        hostHint = tabs[0]?.url ? new URL(tabs[0].url).hostname : ""
+      } catch {
+        hostHint = ""
+      }
+
+      await savePopupArtifactSnapshot({
+        statusText: nextSummary?.lastProbableStatus ?? "UNKNOWN",
+        retryCount: nextSummary?.retryCount ?? 0,
+        lastIntent: nextSummary?.lastIntent ?? "OTHER",
+        visibleText: shellText,
+        authStateText: "",
+        usageText: "",
+        strengthenVisible: false,
+        hostHint
+      })
+    })
   }, [])
 
   return (

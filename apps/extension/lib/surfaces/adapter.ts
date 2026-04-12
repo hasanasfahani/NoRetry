@@ -44,7 +44,7 @@ export interface SurfaceAdapter {
   collectDeepArtifacts(input: {
     responseText: string
     reviewContract: ReviewContract | null
-  }): ArtifactContext
+  }): Promise<ArtifactContext>
 }
 
 export function createEmptyDraftPromptSnapshot(): DraftPromptSnapshot {

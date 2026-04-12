@@ -78,7 +78,7 @@ export const chatGptSurfaceAdapter: SurfaceAdapter = {
   getPanelMountContext() {
     return createPanelMountContext(findPromptInput())
   },
-  collectDeepArtifacts(input) {
+  async collectDeepArtifacts(input) {
     return input.responseText.trim()
       ? {
           mode: "passive",

@@ -87,6 +87,7 @@ import {
   writePromptValue
 } from "../lib/replit"
 import {
+  appendDeepArtifactEvent,
   deriveProjectMemoryIdentity,
   getAfterReviewCache,
   getProjectMemory,
@@ -222,6 +223,11 @@ export default function PromptOptimizerApp() {
     normalizedText: string
     threadIdentity: string
   } | null>(null)
+  const lastLauncherVisibleRef = useRef(false)
+  const pendingNavigationRef = useRef<string | null>(null)
+  const lastThreadIdentityRef = useRef("")
+  const lastQuestionEvidenceSignatureRef = useRef("")
+  const lastDraftTelemetrySignatureRef = useRef("")
   const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
 
@@ -584,6 +590,29 @@ export default function PromptOptimizerApp() {
     })
   }
 
+  function getTelemetryProjectKey() {
+    return projectMemoryKey || deriveProjectMemoryIdentity().key
+  }
+
+  function recordDeepArtifactEvent(input: {
+    eventType: string
+    status: "observed" | "success" | "failed"
+    detail: string
+    responseIdentity?: string
+  }) {
+    const projectKey = getTelemetryProjectKey()
+    const threadIdentity = getCurrentThreadSnapshot().identity
+    void appendDeepArtifactEvent({
+      projectKey,
+      eventType: input.eventType,
+      status: input.status,
+      detail: input.detail,
+      threadIdentity,
+      responseIdentity: input.responseIdentity,
+      route: window.location.href
+    })
+  }
+
   function isGenericChecklistLabel(label: string) {
     const normalized = label.trim().toLowerCase()
     return (
@@ -875,7 +904,7 @@ export default function PromptOptimizerApp() {
           : null
       const artifactContext =
         deepAnalysis
-          ? resolveSurfaceAdapter().collectDeepArtifacts({
+          ? await resolveSurfaceAdapter().collectDeepArtifacts({
               responseText: text,
               reviewContract: baselineReviewContract
             })
@@ -1008,6 +1037,17 @@ export default function PromptOptimizerApp() {
     void loadProjectMemoryForCurrentLocation()
 
     const scan = () => {
+      const currentThreadIdentity = getCurrentThreadSnapshot().identity
+      if (lastThreadIdentityRef.current && lastThreadIdentityRef.current !== currentThreadIdentity) {
+        pendingNavigationRef.current = currentThreadIdentity
+        recordDeepArtifactEvent({
+          eventType: "spa_navigation_detected",
+          status: "observed",
+          detail: `Detected navigation from ${lastThreadIdentityRef.current} to ${currentThreadIdentity}.`
+        })
+      }
+      lastThreadIdentityRef.current = currentThreadIdentity
+
       if (popupOpenRef.current) {
         positionHost()
         return
@@ -1020,12 +1060,24 @@ export default function PromptOptimizerApp() {
           promptRef.current = fallbackInput
           submitRef.current = findSubmitButton(fallbackInput)
           positionHost()
+          if (!lastLauncherVisibleRef.current) {
+            lastLauncherVisibleRef.current = true
+            recordDeepArtifactEvent({
+              eventType: pendingNavigationRef.current ? "launcher_reappeared_after_navigation" : "launcher_visible_near_textarea",
+              status: "observed",
+              detail: pendingNavigationRef.current
+                ? "The launcher anchor re-appeared after navigation."
+                : "The launcher anchor is available near the prompt textarea."
+            })
+            pendingNavigationRef.current = null
+          }
           return
         }
 
         promptRef.current = null
         submitRef.current = null
         positionHost()
+        lastLauncherVisibleRef.current = false
         return
       }
 
@@ -1034,6 +1086,17 @@ export default function PromptOptimizerApp() {
       lastFocusedPromptRef.current = input
       submitRef.current = findSubmitButton(input)
       positionHost()
+      if (!lastLauncherVisibleRef.current) {
+        lastLauncherVisibleRef.current = true
+        recordDeepArtifactEvent({
+          eventType: pendingNavigationRef.current ? "launcher_reappeared_after_navigation" : "launcher_visible_near_textarea",
+          status: "observed",
+          detail: pendingNavigationRef.current
+            ? "The launcher anchor re-appeared after navigation."
+            : "The launcher anchor is available near the prompt textarea."
+        })
+        pendingNavigationRef.current = null
+      }
       if (inputChanged) {
         setInputBindingVersion((current) => current + 1)
       }
@@ -1091,6 +1154,87 @@ export default function PromptOptimizerApp() {
 
     positionHost()
   }, [panelOpen, afterPanelOpen])
+
+  useEffect(() => {
+    if (!panelOpen) return
+    recordDeepArtifactEvent({
+      eventType: "optimizer_panel_opened",
+      status: "observed",
+      detail: "The in-page optimizer panel was opened from the launcher."
+    })
+  }, [panelOpen])
+
+  useEffect(() => {
+    if (!beforeResult || !panelOpen) return
+    if (!beforeResult.clarification_questions.length) return
+
+    const signature = JSON.stringify({
+      questionIds: beforeResult.clarification_questions.map((question) => question.id),
+      score: beforeResult.score
+    })
+    if (lastQuestionEvidenceSignatureRef.current === signature) return
+    lastQuestionEvidenceSignatureRef.current = signature
+
+    recordDeepArtifactEvent({
+      eventType: "clarification_questions_visible",
+      status: "observed",
+      detail: `The optimizer panel showed ${beforeResult.clarification_questions.length} clarification question(s).`
+    })
+  }, [beforeResult, panelOpen])
+
+  useEffect(() => {
+    if (!draftReady || !editableDraft.trim()) return
+
+    const hasAcceptanceCriteria = /\bacceptance criteria\b/i.test(editableDraft)
+    const signature = `${editableDraft.trim()}::${hasAcceptanceCriteria}`
+    if (lastDraftTelemetrySignatureRef.current === signature) return
+    lastDraftTelemetrySignatureRef.current = signature
+
+    recordDeepArtifactEvent({
+      eventType: "improved_prompt_generated",
+      status: hasAcceptanceCriteria ? "success" : "observed",
+      detail: hasAcceptanceCriteria
+        ? "Generated an improved prompt that includes acceptance criteria."
+        : "Generated an improved prompt, but acceptance criteria were not clearly visible in the draft."
+    })
+  }, [draftReady, editableDraft])
+
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      const message = [event.message, event.filename, event.error instanceof Error ? event.error.message : ""]
+        .filter(Boolean)
+        .join(" | ")
+      if (!message.trim()) return
+      recordDeepArtifactEvent({
+        eventType: "runtime_error",
+        status: "failed",
+        detail: message
+      })
+    }
+
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      const reason =
+        typeof event.reason === "string"
+          ? event.reason
+          : event.reason instanceof Error
+            ? event.reason.message
+            : JSON.stringify(event.reason)
+      if (!reason?.trim()) return
+      recordDeepArtifactEvent({
+        eventType: "unhandled_rejection",
+        status: "failed",
+        detail: reason
+      })
+    }
+
+    window.addEventListener("error", handleError)
+    window.addEventListener("unhandledrejection", handleRejection)
+
+    return () => {
+      window.removeEventListener("error", handleError)
+      window.removeEventListener("unhandledrejection", handleRejection)
+    }
+  }, [])
 
   useEffect(() => {
     const input = promptRef.current
@@ -1465,12 +1609,17 @@ export default function PromptOptimizerApp() {
 
   async function handleRunDeepAnalysis() {
     if (!afterVerdict || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
+    recordDeepArtifactEvent({
+      eventType: "deep_analysis_requested",
+      status: "observed",
+      detail: "The user requested deep analysis."
+    })
 
     const targetOverride = buildCurrentAfterTargetOverride()
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
       const artifactSignature = buildArtifactSignature(
-        resolveSurfaceAdapter().collectDeepArtifacts({
+        await resolveSurfaceAdapter().collectDeepArtifacts({
           responseText: targetOverride.responseText,
           reviewContract: afterReviewCacheRef.current?.quick?.review_contract ?? afterVerdict.review_contract
         })
@@ -1533,7 +1682,7 @@ export default function PromptOptimizerApp() {
       const artifactSignature =
         mode === "deep"
           ? buildArtifactSignature(
-              resolveSurfaceAdapter().collectDeepArtifacts({
+              await resolveSurfaceAdapter().collectDeepArtifacts({
                 responseText: targetOverride.responseText,
                 reviewContract: afterReviewCacheRef.current?.quick?.review_contract ?? afterVerdict.review_contract
               })
@@ -2171,9 +2320,19 @@ export default function PromptOptimizerApp() {
   function handleReplacePrompt() {
     const input = promptRef.current
     if (!draftReady || !input || !editableDraft.trim()) return
+    const beforeValue = readPromptValue(input).trim()
     writePromptValue(input, editableDraft.trim())
-    const sourcePrompt = promptPreview || readPromptValue(input)
+    const afterValue = readPromptValue(input).trim()
+    const sourcePrompt = promptPreview || afterValue
     void saveDraftAttempt(sourcePrompt, editableDraft.trim())
+    recordDeepArtifactEvent({
+      eventType: "prompt_replaced",
+      status: afterValue === editableDraft.trim() && afterValue !== beforeValue ? "success" : "observed",
+      detail:
+        afterValue === editableDraft.trim() && afterValue !== beforeValue
+          ? "Replace wrote the improved prompt back into the active textarea and the visible text changed."
+          : "Replace was triggered, but the textarea change could not be fully confirmed."
+    })
     setPanelOpen(false)
   }
 

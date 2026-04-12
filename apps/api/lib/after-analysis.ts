@@ -82,6 +82,23 @@ type NormalizedArtifactBundle = {
   buildOrTestTexts: string[]
   runtimeSignals: string[]
   domObservations: DomObservation[]
+  extensionEvents: Array<{
+    eventType: string
+    status: string
+    detail: string
+    route: string
+    content: string
+  }>
+  popupSnapshots: Array<{
+    statusText: string
+    retryCount: number
+    lastIntent: string
+    visibleText: string
+    authStateText: string
+    usageText: string
+    strengthenVisible: boolean
+    hostHint: string
+  }>
 }
 
 type CriterionEvidencePolicy = {
@@ -1243,6 +1260,8 @@ function normalizeArtifactContext(artifactContext: AfterPipelineRequest["artifac
   const errorSummaries: string[] = []
   const buildOrTestTexts: string[] = []
   const runtimeSignals: string[] = []
+  const extensionEvents: NormalizedArtifactBundle["extensionEvents"] = []
+  const popupSnapshots: NormalizedArtifactBundle["popupSnapshots"] = []
 
   for (const artifact of context.artifacts) {
     const content = normalizeWhitespace(artifact.content)
@@ -1310,6 +1329,31 @@ function normalizeArtifactContext(artifactContext: AfterPipelineRequest["artifac
         details,
         content
       })
+      continue
+    }
+
+    if (artifact.type === "extension_event_trace") {
+      extensionEvents.push({
+        eventType: typeof artifact.metadata.event_type === "string" ? artifact.metadata.event_type : artifact.source,
+        status: typeof artifact.metadata.status === "string" ? artifact.metadata.status : "observed",
+        detail: content,
+        route: typeof artifact.metadata.route === "string" ? artifact.metadata.route : "",
+        content
+      })
+      continue
+    }
+
+    if (artifact.type === "popup_state_snapshot") {
+      popupSnapshots.push({
+        statusText: typeof artifact.metadata.status_text === "string" ? artifact.metadata.status_text : "",
+        retryCount: typeof artifact.metadata.retry_count === "number" ? artifact.metadata.retry_count : 0,
+        lastIntent: typeof artifact.metadata.last_intent === "string" ? artifact.metadata.last_intent : "",
+        visibleText: content,
+        authStateText: typeof artifact.metadata.auth_state_text === "string" ? artifact.metadata.auth_state_text : "",
+        usageText: typeof artifact.metadata.usage_text === "string" ? artifact.metadata.usage_text : "",
+        strengthenVisible: artifact.metadata.strengthen_visible === true,
+        hostHint: typeof artifact.metadata.host_hint === "string" ? artifact.metadata.host_hint : ""
+      })
     }
   }
 
@@ -1324,7 +1368,9 @@ function normalizeArtifactContext(artifactContext: AfterPipelineRequest["artifac
     errorSummaries: dedupe(errorSummaries, 4),
     buildOrTestTexts: dedupe(buildOrTestTexts, 4),
     runtimeSignals: dedupe(runtimeSignals, 4),
-    domObservations
+    domObservations,
+    extensionEvents,
+    popupSnapshots
   }
 }
 
@@ -1339,17 +1385,17 @@ function evidencePolicyForCriterion(label: string): CriterionEvidencePolicy {
 
   if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(label)) {
     return {
-      primary: ["dom_ui_state"],
+      primary: ["interaction_trace", "dom_ui_state"],
       fallbackIfPrimaryUnavailable: ["response_claim"]
     }
   }
 
   if (/replace button injects|text visibly updates|injects the improved prompt/i.test(label)) {
-    return { primary: ["dom_ui_state"] }
+    return { primary: ["interaction_trace", "dom_ui_state"] }
   }
 
   if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(label)) {
-    return { primary: ["dom_ui_state"] }
+    return { primary: ["popup_state", "dom_ui_state"] }
   }
 
   if (/no chrome devtools errors|no console errors|devtools errors/i.test(label)) {
@@ -1357,7 +1403,7 @@ function evidencePolicyForCriterion(label: string): CriterionEvidencePolicy {
   }
 
   if (/spa navigation|re-appears|survive/i.test(label)) {
-    return { primary: ["dom_ui_state", "runtime_error_state"] }
+    return { primary: ["interaction_trace", "dom_ui_state", "runtime_error_state"] }
   }
 
   if (/dist|rebuild|build|typecheck|test|documented|automated/i.test(label)) {
@@ -1366,7 +1412,7 @@ function evidencePolicyForCriterion(label: string): CriterionEvidencePolicy {
 
   return {
     primary: ["response_claim"],
-    fallbackIfPrimaryUnavailable: ["response_code", "changed_files"]
+    fallbackIfPrimaryUnavailable: ["response_code", "changed_files", "interaction_trace"]
   }
 }
 
@@ -1389,6 +1435,14 @@ function hasEvidenceTypeAvailable(bundle: NormalizedArtifactBundle, evidenceType
 
   if (evidenceType === "build_or_test_output") {
     return bundle.buildOrTestTexts.length > 0 || bundle.outputSnippets.length > 0
+  }
+
+  if (evidenceType === "interaction_trace") {
+    return bundle.extensionEvents.length > 0
+  }
+
+  if (evidenceType === "popup_state") {
+    return bundle.popupSnapshots.length > 0
   }
 
   return bundle.domObservations.length > 0
@@ -1432,7 +1486,15 @@ function responseClaimText(bundle: NormalizedArtifactBundle, responseSummary: Af
 }
 
 function runtimeEvidenceText(bundle: NormalizedArtifactBundle) {
-  return normalizeWhitespace([...bundle.runtimeSignals, ...bundle.errorSummaries].join(" "))
+  return normalizeWhitespace(
+    [
+      ...bundle.runtimeSignals,
+      ...bundle.errorSummaries,
+      ...bundle.extensionEvents
+        .filter((event) => event.eventType === "runtime_error" || event.eventType === "unhandled_rejection")
+        .map((event) => event.detail)
+    ].join(" ")
+  )
 }
 
 function buildOrTestEvidenceText(bundle: NormalizedArtifactBundle) {
@@ -1448,6 +1510,8 @@ function explainEvidenceType(evidenceType: DeepCriterionEvidenceType) {
   if (evidenceType === "runtime_error_state") return "visible runtime/error artifacts"
   if (evidenceType === "build_or_test_output") return "visible build/test artifacts"
   if (evidenceType === "changed_files") return "changed-file artifacts"
+  if (evidenceType === "interaction_trace") return "extension interaction traces"
+  if (evidenceType === "popup_state") return "popup state artifacts"
   if (evidenceType === "response_code") return "response code artifacts"
   return "response evidence"
 }
@@ -1593,6 +1657,118 @@ function verifyCriterionAgainstArtifacts(
         explanation = `Deep found changed-file artifacts that align with this criterion, but file labels alone are weaker proof.`
       } else if (judgment === "blocked") {
         explanation = `Deep found changed-file artifacts, but they did not clearly line up with this criterion.`
+      }
+      continue
+    }
+
+    if (evidenceType === "interaction_trace") {
+      const relevantEvents = bundle.extensionEvents.filter((event) => {
+        if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(criterion.label)) {
+          return event.eventType === "clarification_questions_visible" || event.eventType === "improved_prompt_generated"
+        }
+        if (/replace button injects|text visibly updates|injects the improved prompt/i.test(criterion.label)) {
+          return event.eventType === "prompt_replaced"
+        }
+        if (/popup opens|auth state|usage|strengthen tab works end-to-end/i.test(criterion.label)) {
+          return event.eventType === "optimizer_panel_opened" || event.eventType === "deep_analysis_requested"
+        }
+        if (/spa navigation|re-appears|survive/i.test(criterion.label)) {
+          return event.eventType === "spa_navigation_detected" || event.eventType === "launcher_reappeared_after_navigation"
+        }
+
+        return false
+      })
+
+      if (!relevantEvents.length) continue
+      artifactFindings.push(
+        ...relevantEvents.slice(0, 4).map((event) => `${event.eventType}: ${limitText(event.detail, 120)}`)
+      )
+
+      const failedEvent = relevantEvents.find((event) => event.status === "failed")
+      const successfulEvent = relevantEvents.find((event) => event.status === "success")
+      const observedEvent = relevantEvents.find((event) => event.status === "observed")
+
+      if (failedEvent) {
+        judgment = "missed"
+        confidence = "high"
+        explanation = `Deep checked extension interaction traces and found a failed step: ${failedEvent.eventType}.`
+      } else if (/answer questions and receive a generated improved prompt with acceptance criteria/i.test(criterion.label)) {
+        const sawQuestions = relevantEvents.some((event) => event.eventType === "clarification_questions_visible")
+        const sawGeneratedPrompt = relevantEvents.some((event) => event.eventType === "improved_prompt_generated")
+        if (sawQuestions && sawGeneratedPrompt) {
+          judgment = successfulEvent ? "met" : "met"
+          confidence = successfulEvent ? "high" : "medium"
+          explanation = `Deep checked extension interaction traces and saw both the question flow and improved prompt generation.`
+        } else {
+          judgment = "missed"
+          confidence = "medium"
+          explanation = `Deep checked extension interaction traces, but the full question-to-improved-prompt flow was not observed.`
+        }
+      } else if (/replace button injects|text visibly updates|injects the improved prompt/i.test(criterion.label)) {
+        const replaceSuccess = relevantEvents.some(
+          (event) => event.eventType === "prompt_replaced" && event.status === "success"
+        )
+        if (replaceSuccess) {
+          judgment = "met"
+          confidence = "high"
+          explanation = `Deep checked extension interaction traces and confirmed the Replace flow updated the textarea.`
+        } else {
+          judgment = "missed"
+          confidence = "medium"
+          explanation = `Deep checked extension interaction traces, but the Replace flow was not fully confirmed.`
+        }
+      } else if (/spa navigation|re-appears|survive/i.test(criterion.label)) {
+        const sawNavigation = relevantEvents.some((event) => event.eventType === "spa_navigation_detected")
+        const sawReappearance = relevantEvents.some((event) => event.eventType === "launcher_reappeared_after_navigation")
+        if (sawNavigation && sawReappearance) {
+          judgment = "met"
+          confidence = "high"
+          explanation = `Deep checked extension interaction traces and saw the launcher reappear after navigation.`
+        } else {
+          judgment = "missed"
+          confidence = "medium"
+          explanation = `Deep checked extension interaction traces, but it did not see the launcher reappear after navigation.`
+        }
+      } else if (successfulEvent) {
+        judgment = "met"
+        confidence = "high"
+        explanation = `Deep checked extension interaction traces and verified this criterion from observed flow events.`
+      } else if (observedEvent && judgment !== "missed") {
+        judgment = "met"
+        confidence = "medium"
+        explanation = `Deep checked extension interaction traces and found supporting observed flow events.`
+      }
+      continue
+    }
+
+    if (evidenceType === "popup_state") {
+      const popupSnapshot = bundle.popupSnapshots[bundle.popupSnapshots.length - 1]
+      if (!popupSnapshot) continue
+
+      artifactFindings.push(limitText(popupSnapshot.visibleText, 180))
+
+      const hostLooksRelevant =
+        !popupSnapshot.hostHint || /replit|chatgpt|openai/i.test(popupSnapshot.hostHint)
+      const hasAuth = /\b(auth|signed in|sign in|logged in|login)\b/i.test(
+        `${popupSnapshot.visibleText} ${popupSnapshot.authStateText}`
+      )
+      const hasUsage = /\b(usage|credits|quota|retry|status)\b/i.test(
+        `${popupSnapshot.visibleText} ${popupSnapshot.usageText}`
+      )
+      const hasStrengthen = popupSnapshot.strengthenVisible || /\bstrengthen\b/i.test(popupSnapshot.visibleText)
+
+      if (hostLooksRelevant && hasAuth && hasUsage && hasStrengthen) {
+        judgment = "met"
+        confidence = "medium"
+        explanation = `Deep checked a recent popup state snapshot and found auth, usage, and Strengthen evidence.`
+      } else if (hostLooksRelevant && (hasAuth || hasUsage || hasStrengthen)) {
+        judgment = "missed"
+        confidence = "medium"
+        explanation = `Deep checked a recent popup state snapshot, but it did not show the full popup/auth/usage/Strengthen flow.`
+      } else if (judgment !== "missed") {
+        judgment = "blocked"
+        confidence = "medium"
+        explanation = `Deep found a popup snapshot, but it was not clearly tied to the active flow.`
       }
       continue
     }

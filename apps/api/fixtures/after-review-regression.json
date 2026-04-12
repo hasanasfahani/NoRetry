@@ -21,6 +21,8 @@
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
+      "extension_event_trace",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "expectedSources": [
@@ -62,6 +64,8 @@
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
+      "extension_event_trace",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "expectedSources": [
@@ -103,6 +107,8 @@
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
+      "extension_event_trace",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "expectedSources": [
@@ -144,6 +150,8 @@
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
+      "extension_event_trace",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "expectedSources": [
@@ -185,6 +193,8 @@
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
+      "extension_event_trace",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "expectedSources": [
@@ -225,13 +235,13 @@
     "expectedDeepConfidence": "medium",
     "expectedCheckedArtifactTypes": [
       "response_text",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "expectedBlockedCriteria": [
       "The red/yellow/green button is visible inside the Replit AI Agent chat textarea within ~1 second of typing 15+ characters.",
       "Clicking the button opens the optimize panel with LLM-generated questions and the correct strength badge.",
-      "The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there.",
-      "The popup opens, shows auth state and usage, and the Strengthen tab works end-to-end through the LLM flow."
+      "The Replace button injects the improved prompt back into the Replit textarea and the text visibly updates there."
     ],
     "expectedSources": [
       "definition_of_done",
@@ -272,6 +282,8 @@
     "expectedCheckedArtifactTypes": [
       "response_text",
       "dom_observations",
+      "extension_event_trace",
+      "popup_state_snapshot",
       "visible_runtime_signals"
     ],
     "minDeepContradictions": 3,

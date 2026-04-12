@@ -185,7 +185,9 @@ export const ArtifactTypeSchema = z.enum([
   "visible_error_summary",
   "visible_build_or_test_text",
   "visible_runtime_signals",
-  "dom_observations"
+  "dom_observations",
+  "extension_event_trace",
+  "popup_state_snapshot"
 ])
 export const DeepCriterionJudgmentSchema = z.enum(["met", "missed", "blocked"])
 export const DeepCriterionEvidenceTypeSchema = z.enum([
@@ -194,7 +196,9 @@ export const DeepCriterionEvidenceTypeSchema = z.enum([
   "changed_files",
   "runtime_error_state",
   "build_or_test_output",
-  "dom_ui_state"
+  "dom_ui_state",
+  "interaction_trace",
+  "popup_state"
 ])
 
 export const ArtifactRecordSchema = z.object({

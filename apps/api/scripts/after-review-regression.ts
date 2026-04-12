@@ -112,6 +112,48 @@ function buildReplitArtifactContext(
     metadata: {}
   })
 
+  const interactionEvent = (
+    eventType: string,
+    status: "observed" | "success" | "failed",
+    detail: string
+  ) => ({
+    type: "extension_event_trace" as const,
+    source: "regression_extension_telemetry",
+    captured_at: capturedAt,
+    surface_scope: "extension_runtime",
+    content: `${eventType}: ${detail}`,
+    metadata: {
+      event_type: eventType,
+      status,
+      route: "https://replit.com/@fixture/project"
+    }
+  })
+
+  const popupSnapshot = (input: {
+    statusText: string
+    retryCount: number
+    lastIntent: string
+    visibleText: string
+    authStateText?: string
+    usageText?: string
+    strengthenVisible?: boolean
+  }) => ({
+    type: "popup_state_snapshot" as const,
+    source: "regression_popup_telemetry",
+    captured_at: capturedAt,
+    surface_scope: "extension_popup",
+    content: input.visibleText,
+    metadata: {
+      status_text: input.statusText,
+      retry_count: input.retryCount,
+      last_intent: input.lastIntent,
+      auth_state_text: input.authStateText ?? "",
+      usage_text: input.usageText ?? "",
+      strengthen_visible: input.strengthenVisible ?? false,
+      host_hint: "replit.com"
+    }
+  })
+
   const responseArtifact = {
     type: "response_text" as const,
     source: "regression_response",
@@ -165,12 +207,68 @@ function buildReplitArtifactContext(
 
   const artifacts =
     preset === "replit_success"
-      ? [responseArtifact, ...successDom, runtimeSignal("No extension-related console errors were visible during load or typing.")]
+      ? [
+          responseArtifact,
+          ...successDom,
+          interactionEvent("optimizer_panel_opened", "observed", "The in-page optimizer panel was opened."),
+          interactionEvent("clarification_questions_visible", "observed", "The optimizer panel showed 3 clarification questions."),
+          interactionEvent("improved_prompt_generated", "success", "Generated an improved prompt that includes acceptance criteria."),
+          interactionEvent("prompt_replaced", "success", "Replace wrote the improved prompt back into the active textarea and the visible text changed."),
+          interactionEvent("spa_navigation_detected", "observed", "Detected navigation in the Replit thread."),
+          interactionEvent("launcher_reappeared_after_navigation", "success", "The launcher re-appeared after navigation."),
+          popupSnapshot({
+            statusText: "SUCCESS",
+            retryCount: 0,
+            lastIntent: "DEBUG",
+            visibleText: "NoRetry popup opened. Auth state: signed in. Usage: 12 prompts left. Strengthen visible.",
+            authStateText: "signed in",
+            usageText: "12 prompts left",
+            strengthenVisible: true
+          }),
+          runtimeSignal("No extension-related console errors were visible during load or typing.")
+        ]
       : preset === "replit_partial"
-        ? [responseArtifact, ...partialDom, runtimeSignal("No extension-related console errors were visible during load or typing.")]
+        ? [
+            responseArtifact,
+            ...partialDom,
+            interactionEvent("optimizer_panel_opened", "observed", "The in-page optimizer panel was opened."),
+            interactionEvent("clarification_questions_visible", "observed", "The optimizer panel showed 2 clarification questions."),
+            popupSnapshot({
+              statusText: "PARTIAL",
+              retryCount: 1,
+              lastIntent: "DEBUG",
+              visibleText: "NoRetry popup opened. Session status visible, but no auth or usage was shown.",
+              strengthenVisible: false
+            }),
+            runtimeSignal("No extension-related console errors were visible during load or typing.")
+          ]
       : preset === "replit_blocked_ui"
-        ? [responseArtifact, runtimeSignal("No extension-related console errors were visible during load or typing.")]
-      : [responseArtifact, ...contradictionDom, runtimeSignal("TypeError: content.js crashed while typing in the Replit chat area.")]
+        ? [
+            responseArtifact,
+            popupSnapshot({
+              statusText: "UNKNOWN",
+              retryCount: 0,
+              lastIntent: "DEBUG",
+              visibleText: "NoRetry popup opened. Session status visible only.",
+              strengthenVisible: false
+            }),
+            runtimeSignal("No extension-related console errors were visible during load or typing.")
+          ]
+      : [
+          responseArtifact,
+          ...contradictionDom,
+          interactionEvent("optimizer_panel_opened", "observed", "The in-page optimizer panel was opened."),
+          interactionEvent("clarification_questions_visible", "observed", "The optimizer panel showed follow-up questions."),
+          interactionEvent("prompt_replaced", "failed", "Replace was triggered, but the textarea change could not be confirmed."),
+          popupSnapshot({
+            statusText: "FAILED",
+            retryCount: 2,
+            lastIntent: "DEBUG",
+            visibleText: "NoRetry popup opened, but auth/usage/Strengthen content was missing.",
+            strengthenVisible: false
+          }),
+          runtimeSignal("TypeError: content.js crashed while typing in the Replit chat area.")
+        ]
 
   return {
     mode: "passive",

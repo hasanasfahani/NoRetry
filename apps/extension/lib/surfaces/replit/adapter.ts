@@ -16,6 +16,11 @@ import {
   readPromptValue,
   writePromptValue
 } from "../../replit"
+import {
+  deriveProjectMemoryIdentity,
+  getDeepArtifactTelemetry,
+  getGlobalPopupArtifactTelemetry
+} from "../../storage"
 import type { ArtifactContext, ArtifactRecord, ReviewContract } from "@prompt-optimizer/shared"
 
 function isVisibleElement(element: HTMLElement) {
@@ -393,6 +398,66 @@ function buildDomObservationArtifacts(reviewContract: ReviewContract | null): Ar
   return artifacts
 }
 
+async function buildTelemetryArtifacts() {
+  const artifacts: ArtifactRecord[] = []
+  const { key: projectKey } = deriveProjectMemoryIdentity()
+  const [telemetry, popupTelemetry] = await Promise.all([
+    getDeepArtifactTelemetry(projectKey),
+    getGlobalPopupArtifactTelemetry()
+  ])
+  const now = Date.now()
+  const maxAgeMs = 1000 * 60 * 30
+
+  const recentEvents = (telemetry?.events ?? []).filter((event) => {
+    const capturedAt = Date.parse(event.capturedAt)
+    return Number.isFinite(capturedAt) && now - capturedAt <= maxAgeMs
+  })
+
+  for (const event of recentEvents.slice(-12)) {
+    const artifact = createArtifact(
+      "extension_event_trace",
+      "extension_runtime",
+      `${event.eventType}: ${event.detail}`,
+      {
+        event_type: event.eventType,
+        status: event.status,
+        route: event.route ?? "",
+        thread_identity: event.threadIdentity ?? "",
+        response_identity: event.responseIdentity ?? ""
+      },
+      "extension_telemetry"
+    )
+    if (artifact) artifacts.push(artifact)
+  }
+
+  const recentPopupSnapshots = (popupTelemetry?.popupSnapshots ?? []).filter((snapshot) => {
+    const capturedAt = Date.parse(snapshot.capturedAt)
+    return Number.isFinite(capturedAt) && now - capturedAt <= maxAgeMs
+  })
+
+  const latestPopupSnapshot = recentPopupSnapshots[recentPopupSnapshots.length - 1]
+  if (latestPopupSnapshot) {
+    const popupArtifact = createArtifact(
+      "popup_state_snapshot",
+      "extension_popup",
+      latestPopupSnapshot.visibleText,
+      {
+        status_text: latestPopupSnapshot.statusText,
+        retry_count: latestPopupSnapshot.retryCount,
+        last_intent: latestPopupSnapshot.lastIntent,
+        auth_state_text: latestPopupSnapshot.authStateText ?? "",
+        usage_text: latestPopupSnapshot.usageText ?? "",
+        strengthen_visible: latestPopupSnapshot.strengthenVisible ?? false,
+        host_hint: latestPopupSnapshot.hostHint ?? ""
+      },
+      "popup_telemetry"
+    )
+    if (popupArtifact) artifacts.push(popupArtifact)
+  }
+
+  return artifacts
+}
+
 function collectAssistantCandidates() {
   const selectors = [
     "[data-message-author-role='assistant']",
@@ -560,7 +625,7 @@ export const replitSurfaceAdapter: SurfaceAdapter = {
   getPanelMountContext() {
     return createPanelMountContext(findPromptInput())
   },
-  collectDeepArtifacts(input) {
+  async collectDeepArtifacts(input) {
     const responseText = input.responseText.trim()
     if (!responseText) return createEmptyArtifactContext("replit")
 
@@ -607,6 +672,7 @@ export const replitSurfaceAdapter: SurfaceAdapter = {
     if (runtimeArtifact) artifacts.push(runtimeArtifact)
 
     artifacts.push(...buildDomObservationArtifacts(input.reviewContract))
+    artifacts.push(...(await buildTelemetryArtifacts()))
 
     return {
       mode: "passive",
