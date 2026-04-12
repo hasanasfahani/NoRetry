@@ -213,22 +213,35 @@ function mergeIntentWithProjectMemory(
   currentState: string,
   options?: {
     aggressive?: boolean
+    forceIncludeAllContext?: boolean
   }
 ): AttemptIntent {
   const aggressive = options?.aggressive ?? false
+  const forceIncludeAllContext = options?.forceIncludeAllContext ?? false
   const currentGoalHint =
     extractPrefixedLine(currentState, ["working on", "current goal", "goal", "what i am working on"]) ||
     extractPrefixedLine(projectContext, ["user-facing goal", "definition of done", "goal"])
 
-  const definitionOfDone = extractSectionLines(projectContext, ["definition of done"]).concat(
-    extractSectionLines(currentState, ["definition of done"])
+  const definitionOfDone = filterContextLinesForIntent(
+    extractSectionLines(projectContext, ["definition of done"]).concat(
+      extractSectionLines(currentState, ["definition of done"])
+    ),
+    intent,
+    forceIncludeAllContext
   )
 
-  const userIntentToPreserve = extractSectionLines(projectContext, ["user intent to preserve"]).concat(
-    extractSectionLines(currentState, ["user intent to preserve"])
+  const userIntentToPreserve = filterContextLinesForIntent(
+    extractSectionLines(projectContext, ["user intent to preserve"]).concat(
+      extractSectionLines(currentState, ["user intent to preserve"])
+    ),
+    intent,
+    forceIncludeAllContext
   )
-  const constraintsFromContext = extractSectionLines(projectContext, ["constraints"])
-    .concat(extractSectionLines(currentState, ["constraints"]))
+  const constraintsFromContext = filterContextLinesForIntent(
+    extractSectionLines(projectContext, ["constraints"]).concat(extractSectionLines(currentState, ["constraints"])),
+    intent,
+    forceIncludeAllContext
+  )
     .filter(
       (line) => /must|non-negotiable|do not|keep|without|visible|works|survive|no /i.test(line)
     )
@@ -473,6 +486,52 @@ function criterionMatchScore(candidateLabel: string, contractLabel: string) {
   return overlap.length >= 3 ? 55 : 0
 }
 
+function buildIntentReferencePool(intent: AttemptIntent) {
+  return dedupe(
+    [intent.goal, ...intent.acceptance_criteria, ...intent.constraints]
+      .flatMap((value) =>
+        value
+          .split(/(?<=[.!?])\s+|\n+|;\s+/)
+          .map((item) => normalizeCriterionLabel(item))
+          .filter((item) => extractMeaningfulTokens(item).length >= 3)
+      ),
+    18
+  )
+}
+
+function intentNeedsContextRescue(intent: AttemptIntent) {
+  const normalizedGoal = normalizeForMatch(intent.goal)
+  const singleCriterion = intent.acceptance_criteria.length === 1 ? normalizeForMatch(intent.acceptance_criteria[0]) : ""
+  const looksLikeMetaReviewPrompt =
+    /^(did|does|is|was|were|has|have|can|could|should)\b/.test(normalizedGoal) ||
+    /\b(fully fix|really fix|actually fix|fully solve|fully resolve|work now|fixed now|resolved now)\b/.test(
+      normalizedGoal
+    ) ||
+    (!!singleCriterion &&
+      singleCriterion === normalizedGoal &&
+      /\b(fix|fixed|resolve|resolved|work|working|flow|issue|problem|bug)\b/.test(singleCriterion))
+
+  return (
+    hasWeakGoal(intent.goal) ||
+    looksLikeMetaReviewPrompt ||
+    intent.acceptance_criteria.length === 0 ||
+    intent.acceptance_criteria.every((criterion) => hasGenericAcceptanceCriterion(criterion))
+  )
+}
+
+function filterContextLinesForIntent(lines: string[], intent: AttemptIntent, forceIncludeAllContext = false) {
+  const normalizedLines = dedupe(lines, 10).filter((line) => extractMeaningfulTokens(line).length >= 3)
+  if (!normalizedLines.length) return []
+  if (forceIncludeAllContext || intentNeedsContextRescue(intent)) return normalizedLines
+
+  const references = buildIntentReferencePool(intent)
+  if (!references.length) return []
+
+  return normalizedLines.filter((line) =>
+    references.some((reference) => criterionMatchScore(line, reference) >= 55)
+  )
+}
+
 function mapCriteriaToReviewContract(labels: string[], reviewContract: ReviewContract) {
   const results: string[] = []
 
@@ -555,7 +614,10 @@ function buildReviewContract(
   projectContext: string,
   currentState: string,
   baselineContract: ReviewContract | null | undefined,
-  targetSignature: string
+  targetSignature: string,
+  options?: {
+    forceIncludeAllContext?: boolean
+  }
 ): ReviewContract {
   if (baselineContract?.criteria?.length) {
     return ReviewContractSchema.parse({
@@ -566,14 +628,27 @@ function buildReviewContract(
     })
   }
 
-  const definitionOfDone = extractSectionLines(projectContext, ["definition of done"]).concat(
-    extractSectionLines(currentState, ["definition of done"])
+  const forceIncludeAllContext = options?.forceIncludeAllContext ?? false
+
+  const definitionOfDone = filterContextLinesForIntent(
+    extractSectionLines(projectContext, ["definition of done"]).concat(
+      extractSectionLines(currentState, ["definition of done"])
+    ),
+    intent,
+    forceIncludeAllContext
   )
-  const userIntentToPreserve = extractSectionLines(projectContext, ["user intent to preserve"]).concat(
-    extractSectionLines(currentState, ["user intent to preserve"])
+  const userIntentToPreserve = filterContextLinesForIntent(
+    extractSectionLines(projectContext, ["user intent to preserve"]).concat(
+      extractSectionLines(currentState, ["user intent to preserve"])
+    ),
+    intent,
+    forceIncludeAllContext
   )
-  const validationCriteria = extractSectionLines(projectContext, ["constraints"])
-    .concat(extractSectionLines(currentState, ["constraints"]))
+  const validationCriteria = filterContextLinesForIntent(
+    extractSectionLines(projectContext, ["constraints"]).concat(extractSectionLines(currentState, ["constraints"])),
+    intent,
+    forceIncludeAllContext
+  )
     .filter((line) =>
       /\b(console errors?|no errors?|spa navigation|re-appears|survive|works end-to-end|popup|usage|auth state)\b/i.test(
         line
@@ -2205,6 +2280,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   let tokenUsageTotal = 0
   let intent = parsed.attempt.intent
   let usedFallbackIntent = false
+  const initialIntentNeedsContextRescue = intentNeedsContextRescue(intent)
   const elapsed = () => Date.now() - startedAt
 
   if (needsFallbackIntent(intent)) {
@@ -2228,7 +2304,8 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   }
 
   intent = mergeIntentWithProjectMemory(intent, parsed.project_context, parsed.current_state, {
-    aggressive: deepAnalysisRequested
+    aggressive: deepAnalysisRequested,
+    forceIncludeAllContext: initialIntentNeedsContextRescue
   })
   const reviewContract = buildReviewContract(
     intent,
@@ -2237,7 +2314,10 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     parsed.baseline_review_contract ?? null,
     parsed.attempt.attempt_id && parsed.response_summary.response_length
       ? `${parsed.attempt.attempt_id}:${parsed.response_summary.response_length}:${parsed.response_summary.first_excerpt.slice(0, 80)}`
-      : parsed.attempt.attempt_id
+      : parsed.attempt.attempt_id,
+    {
+      forceIncludeAllContext: initialIntentNeedsContextRescue
+    }
   )
   intent = {
     ...intent,
