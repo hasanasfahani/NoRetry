@@ -7,14 +7,15 @@ import {
   Stage1OutputSchema,
   Stage2OutputSchema,
   VerdictOutputSchema,
+  buildResponseExcerpts,
+  compressGoal,
   type AfterPipelineRequest,
   type AttemptIntent,
   type ReviewContract,
   type ReviewCriterion,
   type ReviewCriterionLayer,
   type ReviewCriterionSource
-} from "../../../packages/shared/src/schemas.ts"
-import { buildResponseExcerpts, compressGoal } from "../../../packages/shared/src/after-pipeline.ts"
+} from "@prompt-optimizer/shared"
 import * as z from "zod"
 import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
@@ -960,6 +961,31 @@ function sanitizeEvidenceTargeting(value: unknown) {
     selected_candidate_ids: selectedIds,
     risk_flags: riskFlags,
     inspection_goal: inspectionGoal
+  })
+}
+
+function buildFrozenDeepEvidenceTargeting(
+  reviewContract: ReviewContract,
+  candidates: EvidenceCandidate[],
+  responseSummary: AfterPipelineRequest["response_summary"]
+) {
+  return EvidenceTargetingSchema.parse({
+    selected_candidate_ids: candidates.slice(0, 4).map((candidate) => candidate.id),
+    risk_flags: dedupe(
+      [
+        responseSummary.success_signals.length ? "success_claim_needs_evidence" : "",
+        responseSummary.validation_signals.length ? "validation_claim_needs_evidence" : "",
+        responseSummary.uncertainty_signals.length ? "uncertainty_visible_in_answer" : ""
+      ],
+      4
+    ),
+    inspection_goal: limitText(
+      `Verify the frozen checklist with direct answer evidence: ${reviewContract.criteria
+        .map((item) => item.label)
+        .slice(0, 2)
+        .join(" | ")}`,
+      180
+    )
   })
 }
 
@@ -1983,6 +2009,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   const changedFiles = summarizeChangedFiles(parsed.changed_file_paths_summary ?? [])
   const errorSummary = parsed.error_summary?.trim() ?? ""
   const deepAnalysisRequested = parsed.deep_analysis ?? false
+  // Once quick has frozen a contract for this answer, deep should only deepen evidence,
+  // not re-derive the checklist or verdict from fresh model drift.
+  const frozenDeepReview = deepAnalysisRequested && Boolean(parsed.baseline_review_contract?.criteria?.length)
   const budgetSoftLimit = deepAnalysisRequested ? 2800 : 1800
   const stageSoftDeadline = deepAnalysisRequested ? AFTER_DEEP_STAGE_SOFT_DEADLINE_MS : AFTER_STAGE_SOFT_DEADLINE_MS
   const startedAt = Date.now()
@@ -2033,22 +2062,25 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     )
   }
 
-  const stage1Prompts = buildStage1Prompts(
-    parsed.response_summary,
-    intent,
-    parsed.project_context,
-    parsed.current_state,
-    changedFiles,
-    errorSummary
-  )
-  const stage1 = await callStructuredJson(
-    stage1Prompts.system,
-    stage1Prompts.user,
-    (value) => Stage1OutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 120 : 180
-  )
-  tokenUsageTotal += estimateTokensFromText(stage1Prompts.system, stage1Prompts.user)
-  const safeStage1 = stage1 ?? fallbackStage1(parsed.response_summary, changedFiles, errorSummary)
+  let safeStage1 = fallbackStage1(parsed.response_summary, changedFiles, errorSummary)
+  if (!frozenDeepReview) {
+    const stage1Prompts = buildStage1Prompts(
+      parsed.response_summary,
+      intent,
+      parsed.project_context,
+      parsed.current_state,
+      changedFiles,
+      errorSummary
+    )
+    const stage1 = await callStructuredJson(
+      stage1Prompts.system,
+      stage1Prompts.user,
+      (value) => Stage1OutputSchema.parse(value),
+      tokenUsageTotal >= budgetSoftLimit ? 120 : 180
+    )
+    tokenUsageTotal += estimateTokensFromText(stage1Prompts.system, stage1Prompts.user)
+    safeStage1 = stage1 ?? safeStage1
+  }
 
   const rawResponse = parsed.response_text_fallback || parsed.response_summary.response_text
   const evidenceCandidates = buildEvidenceCandidates(rawResponse, intent, parsed.response_summary, changedFiles, errorSummary)
@@ -2061,35 +2093,39 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   })
 
   if (shouldZoomIn) {
-    const stage2Prompts = buildStage2Prompts(
-      intent,
-      reviewContract,
-      safeStage1,
-      parsed.response_summary,
-      evidenceCandidates,
-      deepAnalysisRequested,
-      parsed.project_context,
-      parsed.current_state,
-      changedFiles,
-      errorSummary
-    )
-    const stage2Targeting = await callStructuredJson(
-      stage2Prompts.system,
-      stage2Prompts.user,
-      (value) => sanitizeEvidenceTargeting(value),
-      tokenUsageTotal >= budgetSoftLimit ? 90 : 140
-    )
-    tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
-    targetedEvidence =
-      stage2Targeting ??
-      EvidenceTargetingSchema.parse({
-        selected_candidate_ids: evidenceCandidates.slice(0, deepAnalysisRequested ? 4 : 3).map((candidate) => candidate.id),
-        risk_flags: parsed.response_summary.success_signals.length ? ["success_claim_needs_evidence"] : [],
-        inspection_goal: limitText(
-          `Verify whether the visible answer truly supports: ${compressGoal(intent.goal)}`,
-          180
-        )
-      })
+    if (frozenDeepReview) {
+      targetedEvidence = buildFrozenDeepEvidenceTargeting(reviewContract, evidenceCandidates, parsed.response_summary)
+    } else {
+      const stage2Prompts = buildStage2Prompts(
+        intent,
+        reviewContract,
+        safeStage1,
+        parsed.response_summary,
+        evidenceCandidates,
+        deepAnalysisRequested,
+        parsed.project_context,
+        parsed.current_state,
+        changedFiles,
+        errorSummary
+      )
+      const stage2Targeting = await callStructuredJson(
+        stage2Prompts.system,
+        stage2Prompts.user,
+        (value) => sanitizeEvidenceTargeting(value),
+        tokenUsageTotal >= budgetSoftLimit ? 90 : 140
+      )
+      tokenUsageTotal += estimateTokensFromText(stage2Prompts.system, stage2Prompts.user)
+      targetedEvidence =
+        stage2Targeting ??
+        EvidenceTargetingSchema.parse({
+          selected_candidate_ids: evidenceCandidates.slice(0, deepAnalysisRequested ? 4 : 3).map((candidate) => candidate.id),
+          risk_flags: parsed.response_summary.success_signals.length ? ["success_claim_needs_evidence"] : [],
+          inspection_goal: limitText(
+            `Verify whether the visible answer truly supports: ${compressGoal(intent.goal)}`,
+            180
+          )
+        })
+    }
   }
 
   const selectedEvidence = (
@@ -2101,7 +2137,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   ).slice(0, 4)
 
   let detailInspection = fallbackDetailInspection(selectedEvidence, parsed.response_summary)
-  if (selectedEvidence.length && elapsed() < stageSoftDeadline) {
+  if (!frozenDeepReview && selectedEvidence.length && elapsed() < stageSoftDeadline) {
     const stage3Prompts = buildStage3Prompts(
       intent,
       reviewContract,
@@ -2125,40 +2161,41 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     detailInspection = detail ?? detailInspection
   }
 
-  const alignmentPrompts = {
-    system:
-      `Compare the assistant response to the intended goal. Use the saved project context and current debugging state so the judgment stays grounded in the user's real situation. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.`,
-    user: JSON.stringify({
-      intent,
-      review_contract: reviewContract,
-      project_context: parsed.project_context,
-      current_state: parsed.current_state,
-      stage_1: safeStage1,
-      detail_inspection: detailInspection,
-      response_excerpts: buildResponseExcerpts(parsed.response_summary),
-      response_summary: {
-        mentioned_files: parsed.response_summary.mentioned_files,
-        change_claims: summarizeChangeClaims(parsed.response_summary),
-        validation_signals: summarizeValidationSignals(parsed.response_summary),
-        success_signals: parsed.response_summary.success_signals,
-        failure_signals: parsed.response_summary.failure_signals,
-        uncertainty_signals: parsed.response_summary.uncertainty_signals
-      },
-      changed_file_paths_summary: changedFiles,
-      error_summary: errorSummary
-    })
+  const fallbackAlignedStage2 = fallbackStage2(reviewContract, intent, safeStage1, detailInspection, parsed.response_summary)
+  let safeStage2 = normalizeStage2AgainstReviewContract(fallbackAlignedStage2, reviewContract)
+  if (!frozenDeepReview) {
+    const alignmentPrompts = {
+      system:
+        `Compare the assistant response to the intended goal. Use the saved project context and current debugging state so the judgment stays grounded in the user's real situation. ${reviewQualityContract(deepAnalysisRequested)} Return JSON only with keys: addressed_criteria, missing_criteria, constraint_risks, problem_fit, analysis_notes.`,
+      user: JSON.stringify({
+        intent,
+        review_contract: reviewContract,
+        project_context: parsed.project_context,
+        current_state: parsed.current_state,
+        stage_1: safeStage1,
+        detail_inspection: detailInspection,
+        response_excerpts: buildResponseExcerpts(parsed.response_summary),
+        response_summary: {
+          mentioned_files: parsed.response_summary.mentioned_files,
+          change_claims: summarizeChangeClaims(parsed.response_summary),
+          validation_signals: summarizeValidationSignals(parsed.response_summary),
+          success_signals: parsed.response_summary.success_signals,
+          failure_signals: parsed.response_summary.failure_signals,
+          uncertainty_signals: parsed.response_summary.uncertainty_signals
+        },
+        changed_file_paths_summary: changedFiles,
+        error_summary: errorSummary
+      })
+    }
+    const stage4Alignment = await callStructuredJson(
+      alignmentPrompts.system,
+      alignmentPrompts.user,
+      (value) => Stage2OutputSchema.parse(value),
+      tokenUsageTotal >= budgetSoftLimit ? 130 : deepAnalysisRequested ? 220 : 180
+    )
+    tokenUsageTotal += estimateTokensFromText(alignmentPrompts.system, alignmentPrompts.user)
+    safeStage2 = normalizeStage2AgainstReviewContract(stage4Alignment ?? fallbackAlignedStage2, reviewContract)
   }
-  const stage4Alignment = await callStructuredJson(
-    alignmentPrompts.system,
-    alignmentPrompts.user,
-    (value) => Stage2OutputSchema.parse(value),
-    tokenUsageTotal >= budgetSoftLimit ? 130 : deepAnalysisRequested ? 220 : 180
-  )
-  tokenUsageTotal += estimateTokensFromText(alignmentPrompts.system, alignmentPrompts.user)
-  const safeStage2 = normalizeStage2AgainstReviewContract(
-    stage4Alignment ?? fallbackStage2(reviewContract, intent, safeStage1, detailInspection, parsed.response_summary),
-    reviewContract
-  )
 
   let safeVerdict = fallbackVerdict(
     intent,
@@ -2171,7 +2208,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
   )
   let safeNextPrompt = fallbackNextPrompt(parsed.attempt.optimized_prompt, safeVerdict, safeStage2)
 
-  if (elapsed() < stageSoftDeadline) {
+  if (!frozenDeepReview && elapsed() < stageSoftDeadline) {
     const stage4Prompts = buildStage4Prompts(
       intent,
       reviewContract,
@@ -2195,7 +2232,7 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     safeVerdict = verdict ?? safeVerdict
   }
 
-  if (elapsed() < stageSoftDeadline) {
+  if (!frozenDeepReview && elapsed() < stageSoftDeadline) {
     const stage5Prompts = buildStage5Prompts(
       parsed.attempt.optimized_prompt,
       intent,

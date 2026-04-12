@@ -3,9 +3,10 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import {
   buildAttemptIntentFromSubmittedPrompt,
-  preprocessResponse
-} from "../../../packages/shared/src/after-pipeline.ts"
-import type { AfterPipelineRequest, AfterAnalysisResult } from "../../../packages/shared/src/schemas.ts"
+  preprocessResponse,
+  type AfterPipelineRequest,
+  type AfterAnalysisResult
+} from "@prompt-optimizer/shared"
 import { analyzeAfterAttempt } from "../lib/after-analysis.ts"
 
 type RegressionFixture = {
