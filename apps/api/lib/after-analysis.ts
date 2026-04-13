@@ -1668,25 +1668,30 @@ const CONFIDENCE_RANK: Record<z.infer<typeof AfterConfidenceSchema>, number> = {
 }
 
 function displayDecisionLabel(
-  decision: z.infer<typeof AfterPipelineResponseSchema>["decision"],
-  deepAnalysisRequested: boolean
+  params: {
+    decision: z.infer<typeof AfterPipelineResponseSchema>["decision"]
+    deepAnalysisRequested: boolean
+    metCount: number
+    blockedCount: number
+  }
 ) {
+  const { decision, deepAnalysisRequested, metCount, blockedCount } = params
   if (deepAnalysisRequested) {
     switch (decision) {
       case "Safe to proceed":
         return "Verified enough to continue"
       case "Needs refinement":
-        return "Still needs refinement"
+        return "Needs refinement"
       case "Likely wrong direction":
-        return "Contradicted by visible evidence"
+        return "Likely wrong direction"
       default:
-        return "Not enough proof"
+        return metCount > 0 ? "Looks correct, but not proven" : blockedCount > 0 ? "Not verified yet" : "Missing visible proof"
     }
   }
 
   switch (decision) {
     case "Safe to proceed":
-      return "Looks good"
+      return "Likely aligned"
     case "Needs refinement":
       return "Needs refinement"
     case "Likely wrong direction":
@@ -1729,11 +1734,11 @@ function buildDeepDeltaSummary(params: {
   }
 
   if (confidenceTrend === "down" && changedLabels.length) {
-    return `Quick looked aligned, but Deep lowered confidence because visible proof did not confirm: ${summarizeChecklistLabels(changedLabels, 2)}.`
+    return `Deep reduced confidence because visible evidence did not confirm: ${summarizeChecklistLabels(changedLabels, 2)}.`
   }
 
   if (confidenceTrend === "up" && changedLabels.length) {
-    return `Deep strengthened the earlier quick read because visible proof supported: ${summarizeChecklistLabels(changedLabels, 2)}.`
+    return `Deep strengthened the earlier read with visible support for: ${summarizeChecklistLabels(changedLabels, 2)}.`
   }
 
   if (changedLabels.length) {
@@ -1742,12 +1747,12 @@ function buildDeepDeltaSummary(params: {
 
   if (confidenceTrend === "down") {
     return contradictionCount > 0
-      ? "Quick looked plausible, but Deep lowered confidence because stronger checks found a contradiction."
-      : "Quick looked plausible, but Deep lowered confidence because stronger checks still could not verify key steps."
+      ? "Deep reduced confidence because stronger checks found a contradiction."
+      : "Deep reduced confidence because stronger checks still did not verify key steps."
   }
 
   if (confidenceTrend === "up") {
-    return "Deep confirmed the earlier quick read with stronger visible evidence."
+    return "Deep strengthened the earlier read with stronger visible evidence."
   }
 
   if (baselineDecision === "Safe to proceed") {
@@ -1767,24 +1772,24 @@ function buildReviewModeExplainer(params: {
   const { deepAnalysisRequested, confidenceTrend, contradictionCount, allCriteriaMet, blockedItems } = params
 
   if (!deepAnalysisRequested) {
-    return "Quick read uses the answer and lighter signals, so it is an early directional judgment."
+    return "Quick read is an early, answer-based judgment."
   }
 
   if (confidenceTrend === "down") {
     return contradictionCount > 0
-      ? "This deeper validation checked stronger visible proof and reduced confidence after finding a contradiction."
-      : "This deeper validation checked stronger visible proof and reduced confidence."
+      ? "This deeper validation reduced confidence because visible evidence contradicted a claimed step."
+      : "This deeper validation reduced confidence because visible evidence did not confirm one or more claimed steps."
   }
 
   if (confidenceTrend === "up") {
-    return "This deeper validation checked stronger visible proof and increased confidence."
+    return "This deeper validation strengthened the earlier read with visible support."
   }
 
   if (allCriteriaMet && blockedItems.length === 0) {
-    return "This deeper validation checked the same checklist and found enough visible proof to keep moving."
+    return "This deeper validation kept the earlier direction and found enough visible support to continue."
   }
 
-  return "This deeper validation checked the same checklist with stronger visible proof."
+  return "This deeper validation checked the same checklist with stronger visible evidence."
 }
 
 function buildDecisionNextPrompt(params: {
@@ -1825,19 +1830,19 @@ function buildDecisionNextPrompt(params: {
         goalLine,
         constraintsLine,
         deepTightenedEarlierRead ? "The earlier quick read looked aligned, but the deeper review found a proof gap." : "",
-        "Your last answer and the observed evidence do not agree.",
+        "Your last answer and the visible evidence do not agree.",
         contradictionCount > 0 && whyBullets.length ? `Resolve this contradiction first: ${whyBullets[0]}` : "",
         focusLine,
-        "Do not broaden scope. Either explain the mismatch clearly or make the smallest correction needed.",
-        "Then list the exact evidence that proves the corrected result. If you still cannot prove it, say that plainly."
+        "Resolve only this mismatch. Do not broaden scope.",
+        "Return the minimum correction and the evidence for it. If it is still not verified, say that plainly."
       ]
         .filter(Boolean)
         .join("\n\n"),
       prompt_strategy: promptStrategy,
       next_prompt_explanation:
-        "This prompt forces the assistant to resolve the specific mismatch instead of continuing with a broad retry.",
+        "This prompt forces the assistant to resolve the exact mismatch instead of wandering into a broad retry.",
       expected_outcome:
-        "The assistant should either correct the contradiction or explain why the earlier claim and evidence disagreed."
+        "The assistant should resolve the mismatch or say clearly why the claim is still unverified."
     })
   }
 
@@ -1847,18 +1852,17 @@ function buildDecisionNextPrompt(params: {
         goalLine,
         constraintsLine,
         deepAnalysisRequested ? "The answer looked plausible, but the deeper review did not verify the missing step below." : "",
-        "Fix only the missing part below. Do not rework the parts that already look correct.",
         focusLine,
-        "Do not broaden scope or restate the whole solution.",
-        "After fixing it, tell me exactly what changed and what visible evidence proves each fixed item."
+        "Fix only that part. Do not touch parts that already look correct.",
+        "Return the minimum correction and the evidence for it."
       ]
         .filter(Boolean)
         .join("\n\n"),
       prompt_strategy: promptStrategy,
       next_prompt_explanation:
-        "This prompt isolates the missing requirement so the assistant does not touch parts that already look correct.",
+        "This prompt isolates the missing requirement so the assistant stays narrow and avoids redoing good work.",
       expected_outcome:
-        "The assistant should fix only the missing step and return proof for that exact change."
+        "The assistant should fix only the missing step and show evidence for that exact change."
     })
   }
 
@@ -1868,10 +1872,10 @@ function buildDecisionNextPrompt(params: {
         goalLine,
         constraintsLine,
         deepTightenedEarlierRead ? "Quick looked directionally right, but the deeper review still needs proof for the exact scope below." : "",
-        "Return to the requested scope and ignore side work that does not directly satisfy it.",
         focusLine,
+        "Return to the requested scope and ignore side work.",
         "Do not refactor unrelated files or redo parts that already look correct.",
-        "Give the minimum correction needed, then summarize the concrete evidence for that correction."
+        "Give the minimum correction and the evidence for it."
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -1888,10 +1892,10 @@ function buildDecisionNextPrompt(params: {
       goalLine,
       constraintsLine,
       deepAnalysisRequested ? "The answer looked plausible, but stronger visible proof is still missing." : "",
-      "Do not change the implementation yet. Validate only the still-unproven parts below.",
+      "Validate only the still-unproven part below before making broader changes.",
       focusLine,
-      "For each item, say whether it is proven, what evidence supports it, or why it is still unproven.",
-      "If you cannot prove a point, say that plainly instead of claiming success."
+      "Say what is verified, what is not verified yet, and what evidence supports each point.",
+      "If you cannot verify a point, say that plainly instead of claiming success."
     ]
       .filter(Boolean)
       .join("\n\n"),
@@ -1986,7 +1990,7 @@ function buildDecisionPresentation(params: {
     confidenceReasons.push("Live runtime behavior in the workspace was not directly verified.")
   } else if (decision === "Not enough proof") {
     confidence = blockedItems.length > 0 || unresolvedItems.length > 0 ? "medium" : "low"
-    confidenceReasons.push("Some required criteria could not be verified from the available artifacts.")
+    confidenceReasons.push("Some required steps were not verified yet from the visible evidence available here.")
     if (uncheckedArtifacts.length) {
       confidenceReasons.push(`This review did not check ${uncheckedArtifacts[0]}.`)
     }
@@ -1996,9 +2000,9 @@ function buildDecisionPresentation(params: {
   } else {
     confidence = coreMissed.length > 0 || contradictionCount > 0 ? "low" : "medium"
     if (coreMissed.length > 0) {
-      confidenceReasons.push(`A required part still looks missing: ${normalizeCriterionLabel(coreMissed[0].label)}.`)
+      confidenceReasons.push(`A required step still looks missing: ${normalizeCriterionLabel(coreMissed[0].label)}.`)
     } else if (missedItems.length > 0) {
-      confidenceReasons.push(`At least one requested check is still unresolved: ${normalizeCriterionLabel(missedItems[0].label)}.`)
+      confidenceReasons.push(`At least one requested check is not verified yet: ${normalizeCriterionLabel(missedItems[0].label)}.`)
     }
     if (metItems.length > 0) {
       confidenceReasons.push(`Some of the flow does look supported: ${normalizeCriterionLabel(metItems[0].label)}.`)
@@ -2009,7 +2013,12 @@ function buildDecisionPresentation(params: {
   }
 
   const confidenceTrend = buildConfidenceTrend(confidence, deepAnalysisRequested ? baselineConfidence : undefined)
-  const decisionDisplayLabel = displayDecisionLabel(decision, deepAnalysisRequested)
+  const decisionDisplayLabel = displayDecisionLabel({
+    decision,
+    deepAnalysisRequested,
+    metCount: metItems.length,
+    blockedCount: blockedItems.length
+  })
   const reviewModeLabel = deepAnalysisRequested ? "Deep validation" : "Quick read"
   const deltaFromQuick = deepAnalysisRequested
     ? buildDeepDeltaSummary({

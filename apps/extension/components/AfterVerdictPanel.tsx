@@ -239,15 +239,20 @@ function checklistStatusMarker(
     }
   }
 
+  const explanation = verification?.explanation?.toLowerCase() ?? ""
   switch (item.status) {
     case "met":
       return "(verified)"
     case "missed":
-      return verification?.explanation?.toLowerCase().includes("contradict") ? "(contradicted)" : "(missing)"
+      return /(contradict|failed step|failure signals|error signals)/i.test(explanation)
+        ? "(contradicted)"
+        : /(did not observe|did not confirm|could not verify|not fully confirmed|still could not confirm|not clearly prove|did not support|not verified)/i.test(explanation)
+          ? "(not verified yet)"
+          : "(missing)"
     case "blocked":
       return "(blocked)"
     default:
-      return "(unresolved)"
+      return "(not verified yet)"
   }
 }
 
@@ -487,10 +492,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const blockedOrUnprovenItems = props.verdict.blocked_or_unproven_items ?? []
   const nextPromptExplanation = props.verdict.next_prompt_explanation ?? ""
   const expectedOutcome = props.verdict.expected_outcome ?? ""
-  const reviewModeExplainer = sanitizeUserFacingAfterText(props.verdict.review_mode_explainer ?? "")
-  const deltaFromQuick =
+  const deepTrustStory =
     activeReviewMode === "deep"
-      ? sanitizeUserFacingAfterText(props.verdict.delta_from_quick ?? props.deepDeltaNote ?? "")
+      ? sanitizeUserFacingAfterText(props.verdict.review_mode_explainer || props.verdict.delta_from_quick || props.deepDeltaNote || "")
       : ""
   const deepVerificationMap = new Map(
     (props.verdict.deep_criterion_verifications ?? []).map((item) => [normalizeBulletKey(item.criterion_label), item])
@@ -507,6 +511,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const displayedSummarySentence = summaryExpanded ? summarySentence : collapseForPreview(summarySentence)
   const topSectionKeys = new Set<string>()
   const topMissingItems = collectUniqueSectionItems(blockedOrUnprovenItems, topSectionKeys, 2)
+  if (deepTrustStory) topSectionKeys.add(normalizeBulletKey(deepTrustStory))
   const whySectionKeys = new Set<string>([...topSectionKeys, normalizeBulletKey(summarySentence)])
   const whyBullets = collectUniqueSectionItems(
     props.verdict.why_bullets?.length ? props.verdict.why_bullets : [summarySentence],
@@ -857,7 +862,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   <p style={styles.recommendedActionLine}>👉 Recommended: {recommendedActionText}</p>
                   {topMissingItems.length ? (
                     <div style={styles.missingSummaryBlock}>
-                      <p style={styles.missingSummaryTitle}>Missing</p>
+                      <p style={styles.missingSummaryTitle}>Missing / unverified</p>
                       <ul style={styles.missingSummaryList}>
                         {topMissingItems.map((item) => (
                           <li key={item} style={styles.missingSummaryItem}>
@@ -868,16 +873,10 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                       </ul>
                     </div>
                   ) : null}
+                  {activeReviewMode === "deep" && deepTrustStory ? (
+                    <p style={styles.deepTrustStoryLine}>{deepTrustStory}</p>
+                  ) : null}
                   <p style={styles.quietConfidenceLine}>{confidenceLine}</p>
-                  {activeReviewMode === "deep" && reviewModeExplainer ? (
-                    <p style={styles.reviewModeSupportLine}>{reviewModeExplainer}</p>
-                  ) : null}
-                  {activeReviewMode === "deep" && deltaFromQuick ? (
-                    <div style={styles.trustShiftBlock}>
-                      <p style={styles.trustShiftTitle}>What changed from Quick</p>
-                      <p style={styles.trustShiftBody}>{deltaFromQuick}</p>
-                    </div>
-                  ) : null}
                 </>
               ) : null}
             </div>
@@ -1002,7 +1001,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
               {dedupedBlockedOrUnprovenItems.length ? (
                 <div style={styles.detailsBlock}>
-                  <p style={styles.criteriaCaption}>Still blocked or unproven</p>
+                  <p style={styles.criteriaCaption}>Not verified yet / blocked</p>
                   <ul style={styles.list}>
                     {dedupedBlockedOrUnprovenItems.map((item) => (
                       <li key={item} style={styles.listItem}>
@@ -1149,7 +1148,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               </div>
               {props.afterPromptActionTaken ? (
                 <>
-                  <p style={styles.feedbackPromptSecondary}>Did this next prompt fix your issue?</p>
+                  <p style={styles.feedbackPromptSecondary}>Did this next prompt help?</p>
                   <div style={styles.feedbackActions}>
                     <button
                       type="button"
@@ -1659,38 +1658,17 @@ const styles = {
     lineHeight: 1.45
   } as CSSProperties,
   quietConfidenceLine: {
-    margin: "10px 0 0",
-    fontSize: 12,
+    margin: "8px 0 0",
+    fontSize: 11,
     lineHeight: 1.4,
     color: "#64748b",
     fontWeight: 700
   } as CSSProperties,
-  reviewModeSupportLine: {
-    margin: "6px 0 0",
+  deepTrustStoryLine: {
+    margin: "10px 0 0",
     fontSize: 12,
     lineHeight: 1.5,
     color: "#475569"
-  } as CSSProperties,
-  trustShiftBlock: {
-    marginTop: 10,
-    padding: "10px 12px",
-    borderRadius: 16,
-    background: "rgba(224,231,255,0.36)",
-    border: "1px solid rgba(129,140,248,0.16)"
-  } as CSSProperties,
-  trustShiftTitle: {
-    margin: 0,
-    fontSize: 11,
-    fontWeight: 800,
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    color: "#4338ca"
-  } as CSSProperties,
-  trustShiftBody: {
-    margin: "6px 0 0",
-    fontSize: 13,
-    lineHeight: 1.5,
-    color: "#1e293b"
   } as CSSProperties,
   recommendedActionSupport: {
     margin: "6px 0 0",
