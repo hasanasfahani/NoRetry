@@ -300,6 +300,8 @@ function buildRequest(fixture: RegressionFixture, deep: boolean, baseline?: Retu
     response_summary: preprocessResponse(fixture.responseText),
     response_text_fallback: fixture.responseText,
     deep_analysis: deep,
+    baseline_decision: baseline?.decision,
+    baseline_confidence: baseline?.confidence,
     baseline_acceptance_criteria: baseline?.review_contract.criteria.map((item) => item.label) ?? [],
     baseline_acceptance_checklist: baseline?.acceptance_checklist ?? [],
     baseline_review_contract: baseline?.review_contract ?? null,
@@ -476,6 +478,21 @@ async function main() {
       )
       assert(Boolean(quick.decision), `[${fixture.id}] quick decision is missing`)
       assert(Boolean(deep.decision), `[${fixture.id}] deep decision is missing`)
+      assert(Boolean(quick.decision_display_label), `[${fixture.id}] quick decision display label is missing`)
+      assert(Boolean(deep.decision_display_label), `[${fixture.id}] deep decision display label is missing`)
+      assert(quick.review_mode_label === "Quick read", `[${fixture.id}] quick review mode label drifted: got ${quick.review_mode_label}`)
+      assert(deep.review_mode_label === "Deep validation", `[${fixture.id}] deep review mode label drifted: got ${deep.review_mode_label}`)
+      assert(Boolean(quick.review_mode_explainer), `[${fixture.id}] quick review mode explainer is missing`)
+      assert(Boolean(deep.review_mode_explainer), `[${fixture.id}] deep review mode explainer is missing`)
+      assert(Boolean(deep.delta_from_quick), `[${fixture.id}] deep delta_from_quick is missing`)
+      assert(
+        quick.decision === "Safe to proceed" ? quick.decision_display_label !== "Safe to proceed" : true,
+        `[${fixture.id}] quick display label should soften proof language, got ${quick.decision_display_label}`
+      )
+      assert(
+        deep.decision === "Safe to proceed" ? deep.decision_display_label === "Verified enough to continue" : true,
+        `[${fixture.id}] deep success display label drifted: got ${deep.decision_display_label}`
+      )
       assert(Boolean(quick.popup_state), `[${fixture.id}] quick popup state is missing`)
       assert(Boolean(deep.popup_state), `[${fixture.id}] deep popup state is missing`)
       assert(Boolean(quick.recommended_action), `[${fixture.id}] quick recommended action is missing`)
@@ -517,6 +534,16 @@ async function main() {
           deep.findings.some((item) => /could not|does not clearly show|remain unverified/i.test(item))
         ),
         `[${fixture.id}] deep findings contradict the final checklist/verdict: ${JSON.stringify(deep.findings)}`
+      )
+      const expectedTrend =
+        CONFIDENCE_RANK[deep.confidence] > CONFIDENCE_RANK[quick.confidence]
+          ? "up"
+          : CONFIDENCE_RANK[deep.confidence] < CONFIDENCE_RANK[quick.confidence]
+            ? "down"
+            : "flat"
+      assert(
+        deep.confidence_trend === expectedTrend,
+        `[${fixture.id}] deep confidence trend drifted: expected ${expectedTrend}, got ${deep.confidence_trend}`
       )
       if (deep.status === "SUCCESS") {
         assert(

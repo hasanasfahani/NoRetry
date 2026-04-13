@@ -24,6 +24,7 @@ export const AfterDecisionSchema = z.enum([
   "Likely wrong direction",
   "Not enough proof"
 ])
+export const ConfidenceTrendSchema = z.enum(["up", "down", "flat"])
 export const AfterPopupStateSchema = z.enum([
   "RESPONSE_STILL_STREAMING",
   "ANALYSIS_RAN_TOO_EARLY",
@@ -297,11 +298,16 @@ export const AfterAnalysisResultSchema = z.object({
   status: VerdictStatusSchema,
   confidence: AfterConfidenceSchema,
   popup_state: AfterPopupStateSchema.default("ANALYSIS_READY"),
+  review_mode_label: z.string().max(80).default("Quick read"),
+  review_mode_explainer: z.string().max(220).default(""),
   confidence_label: z.enum(["Low", "Medium", "High"]).default("Low"),
+  confidence_trend: ConfidenceTrendSchema.default("flat"),
   confidence_reason: z.string().max(180).default(""),
   confidence_reasons: z.array(z.string().max(180)).max(3).default([]),
   inspection_depth: z.enum(["summary_only", "targeted_text", "targeted_code"]).default("summary_only"),
   decision: AfterDecisionSchema,
+  decision_display_label: z.string().max(80).default(""),
+  delta_from_quick: z.string().max(220).default(""),
   recommended_action: RecommendedActionSchema,
   why_bullets: z.array(z.string().max(220)).max(3).default([]),
   next_action: z.string().max(180).default(""),
@@ -400,6 +406,8 @@ export const AfterPipelineRequestSchema = z.object({
   response_summary: ResponsePreprocessorOutputSchema,
   response_text_fallback: z.string().default(""),
   deep_analysis: z.boolean().default(false),
+  baseline_decision: AfterDecisionSchema.optional(),
+  baseline_confidence: AfterConfidenceSchema.optional(),
   baseline_acceptance_criteria: z.array(z.string().max(240)).max(6).default([]),
   baseline_acceptance_checklist: z.array(AcceptanceChecklistItemSchema).max(6).default([]),
   baseline_review_contract: ReviewContractSchema.nullable().optional(),

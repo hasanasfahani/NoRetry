@@ -116,6 +116,24 @@ export const getRootContainer: PlasmoGetRootContainer = async () => {
   return host
 }
 
+const RUNTIME_SINGLETON_KEY = "__NORETRY_REPLIT_AGENT_RUNTIME__"
+
+function getRuntimeSingleton() {
+  const scopedWindow = window as typeof window & {
+    [RUNTIME_SINGLETON_KEY]?: {
+      instanceId: string
+      cleanup?: () => void
+    }
+  }
+
+  scopedWindow[RUNTIME_SINGLETON_KEY] ??= {
+    instanceId: "",
+    cleanup: undefined
+  }
+
+  return scopedWindow[RUNTIME_SINGLETON_KEY]!
+}
+
 export default function PromptOptimizerApp() {
   type PendingContextAnalysis = {
     attempt: Attempt
@@ -125,6 +143,7 @@ export default function PromptOptimizerApp() {
   }
 
   type CachedAfterReviews = {
+    attemptId?: string
     threadIdentity: string
     responseIdentity: string
     normalizedText: string
@@ -237,6 +256,7 @@ export default function PromptOptimizerApp() {
   const lastAfterDecisionLogKeyRef = useRef("")
   const scanTimeoutRef = useRef<number | null>(null)
   const positionFrameRef = useRef<number | null>(null)
+  const instanceIdRef = useRef(crypto.randomUUID())
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -541,7 +561,11 @@ export default function PromptOptimizerApp() {
       promptPreview.trim()
     const normalizedPrompt = inferredPrompt.trim()
     const latestSubmitted = await getLatestSubmittedAttempt()
-    if (shouldReuseLatestSubmittedAttempt({ normalizedPrompt, latestSubmitted })) {
+    if (normalizedPrompt && shouldReuseLatestSubmittedAttempt({ normalizedPrompt, latestSubmitted })) {
+      return latestSubmitted
+    }
+
+    if (!normalizedPrompt) {
       return latestSubmitted
     }
 
@@ -586,29 +610,52 @@ export default function PromptOptimizerApp() {
     return value.replace(/\s+/g, " ").trim()
   }
 
+  function targetTextMatches(currentText: string, cachedText: string) {
+    const normalizedCurrent = normalizeAssistantTextForReuse(currentText)
+    const normalizedCached = normalizeAssistantTextForReuse(cachedText)
+    if (!normalizedCurrent || !normalizedCached) return false
+    return normalizedCurrent === normalizedCached
+  }
+
   function hasVisibleGenerationIndicator(node: HTMLElement | null) {
-    const selectors = [
+    const structuralSelectors = [
       "[aria-busy='true']",
-      "[role='status']",
       "[data-testid*='thinking' i]",
       "[data-testid*='generating' i]",
       "[class*='thinking' i]",
       "[class*='generating' i]",
-      "[class*='loading' i]",
-      "button",
-      "span",
-      "div"
+      "[class*='loading' i]"
     ]
-    const pattern = /\b(thinking|generating|working|streaming|writing|stop generating|continue generating|still responding)\b/i
+    const textSelectors = [
+      "button",
+      "[role='button']",
+      "[role='status']",
+      "[aria-live='polite']",
+      "[aria-live='assertive']"
+    ]
+    const pattern = /\b(thinking|generating|streaming|stop generating|continue generating|still responding)\b/i
 
-    const elements = node
-      ? [node, ...Array.from(node.querySelectorAll<HTMLElement>(selectors.join(",")))]
-      : Array.from(document.querySelectorAll<HTMLElement>(selectors.join(",")))
+    const scopedElements = (selectors: string[]) =>
+      node
+        ? Array.from(node.querySelectorAll<HTMLElement>(selectors.join(",")))
+        : Array.from(document.querySelectorAll<HTMLElement>(selectors.join(",")))
 
-    return elements.some((element) => {
+    const structuralMatch = scopedElements(structuralSelectors).some((element) => {
       if (!(element instanceof HTMLElement)) return false
+      if (!element.isConnected) return false
+      const rect = element.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    })
+    if (structuralMatch) return true
+
+    return scopedElements(textSelectors).some((element) => {
+      if (!(element instanceof HTMLElement)) return false
+      if (!element.isConnected) return false
+      const rect = element.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return false
       const text = element.innerText.trim()
-      return Boolean(text && pattern.test(text))
+      if (!text || text.length > 120) return false
+      return pattern.test(text)
     })
   }
 
@@ -722,11 +769,10 @@ export default function PromptOptimizerApp() {
 
     const followUp = getCurrentAssistantSnapshot()
     const followUpText = normalizeAssistantTextForReuse(followUp.text)
-    const changed =
-      followUp.identity !== initial.identity ||
-      followUpText !== initialText
+    const followUpIndicator = hasVisibleGenerationIndicator(followUp.node)
+    const changed = followUpText !== initialText
 
-    if (visibleIndicator) {
+    if (visibleIndicator && followUpIndicator) {
       return {
         ready: false as const,
         popupState: "RESPONSE_STILL_STREAMING" as const
@@ -950,14 +996,19 @@ export default function PromptOptimizerApp() {
 
     if (cache.threadIdentity !== threadIdentity) return false
 
+    if (normalizedText && cache.normalizedText) {
+      return normalizedText === cache.normalizedText
+    }
+
     if (responseIdentity && cache.responseIdentity) {
       return responseIdentity === cache.responseIdentity
     }
 
-    return normalizedText === cache.normalizedText
+    return false
   }
 
   async function getCachedAfterReviewsForTarget(
+    attemptId: string,
     threadIdentity: string,
     responseIdentity: string,
     normalizedText: string,
@@ -969,12 +1020,14 @@ export default function PromptOptimizerApp() {
       responseIdentity,
       normalizedText
     )
+      && (!attemptId || !afterReviewCacheRef.current?.attemptId || afterReviewCacheRef.current.attemptId === attemptId)
       ? afterReviewCacheRef.current
       : null
 
     if (inMemoryCache) return inMemoryCache
 
     const persistedCache = await getAfterReviewCache({
+      attemptId,
       threadIdentity,
       responseIdentity,
       normalizedText
@@ -983,6 +1036,7 @@ export default function PromptOptimizerApp() {
     if (!persistedCache) return null
 
     const restoredCache: CachedAfterReviews = {
+      attemptId: persistedCache.attemptId,
       threadIdentity: persistedCache.threadIdentity,
       responseIdentity: persistedCache.responseIdentity,
       normalizedText: persistedCache.normalizedText,
@@ -1001,6 +1055,7 @@ export default function PromptOptimizerApp() {
 
   function buildDeepDeltaNote(quick: AfterAnalysisResult | null, deep: AfterAnalysisResult | null) {
     if (!quick || !deep) return ""
+    if (deep.delta_from_quick?.trim()) return deep.delta_from_quick.trim()
 
     const quickChecklist = new Map(
       quick.acceptance_checklist.map((item) => [normalizeAssistantTextForReuse(item.label), item.status])
@@ -1094,12 +1149,6 @@ export default function PromptOptimizerApp() {
     const latestMessageId = identity || readAssistantMessageIdentity(latestMessage, text)
     const currentThread = getCurrentThreadSnapshot()
     const effectiveThreadIdentity = targetOverride?.threadIdentity ?? currentThread.identity
-    const sameAnalyzedTarget = isSameCachedAfterTarget(
-      afterReviewCacheRef.current,
-      effectiveThreadIdentity,
-      latestMessageId,
-      normalizedText
-    )
 
     if (!text || (!force && normalizedText === normalizedLastText)) {
       return false
@@ -1107,6 +1156,12 @@ export default function PromptOptimizerApp() {
 
     const attempt = targetOverride?.attempt ?? (await ensureSubmittedAttempt())
     if (!attempt) return false
+    const sameAnalyzedTarget = isSameCachedAfterTarget(
+      afterReviewCacheRef.current,
+      effectiveThreadIdentity,
+      latestMessageId,
+      normalizedText
+    ) && (!afterReviewCacheRef.current?.attemptId || afterReviewCacheRef.current.attemptId === attempt.attempt_id)
 
     latestAssistantNodeRef.current = latestMessage
     setIsEvaluatingAfterResponse(true)
@@ -1145,6 +1200,8 @@ export default function PromptOptimizerApp() {
         response_summary: responseSummary,
         response_text_fallback: text,
         deep_analysis: deepAnalysis,
+        baseline_decision: sameAnalyzedTarget ? baselineVerdict?.decision : undefined,
+        baseline_confidence: sameAnalyzedTarget ? baselineVerdict?.confidence : undefined,
         baseline_acceptance_criteria: baselineAcceptanceCriteria,
         baseline_acceptance_checklist:
           sameAnalyzedTarget ? afterReviewCacheRef.current?.quick?.acceptance_checklist ?? [] : [],
@@ -1189,6 +1246,7 @@ export default function PromptOptimizerApp() {
       lastEvaluatedChatHrefRef.current = effectiveThreadIdentity
       if (!sameAnalyzedTarget || !afterReviewCacheRef.current) {
         afterReviewCacheRef.current = {
+          attemptId: attempt.attempt_id,
           threadIdentity: effectiveThreadIdentity,
           responseIdentity: latestMessageId,
           normalizedText,
@@ -1199,6 +1257,7 @@ export default function PromptOptimizerApp() {
       } else if (deepAnalysis) {
         afterReviewCacheRef.current = {
           ...afterReviewCacheRef.current,
+          attemptId: attempt.attempt_id,
           quick: afterReviewCacheRef.current.quick ?? baselineVerdict ?? null,
           deep: result,
           deepArtifactSignature: deepArtifactSignature
@@ -1206,6 +1265,7 @@ export default function PromptOptimizerApp() {
       } else {
         afterReviewCacheRef.current = {
           ...afterReviewCacheRef.current,
+          attemptId: attempt.attempt_id,
           quick: result,
           deepArtifactSignature: afterReviewCacheRef.current.deepArtifactSignature ?? ""
         }
@@ -1217,6 +1277,7 @@ export default function PromptOptimizerApp() {
       }
       if (afterReviewCacheRef.current) {
         await saveAfterReviewCache({
+          attemptId: afterReviewCacheRef.current.attemptId,
           threadIdentity: afterReviewCacheRef.current.threadIdentity,
           responseIdentity: afterReviewCacheRef.current.responseIdentity,
           normalizedText: afterReviewCacheRef.current.normalizedText,
@@ -1298,6 +1359,12 @@ export default function PromptOptimizerApp() {
         return true
       }
 
+      if (node.matches?.("textarea, input, button, [role='textbox'], [contenteditable='true'], [role='button'], form")) {
+        return true
+      }
+
+      if (node.childElementCount > 18) return false
+
       return Boolean(
         node.querySelector?.(
           "textarea, input, [role='textbox'], [contenteditable='true'], button, [role='button'], form, [aria-label*='prompt' i], [placeholder*='prompt' i], [aria-label*='message' i], [placeholder*='message' i]"
@@ -1322,7 +1389,11 @@ export default function PromptOptimizerApp() {
         return
       }
 
-      const input = findPromptInput()
+      const currentPrompt = promptRef.current
+      const input =
+        currentPrompt && currentPrompt.isConnected && isPromptLikeElement(currentPrompt)
+          ? currentPrompt
+          : findPromptInput()
       if (!input) {
         const fallbackInput = lastFocusedPromptRef.current
         if (fallbackInput && fallbackInput.isConnected && isPromptLikeElement(fallbackInput)) {
@@ -1397,6 +1468,11 @@ export default function PromptOptimizerApp() {
       }
     }
 
+    const singleton = getRuntimeSingleton()
+    if (singleton.cleanup && singleton.instanceId !== instanceIdRef.current) {
+      singleton.cleanup()
+    }
+
     runScan()
     const observer = new MutationObserver((mutations) => {
       if (popupOpenRef.current) {
@@ -1420,7 +1496,7 @@ export default function PromptOptimizerApp() {
     window.addEventListener("scroll", schedulePositionHost, true)
     setMounted(true)
 
-    return () => {
+    const disposeRuntime = () => {
       observer.disconnect()
       document.removeEventListener("focusin", handleFocusIn)
       window.removeEventListener("resize", schedulePositionHost)
@@ -1437,6 +1513,16 @@ export default function PromptOptimizerApp() {
       if (afterLoadingIntervalRef.current) {
         window.clearInterval(afterLoadingIntervalRef.current)
         afterLoadingIntervalRef.current = null
+      }
+    }
+
+    singleton.instanceId = instanceIdRef.current
+    singleton.cleanup = disposeRuntime
+
+    return () => {
+      disposeRuntime()
+      if (singleton.instanceId === instanceIdRef.current) {
+        singleton.cleanup = undefined
       }
     }
   }, [])
@@ -1715,26 +1801,44 @@ export default function PromptOptimizerApp() {
     const sameChat = threadSnapshot.identity === lastEvaluatedChatHrefRef.current
     const currentDraftPrompt = draftSnapshot.text.trim()
     const savedDraftPrompt = afterPlanningGoal.trim() || afterAttempt?.raw_prompt.trim() || ""
+    const latestSubmittedAttempt = await getLatestSubmittedAttempt()
+    const sameSubmittedAttempt =
+      Boolean(latestSubmittedAttempt?.attempt_id) &&
+      Boolean(afterAttempt?.attempt_id) &&
+      latestSubmittedAttempt?.attempt_id === afterAttempt?.attempt_id
     const shouldStartWithDeepReview = false
     const canReuseOpenVerdict =
       Boolean(afterVerdict) &&
+      sameSubmittedAttempt &&
       !["RESPONSE_STILL_STREAMING", "ANALYSIS_RAN_TOO_EARLY", "ANALYSIS_FAILED_INTERNAL"].includes(
         afterVerdict?.popup_state ?? "ANALYSIS_READY"
       )
     const sameMessage =
-      latestMessageId && lastEvaluatedAssistantMessageIdRef.current
-        ? latestMessageId === lastEvaluatedAssistantMessageIdRef.current
-        : normalizedText === normalizedLastText
+      targetTextMatches(text, lastEvaluatedAssistantTextRef.current) ||
+      (!normalizedText &&
+        !normalizedLastText &&
+        latestMessageId &&
+        lastEvaluatedAssistantMessageIdRef.current &&
+        latestMessageId === lastEvaluatedAssistantMessageIdRef.current)
     const sameDraftPrompt = currentDraftPrompt === savedDraftPrompt
     const baselineResponse = projectMemoryBaselineResponseRef.current
     const sameAsProjectMemoryBaseline =
       Boolean(text) &&
       Boolean(baselineResponse) &&
       baselineResponse?.threadIdentity === threadSnapshot.identity &&
-      ((latestMessageId && baselineResponse.identity && latestMessageId === baselineResponse.identity) ||
-        normalizedText === baselineResponse.normalizedText)
+      (targetTextMatches(text, baselineResponse.normalizedText) ||
+        (!normalizedText &&
+          !baselineResponse.normalizedText &&
+          latestMessageId &&
+          baselineResponse.identity &&
+          latestMessageId === baselineResponse.identity))
     const cachedReviews = text
-      ? await getCachedAfterReviewsForTarget(threadSnapshot.identity, latestMessageId, normalizedText)
+      ? await getCachedAfterReviewsForTarget(
+          latestSubmittedAttempt?.attempt_id ?? "",
+          threadSnapshot.identity,
+          latestMessageId,
+          normalizedText
+        )
       : null
 
     if (hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current && sameAsProjectMemoryBaseline) {
@@ -1766,7 +1870,7 @@ export default function PromptOptimizerApp() {
       setAfterPanelOpen(true)
       setAfterDisplayedReviewMode("quick")
       setAfterVerdict(cachedReviews.quick)
-      setAfterAttempt(await ensureSubmittedAttempt())
+      setAfterAttempt(latestSubmittedAttempt ?? (await ensureSubmittedAttempt()))
       lastEvaluatedAssistantTextRef.current = text
       lastEvaluatedAssistantMessageIdRef.current = latestMessageId
       lastEvaluatedChatHrefRef.current = threadSnapshot.identity
@@ -2658,6 +2762,11 @@ export default function PromptOptimizerApp() {
     setAfterPanelOpen(false)
     resetAfterNextStepFlow()
     latestAssistantNodeRef.current = null
+    lastEvaluatedAssistantTextRef.current = ""
+    lastEvaluatedAssistantMessageIdRef.current = ""
+    lastEvaluatedChatHrefRef.current = ""
+    strongestAfterVerdictRef.current = null
+    afterReviewCacheRef.current = null
     setHasSubmittedPrompt(true)
 
     const nextSession = buildSessionAfterSubmit({

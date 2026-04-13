@@ -196,7 +196,7 @@ function recommendedActionLabel(
 
 function popupStateLabel(
   popupState: AfterAnalysisResult["popup_state"],
-  decision: AfterAnalysisResult["decision"]
+  decisionLabel: string
 ) {
   switch (popupState) {
     case "RESPONSE_STILL_STREAMING":
@@ -205,16 +205,49 @@ function popupStateLabel(
       return "Analysis ran too early"
     case "ANALYSIS_FAILED_INTERNAL":
       return "Analysis failed"
-    case "SAFE_TO_PROCEED":
-      return "Safe to proceed"
-    case "NEEDS_REFINEMENT":
-      return "Needs refinement"
-    case "WRONG_DIRECTION":
-      return "Likely wrong direction"
-    case "NOT_ENOUGH_PROOF":
-      return "Not enough proof"
     default:
-      return decision
+      return decisionLabel
+  }
+}
+
+function confidenceTrendLabel(
+  confidenceLabel: string,
+  trend: AfterAnalysisResult["confidence_trend"],
+  mode: "quick" | "deep"
+) {
+  if (mode !== "deep") return `Confidence: ${confidenceLabel}`
+  if (trend === "up") return `Confidence: ${confidenceLabel} ↑`
+  if (trend === "down") return `Confidence: ${confidenceLabel} ↓`
+  return `Confidence: ${confidenceLabel}`
+}
+
+function checklistStatusMarker(
+  item: AfterAnalysisResult["acceptance_checklist"][number],
+  mode: "quick" | "deep",
+  verification?: AfterAnalysisResult["deep_criterion_verifications"][number]
+) {
+  if (mode === "quick") {
+    switch (item.status) {
+      case "met":
+        return "(supported by answer)"
+      case "missed":
+        return "(not clearly covered)"
+      case "blocked":
+        return "(needs deeper proof)"
+      default:
+        return "(uncertain)"
+    }
+  }
+
+  switch (item.status) {
+    case "met":
+      return "(verified)"
+    case "missed":
+      return verification?.explanation?.toLowerCase().includes("contradict") ? "(contradicted)" : "(missing)"
+    case "blocked":
+      return "(blocked)"
+    default:
+      return "(unresolved)"
   }
 }
 
@@ -437,25 +470,14 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
     sanitizeUserFacingAfterText(props.verdict.findings.find((item) => item.trim().length > 0) || "") ||
     "NoRetry reviewed the answer against your request."
   const isPlannerOnlyState = !hasRealReview && props.nextStepStarted
-  const checklistItems = (props.verdict.acceptance_checklist ?? []).map((item) => ({
-    label: humanizeChecklistLabel(item.label),
-    marker:
-      item.status === "met"
-        ? "✅"
-        : item.status === "missed"
-          ? "🚫"
-          : item.status === "blocked"
-            ? "(blocked)"
-            : "(not sure)"
-  }))
-  const confidenceTone = toneForConfidence(props.verdict.confidence)
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const activeReviewMode = props.displayedReviewMode
-  const reviewTone = toneForDisplayedReview(activeReviewMode, props.verdict.inspection_depth)
-  const decisionLabel = popupStateLabel(popupState, props.verdict.decision ?? "Not enough proof")
+  const decisionDisplayLabel = props.verdict.decision_display_label || props.verdict.decision || "Not enough proof"
+  const decisionLabel = popupStateLabel(popupState, decisionDisplayLabel)
   const recommendedAction = props.verdict.recommended_action ?? "VALIDATE_FIRST"
   const recommendedActionText = recommendedActionLabel(recommendedAction, popupState)
   const confidenceLabel = props.verdict.confidence_label ?? confidenceTitle(props.verdict.confidence)
+  const confidenceLine = confidenceTrendLabel(confidenceLabel, props.verdict.confidence_trend ?? "flat", activeReviewMode)
   const promptAllowedByState = isPromptAllowedForState(popupState)
   const promptVisibleByContent = isMeaningfulRecommendedPrompt(props.verdict.next_prompt ?? "")
   const showPromptAsPrimaryAction = promptAllowedByState && promptVisibleByContent && recommendedAction !== "PROCEED"
@@ -465,16 +487,35 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const blockedOrUnprovenItems = props.verdict.blocked_or_unproven_items ?? []
   const nextPromptExplanation = props.verdict.next_prompt_explanation ?? ""
   const expectedOutcome = props.verdict.expected_outcome ?? ""
+  const reviewModeExplainer = sanitizeUserFacingAfterText(props.verdict.review_mode_explainer ?? "")
+  const deltaFromQuick =
+    activeReviewMode === "deep"
+      ? sanitizeUserFacingAfterText(props.verdict.delta_from_quick ?? props.deepDeltaNote ?? "")
+      : ""
+  const deepVerificationMap = new Map(
+    (props.verdict.deep_criterion_verifications ?? []).map((item) => [normalizeBulletKey(item.criterion_label), item])
+  )
+  const checklistItems = (props.verdict.acceptance_checklist ?? []).map((item) => ({
+    label: humanizeChecklistLabel(item.label),
+    marker: checklistStatusMarker(
+      item,
+      activeReviewMode,
+      deepVerificationMap.get(normalizeBulletKey(item.label))
+    )
+  }))
   const summaryNeedsExpand = needsExpansionControl(summarySentence)
   const displayedSummarySentence = summaryExpanded ? summarySentence : collapseForPreview(summarySentence)
-  const usedSectionKeys = new Set<string>([normalizeBulletKey(summarySentence)])
+  const topSectionKeys = new Set<string>()
+  const topMissingItems = collectUniqueSectionItems(blockedOrUnprovenItems, topSectionKeys, 2)
+  const whySectionKeys = new Set<string>([...topSectionKeys, normalizeBulletKey(summarySentence)])
   const whyBullets = collectUniqueSectionItems(
     props.verdict.why_bullets?.length ? props.verdict.why_bullets : [summarySentence],
-    usedSectionKeys,
+    whySectionKeys,
     2
   )
-  const dedupedBlockedOrUnprovenItems = collectUniqueSectionItems(blockedOrUnprovenItems, usedSectionKeys, 4)
-  const confidenceReasons = collectUniqueSectionItems(props.verdict.confidence_reasons ?? [], usedSectionKeys, 3)
+  const detailsSectionKeys = new Set<string>([...topSectionKeys, ...whySectionKeys])
+  const dedupedBlockedOrUnprovenItems = collectUniqueSectionItems(blockedOrUnprovenItems, detailsSectionKeys, 4)
+  const confidenceReasons = collectUniqueSectionItems(props.verdict.confidence_reasons ?? [], detailsSectionKeys, 3)
   const deepReviewLimitedHint = ""
   const deepReviewEvidenceItems =
     activeReviewMode === "deep"
@@ -814,68 +855,35 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               {!isPlannerOnlyState ? (
                 <>
                   <p style={styles.recommendedActionLine}>👉 Recommended: {recommendedActionText}</p>
-                  <p style={styles.recommendedActionSupport}>{displayedSummarySentence}</p>
+                  {topMissingItems.length ? (
+                    <div style={styles.missingSummaryBlock}>
+                      <p style={styles.missingSummaryTitle}>Missing</p>
+                      <ul style={styles.missingSummaryList}>
+                        {topMissingItems.map((item) => (
+                          <li key={item} style={styles.missingSummaryItem}>
+                            <span style={styles.leadingBullet}>•</span>
+                            <span style={styles.listText}>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  <p style={styles.quietConfidenceLine}>{confidenceLine}</p>
+                  {activeReviewMode === "deep" && reviewModeExplainer ? (
+                    <p style={styles.reviewModeSupportLine}>{reviewModeExplainer}</p>
+                  ) : null}
+                  {activeReviewMode === "deep" && deltaFromQuick ? (
+                    <div style={styles.trustShiftBlock}>
+                      <p style={styles.trustShiftTitle}>What changed from Quick</p>
+                      <p style={styles.trustShiftBody}>{deltaFromQuick}</p>
+                    </div>
+                  ) : null}
                 </>
               ) : null}
             </div>
             <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close verdict panel">
               x
             </button>
-          </div>
-
-          <div style={styles.footer}>
-            <div style={styles.confidenceBlock}>
-              <p style={styles.statusMeta}>
-                <span style={styles.metaChip(confidenceTone.bg, confidenceTone.fg, confidenceTone.border)}>
-                  Confidence: {confidenceLabel}
-                </span>
-                <span style={styles.metaChip(reviewTone.bg, reviewTone.fg, reviewTone.border)}>
-                  Review: {reviewTone.label}
-                </span>
-                {showPromptAsPrimaryAction ? (
-                  <span style={styles.metaChip("#eff6ff", "#1d4ed8", "rgba(29,78,216,0.16)")}>
-                    Strategy: {promptStrategyDisplayLabel}
-                  </span>
-                ) : null}
-              </p>
-              {confidenceReasons.length ? (
-                <p style={styles.statusHint}>{confidenceReasons[0]}</p>
-              ) : shouldShowDeepReviewEvidenceHint ? (
-                <p style={styles.statusHint}>{deepReviewEvidenceHint}</p>
-              ) : null}
-            </div>
-          </div>
-
-          <div style={styles.block}>
-            <p style={styles.blockTitle}>Why</p>
-            {hasRealReview ? (
-              <p style={styles.summaryContext}>Decide whether to trust this answer or refine it before you retry.</p>
-            ) : isPlannerOnlyState ? (
-              <p style={styles.summaryContext}>NoRetry is ready to help shape the next prompt before any answer exists.</p>
-            ) : null}
-            {whyBullets.length ? (
-              <ul style={styles.decisionBullets}>
-                {whyBullets.map((item) => (
-                  <li key={item} style={styles.decisionBulletItem}>
-                    <span style={styles.leadingBullet}>•</span>
-                    <span style={styles.listText}>{item}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            {shouldShowLoadingProgress ? (
-              <div style={styles.loadingProgressWrap}>
-                <div style={styles.loadingProgressMeta}>
-                  <span style={styles.loadingPercent}>{props.loadingProgress?.percent ?? 0}%</span>
-                  <span style={styles.loadingStageLabel}>{props.loadingProgress?.label}</span>
-                </div>
-                <div style={styles.loadingTrack}>
-                  <div
-                    style={styles.loadingTrackFill(props.loadingProgress?.percent ?? 0)}
-                  />
-                </div>
-              </div>
-            ) : null}
           </div>
 
           {showPromptAsPrimaryAction ? (
@@ -930,6 +938,41 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               ) : null}
             </div>
           </div>
+          ) : null}
+
+          {shouldShowLoadingProgress ? (
+            <div style={styles.loadingProgressWrap}>
+              <div style={styles.loadingProgressMeta}>
+                <span style={styles.loadingPercent}>{props.loadingProgress?.percent ?? 0}%</span>
+                <span style={styles.loadingStageLabel}>{props.loadingProgress?.label}</span>
+              </div>
+              <div style={styles.loadingTrack}>
+                <div
+                  style={styles.loadingTrackFill(props.loadingProgress?.percent ?? 0)}
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {whyBullets.length || shouldShowDeepReviewEvidenceHint ? (
+            <div style={styles.secondaryReasonBlock}>
+              {whyBullets.length ? (
+                <>
+                  <p style={styles.secondaryReasonTitle}>Why this decision</p>
+                  <ul style={styles.decisionBullets}>
+                    {whyBullets.map((item) => (
+                      <li key={item} style={styles.decisionBulletItem}>
+                        <span style={styles.leadingBullet}>•</span>
+                        <span style={styles.listText}>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
+              {shouldShowDeepReviewEvidenceHint ? (
+                <p style={styles.secondaryMetaLine}>{deepReviewEvidenceHint}</p>
+              ) : null}
+            </div>
           ) : null}
         </div>
 
@@ -987,10 +1030,16 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
 
               {checklistItems.length ? (
                 <div style={styles.detailsBlock}>
-                  <p style={styles.criteriaCaption}>Checked against your submitted prompt</p>
-                  {activeReviewMode === "deep" && props.deepDeltaNote ? (
-                    <p style={styles.criteriaNote}>{props.deepDeltaNote}</p>
-                  ) : null}
+                  <p style={styles.criteriaCaption}>
+                    {activeReviewMode === "deep"
+                      ? "Deep validation against the same checklist"
+                      : "Quick read against your submitted prompt"}
+                  </p>
+                  {activeReviewMode === "deep" ? (
+                    <p style={styles.criteriaNote}>Built on the same checklist as Quick, but judged with stronger visible evidence.</p>
+                  ) : (
+                    <p style={styles.criteriaNote}>Quick read shows what the answer seems to cover before deeper proof checks.</p>
+                  )}
                   {activeReviewMode === "deep" && deepReviewEvidenceHint ? (
                     <p style={styles.criteriaNote}>{deepReviewEvidenceHint}</p>
                   ) : null}
@@ -1050,7 +1099,9 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                 ) : null}
                 {shouldShowDeepReviewEvidenceHint ? <p style={styles.statusHint}>{deepReviewEvidenceHint}</p> : null}
                 {deepReviewLimitedHint ? <p style={styles.statusHint}>{deepReviewLimitedHint}</p> : null}
-                <p style={styles.statusHint}>Evidence level: {evidenceLabel}. Quick label: {statusLabel}.</p>
+                <p style={styles.statusHint}>
+                  Evidence level: {evidenceLabel}. {activeReviewMode === "deep" ? "Deep signal" : "Quick signal"}: {statusLabel}.
+                </p>
               </div>
               ) : null}
             </>
@@ -1065,7 +1116,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   onClick={() => props.onSelectCodeAnalysisMode("quick")}
                   disabled={props.isEvaluating || props.isDeepAnalyzing}
                 >
-                  Quick
+                  Quick read
                 </button>
                 <button
                   type="button"
@@ -1073,7 +1124,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   onClick={() => props.onSelectCodeAnalysisMode("deep")}
                   disabled={props.isEvaluating || props.isDeepAnalyzing}
                 >
-                  {props.isDeepAnalyzing && activeReviewMode === "deep" ? "Digging deeper..." : "Deep"}
+                  {props.isDeepAnalyzing && activeReviewMode === "deep" ? "Validating deeper..." : "Deep validation"}
                 </button>
               </div>
             ) : null}
@@ -1370,25 +1421,27 @@ const styles = {
     borderRadius: 24,
     background: "linear-gradient(180deg, rgba(255,255,255,0.94) 0%, rgba(239,246,255,0.74) 100%)",
     border: "1px solid rgba(148,163,184,0.12)",
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)"
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.6)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 14
   } as CSSProperties,
   decisionBullets: {
-    margin: "10px 0 0",
+    margin: "8px 0 0",
     padding: 0,
     listStyle: "none",
     display: "grid",
-    gap: 10
+    gap: 8
   } as CSSProperties,
   decisionBulletItem: {
     display: "flex",
     alignItems: "flex-start",
-    gap: 10,
+    gap: 8,
     color: "#1e293b",
-    fontSize: 15,
-    lineHeight: 1.55
+    fontSize: 14,
+    lineHeight: 1.5
   } as CSSProperties,
   nextActionCard: {
-    marginTop: 16,
     padding: 16,
     borderRadius: 22,
     background: "linear-gradient(180deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.98) 100%)",
@@ -1536,7 +1589,7 @@ const styles = {
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 12,
-    marginBottom: 16
+    marginBottom: 0
   } as CSSProperties,
   eyebrow: {
     margin: 0,
@@ -1570,10 +1623,74 @@ const styles = {
   } as CSSProperties,
   recommendedActionLine: {
     margin: "10px 0 0",
-    fontSize: 14,
-    lineHeight: 1.5,
+    fontSize: 15,
+    lineHeight: 1.45,
     fontWeight: 800,
     color: "#0f172a"
+  } as CSSProperties,
+  missingSummaryBlock: {
+    marginTop: 12,
+    padding: "10px 12px",
+    borderRadius: 16,
+    background: "rgba(255,255,255,0.78)",
+    border: "1px solid rgba(148,163,184,0.14)"
+  } as CSSProperties,
+  missingSummaryTitle: {
+    margin: 0,
+    fontSize: 11,
+    fontWeight: 800,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    color: "#64748b"
+  } as CSSProperties,
+  missingSummaryList: {
+    margin: "8px 0 0",
+    padding: 0,
+    listStyle: "none",
+    display: "grid",
+    gap: 6
+  } as CSSProperties,
+  missingSummaryItem: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
+    color: "#1e293b",
+    fontSize: 13,
+    lineHeight: 1.45
+  } as CSSProperties,
+  quietConfidenceLine: {
+    margin: "10px 0 0",
+    fontSize: 12,
+    lineHeight: 1.4,
+    color: "#64748b",
+    fontWeight: 700
+  } as CSSProperties,
+  reviewModeSupportLine: {
+    margin: "6px 0 0",
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#475569"
+  } as CSSProperties,
+  trustShiftBlock: {
+    marginTop: 10,
+    padding: "10px 12px",
+    borderRadius: 16,
+    background: "rgba(224,231,255,0.36)",
+    border: "1px solid rgba(129,140,248,0.16)"
+  } as CSSProperties,
+  trustShiftTitle: {
+    margin: 0,
+    fontSize: 11,
+    fontWeight: 800,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    color: "#4338ca"
+  } as CSSProperties,
+  trustShiftBody: {
+    margin: "6px 0 0",
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: "#1e293b"
   } as CSSProperties,
   recommendedActionSupport: {
     margin: "6px 0 0",
@@ -1592,6 +1709,22 @@ const styles = {
   } as CSSProperties,
   summaryContext: {
     margin: "0 0 10px",
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: "#64748b"
+  } as CSSProperties,
+  secondaryReasonBlock: {
+    display: "grid",
+    gap: 8
+  } as CSSProperties,
+  secondaryReasonTitle: {
+    margin: 0,
+    fontSize: 13,
+    fontWeight: 800,
+    color: "#334155"
+  } as CSSProperties,
+  secondaryMetaLine: {
+    margin: 0,
     fontSize: 12,
     lineHeight: 1.45,
     color: "#64748b"

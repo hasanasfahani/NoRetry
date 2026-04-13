@@ -1,6 +1,9 @@
 import {
   AcceptanceChecklistItemSchema,
+  AfterConfidenceSchema,
+  AfterDecisionSchema,
   ArtifactContextSchema,
+  ConfidenceTrendSchema,
   DeepCriterionVerificationSchema,
   AfterPipelineResponseSchema,
   IntentExtractionOutputSchema,
@@ -1658,6 +1661,132 @@ function sanitizeDeepVerificationsForSchema(verifications: z.infer<typeof DeepCr
   )
 }
 
+const CONFIDENCE_RANK: Record<z.infer<typeof AfterConfidenceSchema>, number> = {
+  low: 1,
+  medium: 2,
+  high: 3
+}
+
+function displayDecisionLabel(
+  decision: z.infer<typeof AfterPipelineResponseSchema>["decision"],
+  deepAnalysisRequested: boolean
+) {
+  if (deepAnalysisRequested) {
+    switch (decision) {
+      case "Safe to proceed":
+        return "Verified enough to continue"
+      case "Needs refinement":
+        return "Still needs refinement"
+      case "Likely wrong direction":
+        return "Contradicted by visible evidence"
+      default:
+        return "Not enough proof"
+    }
+  }
+
+  switch (decision) {
+    case "Safe to proceed":
+      return "Looks good"
+    case "Needs refinement":
+      return "Needs refinement"
+    case "Likely wrong direction":
+      return "Likely off track"
+    default:
+      return "Not clear yet"
+  }
+}
+
+function buildConfidenceTrend(
+  current: z.infer<typeof AfterConfidenceSchema>,
+  baseline?: z.infer<typeof AfterConfidenceSchema>
+) {
+  if (!baseline) return "flat" as const
+  if (CONFIDENCE_RANK[current] > CONFIDENCE_RANK[baseline]) return "up" as const
+  if (CONFIDENCE_RANK[current] < CONFIDENCE_RANK[baseline]) return "down" as const
+  return "flat" as const
+}
+
+function buildDeepDeltaSummary(params: {
+  baselineChecklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>
+  deepChecklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>
+  confidenceTrend: z.infer<typeof ConfidenceTrendSchema>
+  baselineDecision?: z.infer<typeof AfterDecisionSchema>
+  checkedArtifacts: string[]
+  contradictionCount: number
+}) {
+  const { baselineChecklist, deepChecklist, confidenceTrend, baselineDecision, checkedArtifacts, contradictionCount } = params
+  const baselineMap = new Map(baselineChecklist.map((item) => [normalizeForMatch(item.label), item.status]))
+  const changed = deepChecklist.filter((item) => {
+    const previous = baselineMap.get(normalizeForMatch(item.label))
+    return previous && previous !== item.status
+  })
+  const changedLabels = changed.map((item) => normalizeCriterionLabel(item.label)).filter(Boolean)
+  const sampleLabel = changedLabels[0]
+  const artifactText = checkedArtifacts[0] ? ` after checking ${checkedArtifacts[0]}` : " after checking stronger visible evidence"
+
+  if (!baselineChecklist.length) {
+    return `Deep validation rechecked the same target${artifactText}.`
+  }
+
+  if (confidenceTrend === "down" && changedLabels.length) {
+    return `Quick looked aligned, but Deep lowered confidence because visible proof did not confirm: ${summarizeChecklistLabels(changedLabels, 2)}.`
+  }
+
+  if (confidenceTrend === "up" && changedLabels.length) {
+    return `Deep strengthened the earlier quick read because visible proof supported: ${summarizeChecklistLabels(changedLabels, 2)}.`
+  }
+
+  if (changedLabels.length) {
+    return `Deep kept the same target but tightened ${changedLabels.length} checklist result${changedLabels.length > 1 ? "s" : ""}; for example, ${sampleLabel}.`
+  }
+
+  if (confidenceTrend === "down") {
+    return contradictionCount > 0
+      ? "Quick looked plausible, but Deep lowered confidence because stronger checks found a contradiction."
+      : "Quick looked plausible, but Deep lowered confidence because stronger checks still could not verify key steps."
+  }
+
+  if (confidenceTrend === "up") {
+    return "Deep confirmed the earlier quick read with stronger visible evidence."
+  }
+
+  if (baselineDecision === "Safe to proceed") {
+    return "Deep checked the same checklist with stronger visible evidence and kept the earlier direction."
+  }
+
+  return `Deep validated the same checklist${artifactText}.`
+}
+
+function buildReviewModeExplainer(params: {
+  deepAnalysisRequested: boolean
+  confidenceTrend: z.infer<typeof ConfidenceTrendSchema>
+  contradictionCount: number
+  allCriteriaMet: boolean
+  blockedItems: Array<z.infer<typeof AcceptanceChecklistItemSchema>>
+}) {
+  const { deepAnalysisRequested, confidenceTrend, contradictionCount, allCriteriaMet, blockedItems } = params
+
+  if (!deepAnalysisRequested) {
+    return "Quick read uses the answer and lighter signals, so it is an early directional judgment."
+  }
+
+  if (confidenceTrend === "down") {
+    return contradictionCount > 0
+      ? "This deeper validation checked stronger visible proof and reduced confidence after finding a contradiction."
+      : "This deeper validation checked stronger visible proof and reduced confidence."
+  }
+
+  if (confidenceTrend === "up") {
+    return "This deeper validation checked stronger visible proof and increased confidence."
+  }
+
+  if (allCriteriaMet && blockedItems.length === 0) {
+    return "This deeper validation checked the same checklist and found enough visible proof to keep moving."
+  }
+
+  return "This deeper validation checked the same checklist with stronger visible proof."
+}
+
 function buildDecisionNextPrompt(params: {
   optimizedPrompt: string
   reviewContract: ReviewContract
@@ -1667,8 +1796,20 @@ function buildDecisionNextPrompt(params: {
   blockedOrUnprovenItems: string[]
   contradictionCount: number
   whyBullets: string[]
+  deepAnalysisRequested: boolean
+  baselineDecision?: z.infer<typeof AfterDecisionSchema>
 }) {
-  const { reviewContract, intent, decision, promptStrategy, blockedOrUnprovenItems, contradictionCount, whyBullets } = params
+  const {
+    reviewContract,
+    intent,
+    decision,
+    promptStrategy,
+    blockedOrUnprovenItems,
+    contradictionCount,
+    whyBullets,
+    deepAnalysisRequested,
+    baselineDecision
+  } = params
   const focusItems = blockedOrUnprovenItems.slice(0, 2)
   const constraints = intent.constraints.filter(Boolean).slice(0, 3)
   const goalLine = `Stay inside the original goal: ${reviewContract.goal}.`
@@ -1676,12 +1817,14 @@ function buildDecisionNextPrompt(params: {
   const focusLine = focusItems.length
     ? `Focus only on these items:\n${focusItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
     : "Focus only on the part that still lacks proof."
+  const deepTightenedEarlierRead = deepAnalysisRequested && Boolean(baselineDecision) && baselineDecision !== decision
 
   if (promptStrategy === "resolve_contradiction") {
     return NextPromptOutputSchema.parse({
       next_prompt: [
         goalLine,
         constraintsLine,
+        deepTightenedEarlierRead ? "The earlier quick read looked aligned, but the deeper review found a proof gap." : "",
         "Your last answer and the observed evidence do not agree.",
         contradictionCount > 0 && whyBullets.length ? `Resolve this contradiction first: ${whyBullets[0]}` : "",
         focusLine,
@@ -1703,6 +1846,7 @@ function buildDecisionNextPrompt(params: {
       next_prompt: [
         goalLine,
         constraintsLine,
+        deepAnalysisRequested ? "The answer looked plausible, but the deeper review did not verify the missing step below." : "",
         "Fix only the missing part below. Do not rework the parts that already look correct.",
         focusLine,
         "Do not broaden scope or restate the whole solution.",
@@ -1723,6 +1867,7 @@ function buildDecisionNextPrompt(params: {
       next_prompt: [
         goalLine,
         constraintsLine,
+        deepTightenedEarlierRead ? "Quick looked directionally right, but the deeper review still needs proof for the exact scope below." : "",
         "Return to the requested scope and ignore side work that does not directly satisfy it.",
         focusLine,
         "Do not refactor unrelated files or redo parts that already look correct.",
@@ -1742,6 +1887,7 @@ function buildDecisionNextPrompt(params: {
     next_prompt: [
       goalLine,
       constraintsLine,
+      deepAnalysisRequested ? "The answer looked plausible, but stronger visible proof is still missing." : "",
       "Do not change the implementation yet. Validate only the still-unproven parts below.",
       focusLine,
       "For each item, say whether it is proven, what evidence supports it, or why it is still unproven.",
@@ -1766,6 +1912,9 @@ function buildDecisionPresentation(params: {
   verifications: z.infer<typeof DeepCriterionVerificationSchema>[]
   contradictionCount: number
   deepAnalysisRequested: boolean
+  baselineDecision?: z.infer<typeof AfterDecisionSchema>
+  baselineConfidence?: z.infer<typeof AfterConfidenceSchema>
+  baselineChecklist: Array<z.infer<typeof AcceptanceChecklistItemSchema>>
   bundle: NormalizedArtifactBundle
   responseSummary: AfterPipelineRequest["response_summary"]
   intent: AttemptIntent
@@ -1780,6 +1929,9 @@ function buildDecisionPresentation(params: {
     verifications,
     contradictionCount,
     deepAnalysisRequested,
+    baselineDecision,
+    baselineConfidence,
+    baselineChecklist,
     bundle,
     responseSummary,
     intent,
@@ -1856,6 +2008,27 @@ function buildDecisionPresentation(params: {
     }
   }
 
+  const confidenceTrend = buildConfidenceTrend(confidence, deepAnalysisRequested ? baselineConfidence : undefined)
+  const decisionDisplayLabel = displayDecisionLabel(decision, deepAnalysisRequested)
+  const reviewModeLabel = deepAnalysisRequested ? "Deep validation" : "Quick read"
+  const deltaFromQuick = deepAnalysisRequested
+    ? buildDeepDeltaSummary({
+        baselineChecklist,
+        deepChecklist: checklist,
+        confidenceTrend,
+        baselineDecision,
+        checkedArtifacts,
+        contradictionCount
+      })
+    : ""
+  const reviewModeExplainer = buildReviewModeExplainer({
+    deepAnalysisRequested,
+    confidenceTrend,
+    contradictionCount,
+    allCriteriaMet,
+    blockedItems
+  })
+
   const whyBullets: string[] = []
   const contradiction = detailInspection.contradictions[0]
   if (contradiction) {
@@ -1898,7 +2071,9 @@ function buildDecisionPresentation(params: {
     promptStrategy,
     blockedOrUnprovenItems,
     contradictionCount,
-    whyBullets
+    whyBullets,
+    deepAnalysisRequested,
+    baselineDecision
   })
 
   const recommendedAction =
@@ -1921,6 +2096,7 @@ function buildDecisionPresentation(params: {
 
   return {
     decision,
+    decisionDisplayLabel,
     popupState:
       decision === "Safe to proceed"
         ? "SAFE_TO_PROCEED"
@@ -1930,6 +2106,9 @@ function buildDecisionPresentation(params: {
             ? "WRONG_DIRECTION"
             : "NOT_ENOUGH_PROOF",
     recommendedAction,
+    reviewModeLabel,
+    reviewModeExplainer: limitText(reviewModeExplainer, WHY_BULLET_MAX),
+    deltaFromQuick: limitText(deltaFromQuick, WHY_BULLET_MAX),
     whyBullets: dedupe(whyBullets.map((item) => limitText(item, WHY_BULLET_MAX)), 3).slice(0, 3),
     nextAction: limitText(nextAction, NEXT_ACTION_MAX),
     nextPromptOutput,
@@ -1937,6 +2116,7 @@ function buildDecisionPresentation(params: {
     uncheckedArtifacts,
     blockedOrUnprovenItems,
     confidence,
+    confidenceTrend,
     confidenceLabel: titleCaseConfidence(confidence),
     confidenceReasons: dedupe(confidenceReasons.map((item) => limitText(item, CONFIDENCE_REASON_MAX)), 3).slice(0, 3)
   }
@@ -3412,7 +3592,7 @@ function buildChecklistDrivenPrimaryFinding(
 
   if (!deepAnalysisRequested && missedCore.length) {
     return visibleVerifiedWork
-      ? `The answer visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${missedCore[0]}.`
+      ? `The answer appears to cover ${visibleVerifiedWork}, but it still does not clearly show: ${missedCore[0]}.`
       : `The answer mentions progress, but it still does not clearly show: ${missedCore[0]}.`
   }
 
@@ -3430,19 +3610,19 @@ function buildChecklistDrivenPrimaryFinding(
 
   if (!deepAnalysisRequested && unresolvedCore.length) {
     return visibleVerifiedWork
-      ? `The answer visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${unresolvedCore[0]}.`
+      ? `The answer appears to cover ${visibleVerifiedWork}, but it still does not clearly show: ${unresolvedCore[0]}.`
       : `The answer mentions progress, but it still does not clearly show: ${unresolvedCore[0]}.`
   }
 
   if (!deepAnalysisRequested && missedValidation.length) {
     return visibleVerifiedWork
-      ? `The answer appears aligned with the main goal and visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${missedValidation[0]}.`
+      ? `The answer looks aligned with the main goal and appears to cover ${visibleVerifiedWork}, but it still does not clearly show: ${missedValidation[0]}.`
       : `The answer appears aligned with the main goal, but it still does not clearly show: ${missedValidation[0]}.`
   }
 
   if (!deepAnalysisRequested && unresolvedValidation.length) {
     return visibleVerifiedWork
-      ? `The answer appears aligned with the main goal and visibly covers ${visibleVerifiedWork}, but it still does not clearly show: ${unresolvedValidation[0]}.`
+      ? `The answer looks aligned with the main goal and appears to cover ${visibleVerifiedWork}, but it still does not clearly show: ${unresolvedValidation[0]}.`
       : `The answer appears aligned with the main goal, but it still does not clearly show: ${unresolvedValidation[0]}.`
   }
 
@@ -3453,12 +3633,12 @@ function buildChecklistDrivenPrimaryFinding(
   }
 
   if (concreteMet.length) {
-    return `The answer appears aligned with the goal and visibly covers: ${summarizeChecklistLabels(concreteMet)}.`
+    return `The answer looks aligned with the goal and appears to cover: ${summarizeChecklistLabels(concreteMet)}.`
   }
 
   return deepAnalysisRequested
     ? `Deep review inspected the visible answer for proof that it satisfied: ${conciseGoal(reviewContract.goal)}.`
-    : `The answer appears aligned with the goal: ${conciseGoal(reviewContract.goal)}.`
+    : `The answer looks aligned with the goal: ${conciseGoal(reviewContract.goal)}.`
 }
 
 function buildDeepDeltaFinding(
@@ -3812,6 +3992,9 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     verifications: artifactAwareDeepEvaluation?.verifications ?? [],
     contradictionCount: artifactAwareDeepEvaluation?.contradictionCount ?? 0,
     deepAnalysisRequested,
+    baselineDecision: parsed.baseline_decision,
+    baselineConfidence: parsed.baseline_confidence,
+    baselineChecklist: parsed.baseline_acceptance_checklist,
     bundle: artifactBundle,
     responseSummary: parsed.response_summary,
     intent,
@@ -3835,11 +4018,16 @@ export async function analyzeAfterAttempt(input: AfterPipelineRequest) {
     status: safeVerdict.status,
     confidence: safeVerdict.confidence,
     popup_state: decisionPresentation.popupState,
+    review_mode_label: decisionPresentation.reviewModeLabel,
+    review_mode_explainer: decisionPresentation.reviewModeExplainer,
     confidence_label: decisionPresentation.confidenceLabel,
+    confidence_trend: decisionPresentation.confidenceTrend,
     confidence_reason: limitText(safeVerdict.confidence_reason, CONFIDENCE_REASON_MAX),
     confidence_reasons: decisionPresentation.confidenceReasons,
     inspection_depth: detailInspection.inspection_depth,
     decision: decisionPresentation.decision,
+    decision_display_label: decisionPresentation.decisionDisplayLabel,
+    delta_from_quick: decisionPresentation.deltaFromQuick,
     recommended_action: decisionPresentation.recommendedAction,
     why_bullets: decisionPresentation.whyBullets,
     next_action: decisionPresentation.nextAction,
