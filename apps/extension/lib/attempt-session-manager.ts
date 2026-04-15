@@ -14,6 +14,10 @@ async function getAttempts() {
   return ((await storage.get<Attempt[]>(ATTEMPTS_KEY)) ?? []) as Attempt[]
 }
 
+function sortReviewableAttempts(attempts: Attempt[]) {
+  return [...attempts].sort((a, b) => (b.submitted_at ?? b.created_at).localeCompare(a.submitted_at ?? a.created_at))
+}
+
 async function saveAttempts(attempts: Attempt[]) {
   await storage.set(ATTEMPTS_KEY, attempts.slice(-MAX_ATTEMPTS))
 }
@@ -66,11 +70,33 @@ export async function markAttemptSubmitted(
 
 export async function getLatestSubmittedAttempt() {
   const attempts = await getAttempts()
-  return (
-    attempts
-      .filter((attempt) => attempt.status === "submitted")
-      .sort((a, b) => (b.submitted_at ?? b.created_at).localeCompare(a.submitted_at ?? a.created_at))[0] ?? null
-  )
+  const latestAttempt =
+    sortReviewableAttempts(attempts.filter((attempt) => attempt.status === "submitted" || attempt.status === "analyzed"))[0] ?? null
+
+  console.debug("[NoRetry][ReviewTarget]", "latest submitted attempt lookup", {
+    attemptId: latestAttempt?.attempt_id ?? null,
+    status: latestAttempt?.status ?? null,
+    submittedAt: latestAttempt?.submitted_at ?? null,
+    hasResponseText: Boolean(latestAttempt?.response_text),
+    totalAttempts: attempts.length
+  })
+
+  return latestAttempt
+}
+
+export async function getRecentReviewableAttempts(limit = MAX_ATTEMPTS) {
+  const attempts = await getAttempts()
+  const reviewableAttempts = sortReviewableAttempts(
+    attempts.filter((attempt) => attempt.status === "submitted" || attempt.status === "analyzed")
+  ).slice(0, Math.max(1, limit))
+
+  console.debug("[NoRetry][ReviewTarget]", "recent reviewable attempts lookup", {
+    totalAttempts: attempts.length,
+    reviewableCount: reviewableAttempts.length,
+    attemptIds: reviewableAttempts.map((attempt) => attempt.attempt_id)
+  })
+
+  return reviewableAttempts
 }
 
 export async function getActiveAttempt() {

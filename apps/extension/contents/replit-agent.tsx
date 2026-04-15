@@ -3,23 +3,24 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type {
   AnalyzePromptResponse,
   AfterAnalysisResult,
-  ArtifactContext,
   ClarificationQuestion,
   DetectOutcomeResponse,
   DiagnoseFailureResponse,
   PromptIntent,
-  ReviewContract,
   SessionSummary,
   Attempt
-} from "@prompt-optimizer/shared"
-import { DETECTION_THRESHOLDS, analyzePromptLocally } from "@prompt-optimizer/shared"
+} from "@prompt-optimizer/shared/src/schemas"
+import { DETECTION_THRESHOLDS } from "@prompt-optimizer/shared/src/constants"
+import { analyzePromptLocally } from "@prompt-optimizer/shared/src/analyzePrompt"
 import {
   mapPromptIntentToTaskType,
   preprocessResponse
 } from "@prompt-optimizer/shared"
-import { summarizeSessionMemory } from "@prompt-optimizer/shared"
+import { summarizeSessionMemory } from "@prompt-optimizer/shared/src/session"
 import { AfterVerdictPanel } from "../components/AfterVerdictPanel"
 import { OptimizerShell } from "../components/OptimizerShell"
+import { ReviewPopupContainer } from "../components/review-popup/review/ReviewPopupContainer"
+import type { ReviewPopupViewModel } from "../components/review-popup/review/review-types"
 import { analyzeAfterAttempt, analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, generateAfterNextQuestion, refinePrompt, sendFeedback } from "../lib/api"
 import { readAssistantMessageIdentity } from "../lib/after/surface"
 import {
@@ -70,6 +71,7 @@ import {
   createAttempt,
   getActiveAttempt,
   getCodeAnalysisMode,
+  getRecentReviewableAttempts,
   getLatestSubmittedAttempt,
   markAttemptSubmitted,
   setCodeAnalysisMode
@@ -87,18 +89,33 @@ import {
   writePromptValue
 } from "../lib/replit"
 import {
-  appendAfterExperienceEvent,
-  appendDeepArtifactEvent,
   deriveProjectMemoryIdentity,
-  getAfterReviewCache,
   getProjectMemory,
   getSessionSummary,
   hasSeenOnboarding,
   markOnboardingSeen,
-  saveAfterReviewCache,
   saveProjectMemory,
   saveSessionSummary
 } from "../lib/storage"
+import { createReviewPopupOrchestrator } from "../lib/review/orchestrator/review-popup-orchestrator"
+import { createReviewPromptModeOrchestrator } from "../lib/review/orchestrator/review-prompt-mode-orchestrator"
+import { buildReviewLoadingViewModel } from "../lib/review/mappers/review-view-model"
+import {
+  createIdleReviewSignal,
+  createLoadingReviewSignal,
+  createTypingReviewSignal,
+  mapReviewResultToSignal
+} from "../lib/review/mappers/review-signal"
+import { createReviewAnalysisRunner } from "../lib/review/services/review-analysis"
+import { buildPromptModeSessionKey } from "../lib/review/services/review-prompt-mode"
+import { createReviewTargetResolver } from "../lib/review/services/review-target"
+import type {
+  ReviewPopupControllerState,
+  ReviewPromptModeState,
+  ReviewPopupSurface,
+  ReviewSignalState,
+  ReviewTypingState
+} from "../lib/review/types"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://replit.com/*", "https://www.replit.com/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
@@ -116,22 +133,16 @@ export const getRootContainer: PlasmoGetRootContainer = async () => {
   return host
 }
 
-const RUNTIME_SINGLETON_KEY = "__NORETRY_REPLIT_AGENT_RUNTIME__"
+const SEND_DETECTION_DEDUPE_MS = 1200
+const REVIEW_SIGNAL_SETTLE_MS = 1200
 
-function getRuntimeSingleton() {
-  const scopedWindow = window as typeof window & {
-    [RUNTIME_SINGLETON_KEY]?: {
-      instanceId: string
-      cleanup?: () => void
-    }
+function logReviewDebug(message: string, details?: Record<string, unknown>) {
+  if (details) {
+    console.debug("[NoRetry][Review]", message, details)
+    return
   }
 
-  scopedWindow[RUNTIME_SINGLETON_KEY] ??= {
-    instanceId: "",
-    cleanup: undefined
-  }
-
-  return scopedWindow[RUNTIME_SINGLETON_KEY]!
+  console.debug("[NoRetry][Review]", message)
 }
 
 export default function PromptOptimizerApp() {
@@ -143,13 +154,11 @@ export default function PromptOptimizerApp() {
   }
 
   type CachedAfterReviews = {
-    attemptId?: string
     threadIdentity: string
     responseIdentity: string
     normalizedText: string
     quick: AfterAnalysisResult | null
     deep: AfterAnalysisResult | null
-    deepArtifactSignature?: string
   }
 
   const OTHER_OPTION = "Other"
@@ -177,12 +186,51 @@ export default function PromptOptimizerApp() {
   const [afterAttempt, setAfterAttempt] = useState<Attempt | null>(null)
   const [afterVerdict, setAfterVerdict] = useState<AfterAnalysisResult | null>(null)
   const [afterPanelOpen, setAfterPanelOpen] = useState(false)
+  const [reviewPopupOpen, setReviewPopupOpen] = useState(false)
+  const [reviewPopupSurface, setReviewPopupSurface] = useState<ReviewPopupSurface>("answer_mode")
+  const [reviewSignal, setReviewSignal] = useState<ReviewSignalState>(createIdleReviewSignal())
+  const [reviewTypingState, setReviewTypingState] = useState<ReviewTypingState>({
+    active: false,
+    promptText: "",
+    sessionKey: null
+  })
+  const [reviewPopupViewModel, setReviewPopupViewModel] = useState<ReviewPopupViewModel>(
+    buildReviewLoadingViewModel("deep")
+  )
+  const [reviewPopupControllerState, setReviewPopupControllerState] = useState<ReviewPopupControllerState>({
+    surface: "answer_mode",
+    popupState: "idle",
+    activeMode: "deep",
+    targetKey: null,
+    cacheStatus: "none",
+    analysisStarted: false,
+    analysisFinished: false,
+    errorReason: null
+  })
+  const [reviewPromptModeState, setReviewPromptModeState] = useState<ReviewPromptModeState>({
+    popupState: "idle",
+    sessionKey: null,
+    sourcePrompt: "",
+    planningGoal: "",
+    planningAttempt: null,
+    analysisSeed: null,
+    localAnalysis: null,
+    questionHistory: [],
+    questionLevels: {},
+    currentLevelQuestions: [],
+    currentLevel: 1,
+    activeQuestionIndex: 0,
+    answerState: {},
+    otherAnswerState: {},
+    isLoadingQuestions: false,
+    isGeneratingPrompt: false,
+    promptDraft: "",
+    promptReady: false,
+    errorMessage: null
+  })
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
   const [afterDisplayedReviewMode, setAfterDisplayedReviewMode] = useState<"quick" | "deep">("quick")
-  const [afterHelpfulFeedback, setAfterHelpfulFeedback] = useState<boolean | null>(null)
-  const [afterNextPromptSuccessFeedback, setAfterNextPromptSuccessFeedback] = useState<boolean | null>(null)
-  const [afterPromptActionTaken, setAfterPromptActionTaken] = useState(false)
   const [afterLoadingProgress, setAfterLoadingProgress] = useState<{
     percent: number
     label: string
@@ -218,6 +266,7 @@ export default function PromptOptimizerApp() {
   const promptRef = useRef<HTMLElement | null>(null)
   const submitRef = useRef<HTMLButtonElement | null>(null)
   const pendingPromptRef = useRef<PendingPrompt | null>(null)
+  const lastDetectedSendRef = useRef<{ prompt: string; at: number } | null>(null)
   const retryTimeoutRef = useRef<number | null>(null)
   const outcomeEventIdRef = useRef<string | null>(null)
   const lastAnalyzedPromptRef = useRef("")
@@ -226,6 +275,7 @@ export default function PromptOptimizerApp() {
   const lastFocusedPromptRef = useRef<HTMLElement | null>(null)
   const lastPromptValueRef = useRef("")
   const lastStablePromptValueRef = useRef("")
+  const lastSubmittedOrAppliedPromptRef = useRef("")
   const latestAssistantNodeRef = useRef<HTMLElement | null>(null)
   const lastEvaluatedAssistantTextRef = useRef("")
   const lastEvaluatedAssistantMessageIdRef = useRef("")
@@ -246,17 +296,25 @@ export default function PromptOptimizerApp() {
     normalizedText: string
     threadIdentity: string
   } | null>(null)
-  const lastLauncherVisibleRef = useRef(false)
-  const pendingNavigationRef = useRef<string | null>(null)
-  const lastThreadIdentityRef = useRef("")
-  const lastQuestionEvidenceSignatureRef = useRef("")
-  const lastDraftTelemetrySignatureRef = useRef("")
   const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
-  const lastAfterDecisionLogKeyRef = useRef("")
-  const scanTimeoutRef = useRef<number | null>(null)
-  const positionFrameRef = useRef<number | null>(null)
-  const instanceIdRef = useRef(crypto.randomUUID())
+  const reviewPopupOrchestratorRef = useRef<ReturnType<typeof createReviewPopupOrchestrator> | null>(null)
+  const reviewPromptModeOrchestratorRef = useRef<ReturnType<typeof createReviewPromptModeOrchestrator> | null>(null)
+  const reviewPopupOpenStateRef = useRef(false)
+  const reviewPopupTargetKeyRef = useRef<string | null>(null)
+  const reviewTypingTimeoutRef = useRef<number | null>(null)
+  const reviewTargetResolverRef = useRef<ReturnType<typeof createReviewTargetResolver> | null>(null)
+  const reviewAnalysisRunnerRef = useRef<ReturnType<typeof createReviewAnalysisRunner> | null>(null)
+  const reviewSignalRequestIdRef = useRef(0)
+  const reviewSignalSettleTimeoutRef = useRef<number | null>(null)
+  const reviewSignalCacheRef = useRef<{
+    targetKey: string
+    signal: ReviewSignalState
+  } | null>(null)
+  const lastObservedAssistantSignalKeyRef = useRef("")
+  const lastSettledAssistantSignalKeyRef = useRef("")
+  const awaitingFreshReviewAnswerRef = useRef(false)
+  const submittedAssistantBaselineKeyRef = useRef("")
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -536,6 +594,61 @@ export default function PromptOptimizerApp() {
     return getActiveSurfaceAdapter().getDraftPrompt()
   }
 
+  function hasUnsentPromptDraft(promptText = getCurrentDraftSnapshot().text) {
+    const trimmedPrompt = promptText.trim()
+    if (!trimmedPrompt) return false
+
+    return trimmedPrompt !== lastSubmittedOrAppliedPromptRef.current.trim()
+  }
+
+  function updateReviewTypingState(promptText: string) {
+    const trimmedPrompt = promptText.trim()
+    const shouldType = hasUnsentPromptDraft(trimmedPrompt)
+
+    if (!shouldType) {
+      if (reviewTypingTimeoutRef.current) {
+        window.clearTimeout(reviewTypingTimeoutRef.current)
+        reviewTypingTimeoutRef.current = null
+      }
+      setReviewTypingState({
+        active: false,
+        promptText: "",
+        sessionKey: null
+      })
+      return
+    }
+
+    const sessionKey = buildPromptModeSessionKey(trimmedPrompt)
+    setReviewTypingState({
+      active: true,
+      promptText: trimmedPrompt,
+      sessionKey
+    })
+
+    if (reviewTypingTimeoutRef.current) {
+      window.clearTimeout(reviewTypingTimeoutRef.current)
+    }
+
+    reviewTypingTimeoutRef.current = window.setTimeout(() => {
+      const currentDraft = getCurrentDraftSnapshot().text.trim()
+      if (!hasUnsentPromptDraft(currentDraft)) {
+        setReviewTypingState({
+          active: false,
+          promptText: "",
+          sessionKey: null
+        })
+        reviewTypingTimeoutRef.current = null
+        return
+      }
+
+      setReviewTypingState((current) => ({
+        ...current,
+        active: document.activeElement === promptRef.current
+      }))
+      reviewTypingTimeoutRef.current = null
+    }, 2200)
+  }
+
   function getCurrentAssistantSnapshot() {
     return getActiveSurfaceAdapter().getLatestAssistantResponse()
   }
@@ -546,6 +659,29 @@ export default function PromptOptimizerApp() {
 
   function getCurrentThreadSnapshot() {
     return getActiveSurfaceAdapter().getThread()
+  }
+
+  function buildLiveAssistantSignalKey(input?: {
+    threadIdentity: string
+    responseIdentity: string
+    responseText: string
+  }) {
+    const source =
+      input ??
+      (() => {
+        const assistant = getCurrentAssistantResponseText()
+        const thread = getCurrentThreadSnapshot()
+        return {
+          threadIdentity: thread.identity,
+          responseIdentity: assistant.identity,
+          responseText: assistant.text
+        }
+      })()
+
+    const normalizedResponseText = normalizeAssistantTextForReuse(source.responseText)
+    if (!normalizedResponseText) return ""
+
+    return [source.threadIdentity, source.responseIdentity || "no-response-id", normalizedResponseText].join("::")
   }
 
   async function ensureSubmittedAttempt() {
@@ -561,11 +697,7 @@ export default function PromptOptimizerApp() {
       promptPreview.trim()
     const normalizedPrompt = inferredPrompt.trim()
     const latestSubmitted = await getLatestSubmittedAttempt()
-    if (normalizedPrompt && shouldReuseLatestSubmittedAttempt({ normalizedPrompt, latestSubmitted })) {
-      return latestSubmitted
-    }
-
-    if (!normalizedPrompt) {
+    if (shouldReuseLatestSubmittedAttempt({ normalizedPrompt, latestSubmitted })) {
       return latestSubmitted
     }
 
@@ -602,287 +734,47 @@ export default function PromptOptimizerApp() {
     }
   }
 
-  function wait(ms: number) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms))
-  }
-
   function normalizeAssistantTextForReuse(value: string) {
     return value.replace(/\s+/g, " ").trim()
   }
 
-  function targetTextMatches(currentText: string, cachedText: string) {
-    const normalizedCurrent = normalizeAssistantTextForReuse(currentText)
-    const normalizedCached = normalizeAssistantTextForReuse(cachedText)
-    if (!normalizedCurrent || !normalizedCached) return false
-    return normalizedCurrent === normalizedCached
-  }
-
-  function hasVisibleGenerationIndicator(node: HTMLElement | null) {
-    const structuralSelectors = [
-      "[aria-busy='true']",
-      "[data-testid*='thinking' i]",
-      "[data-testid*='generating' i]",
-      "[class*='thinking' i]",
-      "[class*='generating' i]",
-      "[class*='loading' i]"
-    ]
-    const textSelectors = [
-      "button",
-      "[role='button']",
-      "[role='status']",
-      "[aria-live='polite']",
-      "[aria-live='assertive']"
-    ]
-    const pattern = /\b(thinking|generating|streaming|stop generating|continue generating|still responding)\b/i
-
-    const scopedElements = (selectors: string[]) =>
-      node
-        ? Array.from(node.querySelectorAll<HTMLElement>(selectors.join(",")))
-        : Array.from(document.querySelectorAll<HTMLElement>(selectors.join(",")))
-
-    const structuralMatch = scopedElements(structuralSelectors).some((element) => {
-      if (!(element instanceof HTMLElement)) return false
-      if (!element.isConnected) return false
-      const rect = element.getBoundingClientRect()
-      return rect.width > 0 && rect.height > 0
-    })
-    if (structuralMatch) return true
-
-    return scopedElements(textSelectors).some((element) => {
-      if (!(element instanceof HTMLElement)) return false
-      if (!element.isConnected) return false
-      const rect = element.getBoundingClientRect()
-      if (rect.width <= 0 || rect.height <= 0) return false
-      const text = element.innerText.trim()
-      if (!text || text.length > 120) return false
-      return pattern.test(text)
-    })
-  }
-
-  function buildStreamingOrEarlyVerdict(
-    popupState: "RESPONSE_STILL_STREAMING" | "ANALYSIS_RAN_TOO_EARLY"
-  ) {
-    const isStreaming = popupState === "RESPONSE_STILL_STREAMING"
-    return buildAfterPlaceholder(
-      isStreaming
-        ? "This response is still changing, so the review would be unreliable."
-        : "The review started before the final answer had fully settled.",
-      [],
-      "",
-      {
-        popupState,
-        whyBullets: isStreaming
-          ? [
-              "The assistant response is still updating on the page.",
-              "The final answer was not available to verify yet."
-            ]
-          : [
-              "The response changed while the review was starting.",
-              "The final assistant output was not fully captured yet."
-            ],
-        confidenceReasons: isStreaming
-          ? [
-              "This judgment is based on partial response text, not a completed answer.",
-              "No stable final output was available for verification."
-            ]
-          : [
-              "The review began before the response had stabilized.",
-              "Any verdict now would be based on incomplete evidence."
-            ],
-        checkedArtifacts: ["partial response text"],
-        uncheckedArtifacts: ["final assistant response", "complete code blocks", "runtime behavior"],
-        blockedOrUnprovenItems: ["Final assistant response not captured yet"],
-        nextAction: isStreaming
-          ? "Wait until the response finishes, then re-run analysis."
-          : "Re-run analysis after the response finishes.",
-        recommendedAction: "VALIDATE_FIRST"
-      }
-    )
-  }
-
-  function buildInternalAnalysisFailureVerdict(
-    stage: "quick" | "deep" | "switch",
-    nextPrompt = ""
-  ) {
-    return buildAfterPlaceholder(
-      "We couldn’t complete the review this time due to an internal issue.",
-      [],
-      "",
-      {
-        popupState: "ANALYSIS_FAILED_INTERNAL",
-        whyBullets: [
-          "The review did not finish cleanly, so this result is not trustworthy yet.",
-          "Retry after the response settles so NoRetry can capture a complete answer."
-        ],
-        confidenceReasons: [
-          "No trustworthy verdict was produced.",
-          "This state came from an internal review failure, not from confirmed evidence."
-        ],
-        checkedArtifacts: nextPrompt ? ["captured response text"] : [],
-        uncheckedArtifacts: ["final assistant response", "code blocks", "runtime behavior"],
-        blockedOrUnprovenItems: ["Trusted review not completed"],
-        nextAction:
-          stage === "deep"
-            ? "Retry deep analysis after the response settles."
-            : "Retry analysis after the response settles.",
-        recommendedAction: "VALIDATE_FIRST"
-      }
-    )
-  }
-
-  function logHiddenInternalError(stage: "quick" | "deep" | "switch", error: unknown) {
-    const rawMessage = error instanceof Error ? error.message : String(error)
-    const lowered = rawMessage.toLowerCase()
-    const errorCode = /400/.test(rawMessage)
-      ? "BAD_REQUEST"
-      : /500/.test(rawMessage)
-        ? "SERVER_ERROR"
-        : "UNKNOWN"
-    const errorType = lowered.includes("too_big")
-      ? "validation_too_big"
-      : lowered.includes("zod")
-        ? "validation_error"
-        : lowered.includes("abort")
-          ? "aborted_request"
-          : "internal_error"
-
-    recordDeepArtifactEvent({
-      eventType: "internal_error_hidden_from_user",
-      status: "failed",
-      detail: JSON.stringify({
-        error_code: errorCode,
-        error_type: errorType,
-        request_stage: stage,
-        raw_error_message: rawMessage.slice(0, 800)
+  function getReviewTargetResolver() {
+    if (!reviewTargetResolverRef.current) {
+      reviewTargetResolverRef.current = createReviewTargetResolver({
+        getLatestAssistantResponse: () => {
+          const snapshot = getCurrentAssistantResponseText()
+          return {
+            node: snapshot.latestMessage,
+            text: snapshot.text,
+            identity: snapshot.identity
+          }
+        },
+        getLatestUserPrompt: () => getCurrentUserSnapshot(),
+        getThread: () => getCurrentThreadSnapshot(),
+        getLatestSubmittedAttempt: () => getLatestSubmittedAttempt(),
+        getReviewableAttempts: () => getRecentReviewableAttempts(),
+        ensureSubmittedAttempt,
+        readAssistantMessageIdentity: (node, text) => readAssistantMessageIdentity(node, text),
+        normalizeResponseText: (value) => normalizeAssistantTextForReuse(value)
       })
-    })
-  }
-
-  async function assessAssistantResponseReadiness() {
-    const initial = getCurrentAssistantSnapshot()
-    const initialText = normalizeAssistantTextForReuse(initial.text)
-    if (!initialText) return { ready: true as const }
-
-    const visibleIndicator = hasVisibleGenerationIndicator(initial.node)
-
-    await wait(850)
-
-    const followUp = getCurrentAssistantSnapshot()
-    const followUpText = normalizeAssistantTextForReuse(followUp.text)
-    const followUpIndicator = hasVisibleGenerationIndicator(followUp.node)
-    const changed = followUpText !== initialText
-
-    if (visibleIndicator && followUpIndicator) {
-      return {
-        ready: false as const,
-        popupState: "RESPONSE_STILL_STREAMING" as const
-      }
     }
 
-    if (changed) {
-      return {
-        ready: false as const,
-        popupState: "ANALYSIS_RAN_TOO_EARLY" as const
-      }
+    return reviewTargetResolverRef.current
+  }
+
+  function getReviewAnalysisRunner() {
+    if (!reviewAnalysisRunnerRef.current) {
+      reviewAnalysisRunnerRef.current = createReviewAnalysisRunner({
+        analyzeAfterAttempt,
+        attachAnalysisResult,
+        preprocessResponse,
+        getProjectMemoryContext: () => getCompactProjectMemory(),
+        collectChangedFilesSummary,
+        collectVisibleErrorSummary
+      })
     }
 
-    return { ready: true as const }
-  }
-
-  function buildArtifactSignature(artifactContext: ArtifactContext | null | undefined) {
-    if (!artifactContext || artifactContext.mode === "none") return ""
-
-    return JSON.stringify({
-      mode: artifactContext.mode,
-      surface: artifactContext.surface ?? "",
-      artifacts: artifactContext.artifacts.map((artifact) => ({
-        type: artifact.type,
-        surface_scope: artifact.surface_scope,
-        content: artifact.content,
-        metadata: Object.fromEntries(Object.entries(artifact.metadata ?? {}).sort(([left], [right]) => left.localeCompare(right)))
-      }))
-    })
-  }
-
-  function getTelemetryProjectKey() {
-    return projectMemoryKey || deriveProjectMemoryIdentity().key
-  }
-
-  function recordDeepArtifactEvent(input: {
-    eventType: string
-    status: "observed" | "success" | "failed"
-    detail: string
-    responseIdentity?: string
-  }) {
-    const projectKey = getTelemetryProjectKey()
-    const threadIdentity = getCurrentThreadSnapshot().identity
-    void appendDeepArtifactEvent({
-      projectKey,
-      eventType: input.eventType,
-      status: input.status,
-      detail: input.detail,
-      threadIdentity,
-      responseIdentity: input.responseIdentity,
-      route: window.location.href
-    })
-  }
-
-  function recordAfterExperienceEvent(input: {
-    eventType:
-      | "decision_shown"
-      | "prompt_copy_clicked"
-      | "proof_details_expanded"
-      | "feedback_helpful_yes"
-      | "feedback_helpful_no"
-      | "feedback_next_prompt_success_yes"
-      | "feedback_next_prompt_success_no"
-      | "next_prompt_hidden_due_to_state"
-      | "analysis_blocked_streaming"
-      | "analysis_blocked_early"
-      | "internal_error_hidden_from_user"
-    helpful?: boolean
-    nextPromptSuccess?: boolean
-    verdictOverride?: AfterAnalysisResult | null
-    attemptOverride?: Attempt | null
-    errorCode?: string
-    errorType?: string
-    requestStage?: string
-    rawErrorMessage?: string
-  }) {
-    const verdict = input.verdictOverride ?? afterVerdict
-    const attempt = input.attemptOverride ?? afterAttempt
-    if (!attempt || !verdict) return
-    void appendAfterExperienceEvent({
-      eventType: input.eventType,
-      attemptId: attempt.attempt_id,
-      decision: verdict.decision,
-      recommendedAction: verdict.recommended_action,
-      confidence: verdict.confidence,
-      promptStrategy: verdict.prompt_strategy,
-      popupState: verdict.popup_state,
-      reviewMode: afterDisplayedReviewMode,
-      userFeedbackHelpful: input.helpful,
-      userFeedbackNextPromptSuccess: input.nextPromptSuccess,
-      errorCode: input.errorCode,
-      errorType: input.errorType,
-      requestStage: input.requestStage,
-      rawErrorMessage: input.rawErrorMessage
-    })
-  }
-
-  function shouldHideNextPromptForVerdict(verdict: AfterAnalysisResult | null) {
-    if (!verdict) return false
-    if (verdict.recommended_action === "PROCEED") return true
-    if (
-      verdict.popup_state === "RESPONSE_STILL_STREAMING" ||
-      verdict.popup_state === "ANALYSIS_RAN_TOO_EARLY" ||
-      verdict.popup_state === "ANALYSIS_FAILED_INTERNAL"
-    ) {
-      return true
-    }
-    const trimmed = verdict.next_prompt.trim()
-    if (!trimmed) return true
-    return /^analyze your last answer again\b/i.test(trimmed) || /^tell me exactly what you changed\b/i.test(trimmed)
+    return reviewAnalysisRunnerRef.current
   }
 
   function isGenericChecklistLabel(label: string) {
@@ -894,14 +786,6 @@ export default function PromptOptimizerApp() {
       normalized === "solve: the user’s latest request" ||
       normalized === "solve: the users latest request"
     )
-  }
-
-  function canonicalChecklistLabels(result: AfterAnalysisResult | null) {
-    const fromContract = (result?.review_contract?.criteria ?? []).map((item) => item.label.trim())
-    const labels = fromContract.length ? fromContract : (result?.acceptance_checklist ?? []).map((item) => item.label.trim())
-    return labels
-      .filter((label) => label && !isGenericChecklistLabel(label))
-      .slice(0, 6)
   }
 
   function specificityScore(result: AfterAnalysisResult | null) {
@@ -933,56 +817,20 @@ export default function PromptOptimizerApp() {
     const previousScore = specificityScore(previousResult)
     if (nextScore >= previousScore || previousScore === 0) return nextResult
 
-    const nextChecklistIsWeak =
-      (nextResult.acceptance_checklist?.length ?? 0) === 0 ||
-      nextResult.acceptance_checklist.every((item) => isGenericChecklistLabel(item.label))
-    const nextFindingsAreWeak =
-      nextResult.findings.length === 0 ||
-      nextResult.findings.every((item) => {
-        const normalized = item.trim().toLowerCase()
-        return (
-          !normalized ||
-          normalized.includes("the user's latest request") ||
-          normalized.includes("help replit users write stronger ai prompts") ||
-          normalized.includes("the answer appears aligned with the goal")
-        )
-      })
-
     return {
       ...nextResult,
-      findings: nextFindingsAreWeak ? previousResult.findings : nextResult.findings,
-      acceptance_checklist: nextChecklistIsWeak ? previousResult.acceptance_checklist : nextResult.acceptance_checklist,
-      review_contract:
-        nextChecklistIsWeak && previousResult.review_contract.criteria.length
-          ? previousResult.review_contract
-          : nextResult.review_contract,
-      stage_1: {
-        ...nextResult.stage_1,
-        claimed_evidence: Array.from(
-          new Map(
-            [...previousResult.stage_1.claimed_evidence, ...nextResult.stage_1.claimed_evidence].map((item) => [
-              item.trim().toLowerCase(),
-              item
-            ])
-          ).values()
-        ).filter(Boolean).slice(0, 4)
-      },
-      stage_2: nextChecklistIsWeak
-        ? {
-            ...nextResult.stage_2,
-            addressed_criteria: previousResult.stage_2.addressed_criteria,
-            missing_criteria: previousResult.stage_2.missing_criteria,
-            constraint_risks: previousResult.stage_2.constraint_risks,
-            analysis_notes: Array.from(
-              new Map(
-                [...nextResult.stage_2.analysis_notes, ...previousResult.stage_2.analysis_notes].map((item) => [
-                  item.trim().toLowerCase(),
-                  item
-                ])
-              ).values()
-            ).filter(Boolean).slice(0, 4)
-          }
-        : nextResult.stage_2
+      status: previousResult.status,
+      confidence: previousResult.confidence,
+      confidence_reason: previousResult.confidence_reason,
+      findings: previousResult.findings,
+      issues: previousResult.issues,
+      next_prompt: previousResult.next_prompt,
+      prompt_strategy: previousResult.prompt_strategy,
+      verdict: previousResult.verdict,
+      next_prompt_output: previousResult.next_prompt_output,
+      acceptance_checklist: previousResult.acceptance_checklist,
+      stage_1: previousResult.stage_1,
+      stage_2: previousResult.stage_2
     }
   }
 
@@ -996,104 +844,11 @@ export default function PromptOptimizerApp() {
 
     if (cache.threadIdentity !== threadIdentity) return false
 
-    if (normalizedText && cache.normalizedText) {
-      return normalizedText === cache.normalizedText
-    }
-
     if (responseIdentity && cache.responseIdentity) {
       return responseIdentity === cache.responseIdentity
     }
 
-    return false
-  }
-
-  async function getCachedAfterReviewsForTarget(
-    attemptId: string,
-    threadIdentity: string,
-    responseIdentity: string,
-    normalizedText: string,
-    deepArtifactSignature = ""
-  ) {
-    const inMemoryCache = isSameCachedAfterTarget(
-      afterReviewCacheRef.current,
-      threadIdentity,
-      responseIdentity,
-      normalizedText
-    )
-      && (!attemptId || !afterReviewCacheRef.current?.attemptId || afterReviewCacheRef.current.attemptId === attemptId)
-      ? afterReviewCacheRef.current
-      : null
-
-    if (inMemoryCache) return inMemoryCache
-
-    const persistedCache = await getAfterReviewCache({
-      attemptId,
-      threadIdentity,
-      responseIdentity,
-      normalizedText
-    })
-
-    if (!persistedCache) return null
-
-    const restoredCache: CachedAfterReviews = {
-      attemptId: persistedCache.attemptId,
-      threadIdentity: persistedCache.threadIdentity,
-      responseIdentity: persistedCache.responseIdentity,
-      normalizedText: persistedCache.normalizedText,
-      quick: persistedCache.quick,
-      deep:
-        deepArtifactSignature && persistedCache.deepArtifactSignature && persistedCache.deepArtifactSignature !== deepArtifactSignature
-          ? null
-          : persistedCache.deep,
-      deepArtifactSignature: persistedCache.deepArtifactSignature
-    }
-
-    afterReviewCacheRef.current = restoredCache
-    strongestAfterVerdictRef.current = restoredCache.deep ?? restoredCache.quick ?? strongestAfterVerdictRef.current
-    return restoredCache
-  }
-
-  function buildDeepDeltaNote(quick: AfterAnalysisResult | null, deep: AfterAnalysisResult | null) {
-    if (!quick || !deep) return ""
-    if (deep.delta_from_quick?.trim()) return deep.delta_from_quick.trim()
-
-    const quickChecklist = new Map(
-      quick.acceptance_checklist.map((item) => [normalizeAssistantTextForReuse(item.label), item.status])
-    )
-    const changedItems = deep.acceptance_checklist.filter((item) => {
-      const previousStatus = quickChecklist.get(normalizeAssistantTextForReuse(item.label))
-      return Boolean(previousStatus) && previousStatus !== item.status
-    })
-
-    if (!changedItems.length) {
-      const confidenceRank: Record<AfterAnalysisResult["confidence"], number> = {
-        low: 1,
-        medium: 2,
-        high: 3
-      }
-      const statusChanged = quick.status !== deep.status
-      const confidenceChanged = confidenceRank[deep.confidence] > confidenceRank[quick.confidence]
-
-      if (!statusChanged && !confidenceChanged) return ""
-
-      return `Deep review kept the same checklist but tightened the conclusion from ${quick.status.toLowerCase()} (${quick.confidence}) to ${deep.status.toLowerCase()} (${deep.confidence}).`
-    }
-
-    const sample = changedItems[0]
-    const sampleVerdict =
-      sample.status === "met"
-        ? "confirmed"
-        : sample.status === "missed"
-          ? "marked missing"
-          : sample.status === "blocked"
-            ? "blocked by missing artifact evidence"
-            : "left unresolved"
-
-    const checkedArtifacts = deep.checked_artifact_types.length
-      ? ` using ${deep.checked_artifact_types.map((item) => item.replace(/_/g, "/")).slice(0, 3).join(", ")}`
-      : ""
-
-    return `Deep review tightened ${changedItems.length} checklist result${changedItems.length > 1 ? "s" : ""}${checkedArtifacts}; for example, "${sample.label}" is now ${sampleVerdict}.`
+    return normalizedText === cache.normalizedText
   }
 
   function buildCurrentAfterTargetOverride(): PendingContextAnalysis | null {
@@ -1113,6 +868,134 @@ export default function PromptOptimizerApp() {
       responseIdentity,
       threadIdentity
     }
+  }
+
+  async function copyReviewPopupPrompt(prompt: string) {
+    await navigator.clipboard.writeText(prompt)
+  }
+
+  async function runReviewSignalAnalysis(reason: string) {
+    const requestId = ++reviewSignalRequestIdRef.current
+    const resolution = await getReviewTargetResolver()()
+
+    if (requestId !== reviewSignalRequestIdRef.current) return
+
+    if (!resolution.ok) {
+      logReviewDebug("signal target unavailable", { reason, failure: resolution.reason })
+      setReviewSignal(createIdleReviewSignal())
+      return
+    }
+
+    const target = resolution.target
+    const targetKey = buildLiveAssistantSignalKey({
+      threadIdentity: target.threadIdentity,
+      responseIdentity: target.responseIdentity,
+      responseText: target.responseText
+    })
+
+    if (reviewSignalCacheRef.current?.targetKey === targetKey) {
+      logReviewDebug("signal cache hit", { reason, targetKey })
+      setReviewSignal(reviewSignalCacheRef.current.signal)
+    } else {
+      logReviewDebug("signal analysis running", {
+        reason,
+        targetKey,
+        responseIdentity: target.responseIdentity,
+        responseLength: target.responseText.length
+      })
+      setReviewSignal(createLoadingReviewSignal(targetKey))
+      const result = await getReviewAnalysisRunner()({
+        target,
+        mode: "quick",
+        quickBaseline: null
+      })
+      if (requestId !== reviewSignalRequestIdRef.current) return
+
+      const signal = mapReviewResultToSignal({
+        result,
+        taskType: target.taskType,
+        targetKey
+      })
+      reviewSignalCacheRef.current = {
+        targetKey,
+        signal
+      }
+      setReviewSignal(signal)
+      logReviewDebug("signal analysis completed", {
+        reason,
+        targetKey,
+        signal: signal.state
+      })
+    }
+
+    if (
+      reviewPopupOpenStateRef.current &&
+      reviewPopupSurface === "answer_mode" &&
+      reviewPopupTargetKeyRef.current !== targetKey
+    ) {
+      logReviewDebug("popup switching to newer answer", {
+        previousTargetKey: reviewPopupTargetKeyRef.current,
+        nextTargetKey: targetKey
+      })
+      reviewPopupOrchestratorRef.current?.invalidate()
+      void getReviewPopupOrchestrator().open()
+    }
+  }
+
+  function scheduleReviewSignalRefresh(reason: string) {
+    const assistant = getCurrentAssistantResponseText()
+    const thread = getCurrentThreadSnapshot()
+    const liveKey = buildLiveAssistantSignalKey({
+      threadIdentity: thread.identity,
+      responseIdentity: assistant.identity,
+      responseText: assistant.text
+    })
+
+    if (!liveKey) return
+
+    if (awaitingFreshReviewAnswerRef.current && liveKey === submittedAssistantBaselineKeyRef.current) {
+      return
+    }
+
+    if (liveKey === lastObservedAssistantSignalKeyRef.current) return
+
+    lastObservedAssistantSignalKeyRef.current = liveKey
+    logReviewDebug("new answer detected", {
+      reason,
+      liveKey,
+      responseIdentity: assistant.identity,
+      responseLength: assistant.text.trim().length
+    })
+
+    if (reviewSignalSettleTimeoutRef.current) {
+      window.clearTimeout(reviewSignalSettleTimeoutRef.current)
+    }
+
+    reviewSignalSettleTimeoutRef.current = window.setTimeout(() => {
+      const currentAssistant = getCurrentAssistantResponseText()
+      const currentThread = getCurrentThreadSnapshot()
+      const settledKey = buildLiveAssistantSignalKey({
+        threadIdentity: currentThread.identity,
+        responseIdentity: currentAssistant.identity,
+        responseText: currentAssistant.text
+      })
+
+      if (!settledKey || settledKey !== liveKey || settledKey === lastSettledAssistantSignalKeyRef.current) {
+        return
+      }
+
+      awaitingFreshReviewAnswerRef.current = false
+      lastSettledAssistantSignalKeyRef.current = settledKey
+      reviewSignalCacheRef.current = null
+      logReviewDebug("answer settled", {
+        reason,
+        settledKey,
+        responseIdentity: currentAssistant.identity,
+        responseLength: currentAssistant.text.trim().length
+      })
+      reviewPopupOrchestratorRef.current?.invalidate()
+      void runReviewSignalAnalysis("answer_settled")
+    }, REVIEW_SIGNAL_SETTLE_MS)
   }
 
   function compactContextForApi(value: string, maxLength: number) {
@@ -1149,6 +1032,12 @@ export default function PromptOptimizerApp() {
     const latestMessageId = identity || readAssistantMessageIdentity(latestMessage, text)
     const currentThread = getCurrentThreadSnapshot()
     const effectiveThreadIdentity = targetOverride?.threadIdentity ?? currentThread.identity
+    const sameAnalyzedTarget = isSameCachedAfterTarget(
+      afterReviewCacheRef.current,
+      effectiveThreadIdentity,
+      latestMessageId,
+      normalizedText
+    )
 
     if (!text || (!force && normalizedText === normalizedLastText)) {
       return false
@@ -1156,12 +1045,6 @@ export default function PromptOptimizerApp() {
 
     const attempt = targetOverride?.attempt ?? (await ensureSubmittedAttempt())
     if (!attempt) return false
-    const sameAnalyzedTarget = isSameCachedAfterTarget(
-      afterReviewCacheRef.current,
-      effectiveThreadIdentity,
-      latestMessageId,
-      normalizedText
-    ) && (!afterReviewCacheRef.current?.attemptId || afterReviewCacheRef.current.attemptId === attempt.attempt_id)
 
     latestAssistantNodeRef.current = latestMessage
     setIsEvaluatingAfterResponse(true)
@@ -1170,49 +1053,22 @@ export default function PromptOptimizerApp() {
       const compactProjectMemory = getCompactProjectMemory()
       const responseSummary = preprocessResponse(text)
       const changedFiles = collectChangedFilesSummary()
+      const rawResult = await analyzeAfterAttempt({
+        attempt,
+        response_summary: responseSummary,
+        response_text_fallback: text,
+        deep_analysis: deepAnalysis,
+        project_context: compactProjectMemory.projectContext,
+        current_state: compactProjectMemory.currentState,
+        error_summary: collectVisibleErrorSummary(),
+        changed_file_paths_summary: changedFiles
+      })
       const cachedReviews = sameAnalyzedTarget ? afterReviewCacheRef.current : null
       const baselineVerdict = sameAnalyzedTarget
         ? deepAnalysis
           ? cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
           : cachedReviews?.quick ?? strongestAfterVerdictRef.current ?? afterVerdict
         : null
-      const baselineReviewContract: ReviewContract | null =
-        sameAnalyzedTarget
-          ? afterReviewCacheRef.current?.quick?.review_contract ??
-            baselineVerdict?.review_contract ??
-            afterVerdict?.review_contract ??
-            null
-          : null
-      const artifactContext =
-        deepAnalysis
-          ? await resolveSurfaceAdapter().collectDeepArtifacts({
-              responseText: text,
-              reviewContract: baselineReviewContract
-            })
-          : undefined
-      const deepArtifactSignature = deepAnalysis ? buildArtifactSignature(artifactContext) : ""
-      const baselineAcceptanceCriteria =
-        sameAnalyzedTarget
-          ? canonicalChecklistLabels(afterReviewCacheRef.current?.quick ?? baselineVerdict ?? afterVerdict)
-          : []
-      const rawResult = await analyzeAfterAttempt({
-        attempt,
-        response_summary: responseSummary,
-        response_text_fallback: text,
-        deep_analysis: deepAnalysis,
-        baseline_decision: sameAnalyzedTarget ? baselineVerdict?.decision : undefined,
-        baseline_confidence: sameAnalyzedTarget ? baselineVerdict?.confidence : undefined,
-        baseline_acceptance_criteria: baselineAcceptanceCriteria,
-        baseline_acceptance_checklist:
-          sameAnalyzedTarget ? afterReviewCacheRef.current?.quick?.acceptance_checklist ?? [] : [],
-        baseline_review_contract:
-          sameAnalyzedTarget ? afterReviewCacheRef.current?.quick?.review_contract ?? null : null,
-        project_context: compactProjectMemory.projectContext,
-        current_state: compactProjectMemory.currentState,
-        error_summary: collectVisibleErrorSummary(),
-        changed_file_paths_summary: changedFiles,
-        artifact_context: artifactContext
-      })
       const result = baselineVerdict
         ? preserveStrongerReviewContext(rawResult, baselineVerdict)
         : rawResult
@@ -1246,45 +1102,28 @@ export default function PromptOptimizerApp() {
       lastEvaluatedChatHrefRef.current = effectiveThreadIdentity
       if (!sameAnalyzedTarget || !afterReviewCacheRef.current) {
         afterReviewCacheRef.current = {
-          attemptId: attempt.attempt_id,
           threadIdentity: effectiveThreadIdentity,
           responseIdentity: latestMessageId,
           normalizedText,
           quick: deepAnalysis ? null : result,
-          deep: deepAnalysis ? result : null,
-          deepArtifactSignature: deepAnalysis ? deepArtifactSignature : ""
+          deep: deepAnalysis ? result : null
         }
       } else if (deepAnalysis) {
         afterReviewCacheRef.current = {
           ...afterReviewCacheRef.current,
-          attemptId: attempt.attempt_id,
           quick: afterReviewCacheRef.current.quick ?? baselineVerdict ?? null,
-          deep: result,
-          deepArtifactSignature: deepArtifactSignature
+          deep: result
         }
       } else {
         afterReviewCacheRef.current = {
           ...afterReviewCacheRef.current,
-          attemptId: attempt.attempt_id,
-          quick: result,
-          deepArtifactSignature: afterReviewCacheRef.current.deepArtifactSignature ?? ""
+          quick: result
         }
       }
       if (!sameAnalyzedTarget || !strongestAfterVerdictRef.current) {
         strongestAfterVerdictRef.current = result
       } else if (specificityScore(result) >= specificityScore(strongestAfterVerdictRef.current)) {
         strongestAfterVerdictRef.current = result
-      }
-      if (afterReviewCacheRef.current) {
-        await saveAfterReviewCache({
-          attemptId: afterReviewCacheRef.current.attemptId,
-          threadIdentity: afterReviewCacheRef.current.threadIdentity,
-          responseIdentity: afterReviewCacheRef.current.responseIdentity,
-          normalizedText: afterReviewCacheRef.current.normalizedText,
-          quick: afterReviewCacheRef.current.quick,
-          deep: afterReviewCacheRef.current.deep,
-          deepArtifactSignature: afterReviewCacheRef.current.deepArtifactSignature
-        })
       }
       return true
     } finally {
@@ -1306,34 +1145,6 @@ export default function PromptOptimizerApp() {
       },
     [session]
   )
-  const deepDeltaNote = buildDeepDeltaNote(
-    afterReviewCacheRef.current?.quick ?? null,
-    afterReviewCacheRef.current?.deep ?? null
-  )
-
-  useEffect(() => {
-    setAfterHelpfulFeedback(afterVerdict?.helpful_feedback?.helpful ?? null)
-    setAfterNextPromptSuccessFeedback(afterVerdict?.helpful_feedback?.next_prompt_success ?? null)
-    setAfterPromptActionTaken(false)
-  }, [afterVerdict?.next_prompt, afterVerdict?.decision, afterVerdict?.confidence])
-
-  useEffect(() => {
-    if (!afterPanelOpen || !afterVerdict || !afterAttempt) return
-    const logKey = [
-      afterAttempt.attempt_id,
-      afterDisplayedReviewMode,
-      afterVerdict.popup_state,
-      afterVerdict.decision,
-      afterVerdict.prompt_strategy,
-      afterVerdict.confidence
-    ].join("::")
-    if (lastAfterDecisionLogKeyRef.current === logKey) return
-    lastAfterDecisionLogKeyRef.current = logKey
-    recordAfterExperienceEvent({ eventType: "decision_shown" })
-    if (shouldHideNextPromptForVerdict(afterVerdict)) {
-      recordAfterExperienceEvent({ eventType: "next_prompt_hidden_due_to_state" })
-    }
-  }, [afterPanelOpen, afterVerdict, afterAttempt, afterDisplayedReviewMode])
 
   useEffect(() => {
     if (!isSupportedPromptPage()) return
@@ -1347,77 +1158,28 @@ export default function PromptOptimizerApp() {
     })
     void loadProjectMemoryForCurrentLocation()
 
-    const isRelevantMutationNode = (node: Node | null) => {
-      if (!(node instanceof HTMLElement)) return false
-      if (node.closest("#prompt-optimizer-root")) return false
-      if (isPromptLikeElement(node)) return true
-
-      const hint = `${node.id} ${node.className?.toString?.() ?? ""} ${node.getAttribute("role") ?? ""} ${
-        node.getAttribute("aria-label") ?? ""
-      } ${node.getAttribute("placeholder") ?? ""}`.toLowerCase()
-      if (/\b(prompt|message|agent|send|submit|launcher|strength|optimi[sz]e|improve)\b/.test(hint)) {
-        return true
-      }
-
-      if (node.matches?.("textarea, input, button, [role='textbox'], [contenteditable='true'], [role='button'], form")) {
-        return true
-      }
-
-      if (node.childElementCount > 18) return false
-
-      return Boolean(
-        node.querySelector?.(
-          "textarea, input, [role='textbox'], [contenteditable='true'], button, [role='button'], form, [aria-label*='prompt' i], [placeholder*='prompt' i], [aria-label*='message' i], [placeholder*='message' i]"
-        )
-      )
-    }
-
-    const runScan = () => {
-      const currentThreadIdentity = getCurrentThreadSnapshot().identity
-      if (lastThreadIdentityRef.current && lastThreadIdentityRef.current !== currentThreadIdentity) {
-        pendingNavigationRef.current = currentThreadIdentity
-        recordDeepArtifactEvent({
-          eventType: "spa_navigation_detected",
-          status: "observed",
-          detail: `Detected navigation from ${lastThreadIdentityRef.current} to ${currentThreadIdentity}.`
-        })
-      }
-      lastThreadIdentityRef.current = currentThreadIdentity
-
+    const scan = () => {
       if (popupOpenRef.current) {
         positionHost()
+        scheduleReviewSignalRefresh("popup-open-mutation")
         return
       }
 
-      const currentPrompt = promptRef.current
-      const input =
-        currentPrompt && currentPrompt.isConnected && isPromptLikeElement(currentPrompt)
-          ? currentPrompt
-          : findPromptInput()
+      const input = findPromptInput()
       if (!input) {
         const fallbackInput = lastFocusedPromptRef.current
         if (fallbackInput && fallbackInput.isConnected && isPromptLikeElement(fallbackInput)) {
           promptRef.current = fallbackInput
           submitRef.current = findSubmitButton(fallbackInput)
           positionHost()
-          if (!lastLauncherVisibleRef.current) {
-            lastLauncherVisibleRef.current = true
-            recordDeepArtifactEvent({
-              eventType: pendingNavigationRef.current ? "launcher_reappeared_after_navigation" : "launcher_visible_near_textarea",
-              status: "observed",
-              detail: pendingNavigationRef.current
-                ? "The launcher anchor re-appeared after navigation."
-                : "The launcher anchor is available near the prompt textarea."
-            })
-            pendingNavigationRef.current = null
-          }
+          scheduleReviewSignalRefresh("fallback-scan")
           return
         }
 
         promptRef.current = null
         submitRef.current = null
         positionHost()
-        lastLauncherVisibleRef.current = false
+        scheduleReviewSignalRefresh("no-input-scan")
         return
       }
 
@@ -1426,30 +1188,10 @@ export default function PromptOptimizerApp() {
       lastFocusedPromptRef.current = input
       submitRef.current = findSubmitButton(input)
       positionHost()
-      if (!lastLauncherVisibleRef.current) {
-        lastLauncherVisibleRef.current = true
-        recordDeepArtifactEvent({
-          eventType: pendingNavigationRef.current ? "launcher_reappeared_after_navigation" : "launcher_visible_near_textarea",
-          status: "observed",
-          detail: pendingNavigationRef.current
-            ? "The launcher anchor re-appeared after navigation."
-            : "The launcher anchor is available near the prompt textarea."
-        })
-        pendingNavigationRef.current = null
-      }
+      scheduleReviewSignalRefresh("scan")
       if (inputChanged) {
         setInputBindingVersion((current) => current + 1)
       }
-    }
-
-    const scheduleScan = (delay = 120) => {
-      if (scanTimeoutRef.current) {
-        window.clearTimeout(scanTimeoutRef.current)
-      }
-      scanTimeoutRef.current = window.setTimeout(() => {
-        scanTimeoutRef.current = null
-        runScan()
-      }, delay)
     }
 
     const handleFocusIn = (event: FocusEvent) => {
@@ -1462,73 +1204,51 @@ export default function PromptOptimizerApp() {
       promptRef.current = target
       lastFocusedPromptRef.current = target
       submitRef.current = findSubmitButton(target)
-      schedulePositionHost()
+      positionHost()
+      updateReviewTypingState(readPromptValue(target))
+      scheduleReviewSignalRefresh("focus")
       if (inputChanged) {
         setInputBindingVersion((current) => current + 1)
       }
     }
 
-    const singleton = getRuntimeSingleton()
-    if (singleton.cleanup && singleton.instanceId !== instanceIdRef.current) {
-      singleton.cleanup()
-    }
-
-    runScan()
-    const observer = new MutationObserver((mutations) => {
-      if (popupOpenRef.current) {
-        schedulePositionHost()
-        return
-      }
-
-      const relevant = mutations.some((mutation) => {
-        if (isRelevantMutationNode(mutation.target)) return true
-        return [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)].some((node) =>
-          isRelevantMutationNode(node)
-        )
-      })
-
-      if (!relevant) return
-      scheduleScan(140)
-    })
+    scan()
+    const observer = new MutationObserver(scan)
     observer.observe(document.body, { childList: true, subtree: true })
     document.addEventListener("focusin", handleFocusIn)
-    window.addEventListener("resize", schedulePositionHost)
-    window.addEventListener("scroll", schedulePositionHost, true)
+    window.addEventListener("resize", positionHost)
+    window.addEventListener("scroll", positionHost, true)
+    const freshnessIntervalId = window.setInterval(() => {
+      scheduleReviewSignalRefresh("poll")
+    }, 1000)
     setMounted(true)
 
-    const disposeRuntime = () => {
+    return () => {
       observer.disconnect()
       document.removeEventListener("focusin", handleFocusIn)
-      window.removeEventListener("resize", schedulePositionHost)
-      window.removeEventListener("scroll", schedulePositionHost, true)
+      window.removeEventListener("resize", positionHost)
+      window.removeEventListener("scroll", positionHost, true)
+      window.clearInterval(freshnessIntervalId)
       if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current)
-      if (scanTimeoutRef.current) {
-        window.clearTimeout(scanTimeoutRef.current)
-        scanTimeoutRef.current = null
-      }
-      if (positionFrameRef.current != null) {
-        window.cancelAnimationFrame(positionFrameRef.current)
-        positionFrameRef.current = null
-      }
       if (afterLoadingIntervalRef.current) {
         window.clearInterval(afterLoadingIntervalRef.current)
         afterLoadingIntervalRef.current = null
       }
-    }
-
-    singleton.instanceId = instanceIdRef.current
-    singleton.cleanup = disposeRuntime
-
-    return () => {
-      disposeRuntime()
-      if (singleton.instanceId === instanceIdRef.current) {
-        singleton.cleanup = undefined
+      if (reviewSignalSettleTimeoutRef.current) {
+        window.clearTimeout(reviewSignalSettleTimeoutRef.current)
+        reviewSignalSettleTimeoutRef.current = null
+      }
+      if (reviewTypingTimeoutRef.current) {
+        window.clearTimeout(reviewTypingTimeoutRef.current)
+        reviewTypingTimeoutRef.current = null
       }
     }
   }, [])
 
   useEffect(() => {
-    popupOpenRef.current = panelOpen || afterPanelOpen
+    popupOpenRef.current = panelOpen || afterPanelOpen || reviewPopupOpen
+    reviewPopupOpenStateRef.current = reviewPopupOpen
+    reviewPopupTargetKeyRef.current = reviewPopupControllerState.targetKey
 
     if (popupOpenRef.current && !frozenHostPositionRef.current) {
       popupAnchorPromptRef.current = promptRef.current
@@ -1541,88 +1261,7 @@ export default function PromptOptimizerApp() {
     }
 
     positionHost()
-  }, [panelOpen, afterPanelOpen])
-
-  useEffect(() => {
-    if (!panelOpen) return
-    recordDeepArtifactEvent({
-      eventType: "optimizer_panel_opened",
-      status: "observed",
-      detail: "The in-page optimizer panel was opened from the launcher."
-    })
-  }, [panelOpen])
-
-  useEffect(() => {
-    if (!beforeResult || !panelOpen) return
-    if (!beforeResult.clarification_questions.length) return
-
-    const signature = JSON.stringify({
-      questionIds: beforeResult.clarification_questions.map((question) => question.id),
-      score: beforeResult.score
-    })
-    if (lastQuestionEvidenceSignatureRef.current === signature) return
-    lastQuestionEvidenceSignatureRef.current = signature
-
-    recordDeepArtifactEvent({
-      eventType: "clarification_questions_visible",
-      status: "observed",
-      detail: `The optimizer panel showed ${beforeResult.clarification_questions.length} clarification question(s).`
-    })
-  }, [beforeResult, panelOpen])
-
-  useEffect(() => {
-    if (!draftReady || !editableDraft.trim()) return
-
-    const hasAcceptanceCriteria = /\bacceptance criteria\b/i.test(editableDraft)
-    const signature = `${editableDraft.trim()}::${hasAcceptanceCriteria}`
-    if (lastDraftTelemetrySignatureRef.current === signature) return
-    lastDraftTelemetrySignatureRef.current = signature
-
-    recordDeepArtifactEvent({
-      eventType: "improved_prompt_generated",
-      status: hasAcceptanceCriteria ? "success" : "observed",
-      detail: hasAcceptanceCriteria
-        ? "Generated an improved prompt that includes acceptance criteria."
-        : "Generated an improved prompt, but acceptance criteria were not clearly visible in the draft."
-    })
-  }, [draftReady, editableDraft])
-
-  useEffect(() => {
-    const handleError = (event: ErrorEvent) => {
-      const message = [event.message, event.filename, event.error instanceof Error ? event.error.message : ""]
-        .filter(Boolean)
-        .join(" | ")
-      if (!message.trim()) return
-      recordDeepArtifactEvent({
-        eventType: "runtime_error",
-        status: "failed",
-        detail: message
-      })
-    }
-
-    const handleRejection = (event: PromiseRejectionEvent) => {
-      const reason =
-        typeof event.reason === "string"
-          ? event.reason
-          : event.reason instanceof Error
-            ? event.reason.message
-            : JSON.stringify(event.reason)
-      if (!reason?.trim()) return
-      recordDeepArtifactEvent({
-        eventType: "unhandled_rejection",
-        status: "failed",
-        detail: reason
-      })
-    }
-
-    window.addEventListener("error", handleError)
-    window.addEventListener("unhandledrejection", handleRejection)
-
-    return () => {
-      window.removeEventListener("error", handleError)
-      window.removeEventListener("unhandledrejection", handleRejection)
-    }
-  }, [])
+  }, [panelOpen, afterPanelOpen, reviewPopupOpen, reviewPopupControllerState.targetKey])
 
   useEffect(() => {
     const input = promptRef.current
@@ -1652,6 +1291,7 @@ export default function PromptOptimizerApp() {
         lastStablePromptValueRef.current = prompt.trim()
       }
       setPromptPreview(prompt.slice(0, 220))
+      updateReviewTypingState(prompt)
       setIssueVisible(false)
       setDiagnosis(null)
       if (promptChanged && prompt.trim() && afterVerdict) {
@@ -1733,22 +1373,62 @@ export default function PromptOptimizerApp() {
       handleInput(candidate)
     }
 
-    const handleKeydown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-        void handleSubmit()
-      }
+    const handleDocumentKeydown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.shiftKey || event.altKey || event.isComposing || event.repeat) return
+
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+
+      const candidate =
+        isPromptLikeElement(target)
+          ? target
+          : target.closest<HTMLElement>("textarea, input, [role='textbox'], [contenteditable='true']")
+
+      if (!candidate || !isPromptLikeElement(candidate)) return
+
+      bindPromptTarget(candidate)
+      void handleSubmit(event.metaKey || event.ctrlKey ? "shortcut-enter" : "enter", candidate)
     }
 
-    const submitButton = submitRef.current
+    const handleDocumentSubmit = (event: Event) => {
+      const target = event.target
+      if (!(target instanceof HTMLFormElement)) return
+
+      const candidate = promptRef.current ?? findPromptInput()
+      if (!candidate || !target.contains(candidate)) return
+
+      bindPromptTarget(candidate)
+      void handleSubmit("form-submit", candidate)
+    }
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement) || target.closest("#prompt-optimizer-root")) return
+
+      const button = target.closest<HTMLButtonElement>("button")
+      if (!button) return
+
+      const candidate = promptRef.current ?? findPromptInput()
+      if (!candidate) return
+
+      const submitButton = findSubmitButton(candidate)
+      if (!submitButton || submitButton !== button) return
+
+      bindPromptTarget(candidate)
+      void handleSubmit("submit-click", candidate)
+    }
+
     document.addEventListener("input", handleDocumentInput, true)
-    input?.addEventListener("keydown", handleKeydown)
-    submitButton?.addEventListener("click", handleSubmit)
+    document.addEventListener("keydown", handleDocumentKeydown, true)
+    document.addEventListener("submit", handleDocumentSubmit, true)
+    document.addEventListener("click", handleDocumentClick, true)
     handleInput(input ?? undefined)
 
     return () => {
       document.removeEventListener("input", handleDocumentInput, true)
-      input?.removeEventListener("keydown", handleKeydown)
-      submitButton?.removeEventListener("click", handleSubmit)
+      document.removeEventListener("keydown", handleDocumentKeydown, true)
+      document.removeEventListener("submit", handleDocumentSubmit, true)
+      document.removeEventListener("click", handleDocumentClick, true)
       if (debounceId) window.clearTimeout(debounceId)
     }
   }, [currentSession, inputBindingVersion])
@@ -1768,6 +1448,48 @@ export default function PromptOptimizerApp() {
       resetAfterNextStepFlow()
       setProjectContextSetupActive(false)
       setProjectContextReadyActive(false)
+      reviewPopupOrchestratorRef.current?.close()
+      reviewPromptModeOrchestratorRef.current?.reset()
+      setReviewPopupOpen(false)
+      setReviewPopupSurface("answer_mode")
+      setReviewPopupControllerState({
+        surface: "answer_mode",
+        popupState: "idle",
+        activeMode: "deep",
+        targetKey: null,
+        cacheStatus: "none",
+        analysisStarted: false,
+        analysisFinished: false,
+        errorReason: null
+      })
+      setReviewPopupViewModel(buildReviewLoadingViewModel("deep"))
+      setReviewPromptModeState({
+        popupState: "idle",
+        sessionKey: null,
+        sourcePrompt: "",
+        planningGoal: "",
+        planningAttempt: null,
+        analysisSeed: null,
+        localAnalysis: null,
+        questionHistory: [],
+        questionLevels: {},
+        currentLevelQuestions: [],
+        currentLevel: 1,
+        activeQuestionIndex: 0,
+        answerState: {},
+        otherAnswerState: {},
+        isLoadingQuestions: false,
+        isGeneratingPrompt: false,
+        promptDraft: "",
+        promptReady: false,
+        errorMessage: null
+      })
+      setReviewSignal(createIdleReviewSignal())
+      setReviewTypingState({
+        active: false,
+        promptText: "",
+        sessionKey: null
+      })
       setIsEvaluatingAfterResponse(false)
       setIsDeepAnalyzingAfterResponse(false)
       setHasSubmittedPrompt(false)
@@ -1777,7 +1499,17 @@ export default function PromptOptimizerApp() {
       lastEvaluatedAssistantMessageIdRef.current = ""
       lastEvaluatedChatHrefRef.current = ""
       strongestAfterVerdictRef.current = null
+      lastSubmittedOrAppliedPromptRef.current = ""
       afterReviewCacheRef.current = null
+      reviewSignalCacheRef.current = null
+      lastObservedAssistantSignalKeyRef.current = ""
+      lastSettledAssistantSignalKeyRef.current = ""
+      awaitingFreshReviewAnswerRef.current = false
+      submittedAssistantBaselineKeyRef.current = ""
+      if (reviewSignalSettleTimeoutRef.current) {
+        window.clearTimeout(reviewSignalSettleTimeoutRef.current)
+        reviewSignalSettleTimeoutRef.current = null
+      }
       pendingPromptRef.current = null
     }, 500)
 
@@ -1801,45 +1533,19 @@ export default function PromptOptimizerApp() {
     const sameChat = threadSnapshot.identity === lastEvaluatedChatHrefRef.current
     const currentDraftPrompt = draftSnapshot.text.trim()
     const savedDraftPrompt = afterPlanningGoal.trim() || afterAttempt?.raw_prompt.trim() || ""
-    const latestSubmittedAttempt = await getLatestSubmittedAttempt()
-    const sameSubmittedAttempt =
-      Boolean(latestSubmittedAttempt?.attempt_id) &&
-      Boolean(afterAttempt?.attempt_id) &&
-      latestSubmittedAttempt?.attempt_id === afterAttempt?.attempt_id
     const shouldStartWithDeepReview = false
-    const canReuseOpenVerdict =
-      Boolean(afterVerdict) &&
-      sameSubmittedAttempt &&
-      !["RESPONSE_STILL_STREAMING", "ANALYSIS_RAN_TOO_EARLY", "ANALYSIS_FAILED_INTERNAL"].includes(
-        afterVerdict?.popup_state ?? "ANALYSIS_READY"
-      )
     const sameMessage =
-      targetTextMatches(text, lastEvaluatedAssistantTextRef.current) ||
-      (!normalizedText &&
-        !normalizedLastText &&
-        latestMessageId &&
-        lastEvaluatedAssistantMessageIdRef.current &&
-        latestMessageId === lastEvaluatedAssistantMessageIdRef.current)
+      latestMessageId && lastEvaluatedAssistantMessageIdRef.current
+        ? latestMessageId === lastEvaluatedAssistantMessageIdRef.current
+        : normalizedText === normalizedLastText
     const sameDraftPrompt = currentDraftPrompt === savedDraftPrompt
     const baselineResponse = projectMemoryBaselineResponseRef.current
     const sameAsProjectMemoryBaseline =
       Boolean(text) &&
       Boolean(baselineResponse) &&
       baselineResponse?.threadIdentity === threadSnapshot.identity &&
-      (targetTextMatches(text, baselineResponse.normalizedText) ||
-        (!normalizedText &&
-          !baselineResponse.normalizedText &&
-          latestMessageId &&
-          baselineResponse.identity &&
-          latestMessageId === baselineResponse.identity))
-    const cachedReviews = text
-      ? await getCachedAfterReviewsForTarget(
-          latestSubmittedAttempt?.attempt_id ?? "",
-          threadSnapshot.identity,
-          latestMessageId,
-          normalizedText
-        )
-      : null
+      ((latestMessageId && baselineResponse.identity && latestMessageId === baselineResponse.identity) ||
+        normalizedText === baselineResponse.normalizedText)
 
     if (hasProjectMemory && projectMemoryAwaitingFreshAnswerRef.current && sameAsProjectMemoryBaseline) {
       setProjectContextSetupActive(false)
@@ -1858,22 +1564,9 @@ export default function PromptOptimizerApp() {
       return
     }
 
-    if (canReuseOpenVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
+    if (afterVerdict && sameChat && ((text && sameMessage) || (!text && sameDraftPrompt))) {
       setProjectContextReadyActive(false)
       setAfterPanelOpen(true)
-      return
-    }
-
-    if (cachedReviews?.quick) {
-      setProjectContextSetupActive(false)
-      setProjectContextReadyActive(false)
-      setAfterPanelOpen(true)
-      setAfterDisplayedReviewMode("quick")
-      setAfterVerdict(cachedReviews.quick)
-      setAfterAttempt(latestSubmittedAttempt ?? (await ensureSubmittedAttempt()))
-      lastEvaluatedAssistantTextRef.current = text
-      lastEvaluatedAssistantMessageIdRef.current = latestMessageId
-      lastEvaluatedChatHrefRef.current = threadSnapshot.identity
       return
     }
 
@@ -1983,37 +1676,6 @@ export default function PromptOptimizerApp() {
       return
     }
 
-    const readiness = await assessAssistantResponseReadiness()
-    if (!readiness.ready) {
-      const blockedVerdict = buildStreamingOrEarlyVerdict(readiness.popupState)
-      const timingAttempt = await ensureSubmittedAttempt()
-      setAfterPanelOpen(true)
-      resetAfterNextStepFlow()
-      setAfterDisplayedReviewMode("quick")
-      setAfterVerdict(blockedVerdict)
-      setAfterAttempt(timingAttempt)
-      recordDeepArtifactEvent({
-        eventType:
-          readiness.popupState === "RESPONSE_STILL_STREAMING"
-            ? "analysis_blocked_streaming"
-            : "analysis_blocked_early",
-        status: "observed",
-        detail:
-          readiness.popupState === "RESPONSE_STILL_STREAMING"
-            ? "Analysis was blocked because the assistant response was still generating."
-            : "Analysis was blocked because the response changed before it settled."
-      })
-      recordAfterExperienceEvent({
-        eventType:
-          readiness.popupState === "RESPONSE_STILL_STREAMING"
-            ? "analysis_blocked_streaming"
-            : "analysis_blocked_early",
-        attemptOverride: timingAttempt,
-        verdictOverride: blockedVerdict
-      })
-      return
-    }
-
     setAfterPanelOpen(true)
     resetAfterNextStepFlow()
     setAfterAttempt(null)
@@ -2028,29 +1690,21 @@ export default function PromptOptimizerApp() {
       const opened = await runAfterEvaluation(true, shouldStartWithDeepReview)
       if (!opened) {
         setAfterVerdict(
-          buildStreamingOrEarlyVerdict("ANALYSIS_RAN_TOO_EARLY")
+          buildAfterPlaceholder(
+            "NoRetry could not capture the latest AI answer yet.",
+            ["Wait for the answer to finish, then click the thunder again."],
+            "Please restate your final result, list the concrete changes you made, and verify whether the original request is now fully satisfied."
+          )
         )
       }
     } catch (error) {
-      logHiddenInternalError(shouldStartWithDeepReview ? "deep" : "quick", error)
-      const internalVerdict = buildInternalAnalysisFailureVerdict(shouldStartWithDeepReview ? "deep" : "quick", text)
       setAfterVerdict(
-        internalVerdict
+        buildAfterPlaceholder(
+          error instanceof Error ? error.message : "NoRetry hit a problem while analyzing the latest answer.",
+          ["Try clicking the thunder again after the response fully settles."],
+          "Analyze your last answer again. Tell me exactly what you changed, what remains missing, and give me the next focused prompt to continue."
+        )
       )
-      recordAfterExperienceEvent({
-        eventType: "internal_error_hidden_from_user",
-        verdictOverride: internalVerdict,
-        attemptOverride: afterAttempt,
-        errorCode: error instanceof Error && /400/.test(error.message) ? "BAD_REQUEST" : "UNKNOWN",
-        errorType:
-          error instanceof Error && /too_big/i.test(error.message)
-            ? "validation_too_big"
-            : error instanceof Error && /abort/i.test(error.message)
-              ? "aborted_request"
-              : "internal_error",
-        requestStage: shouldStartWithDeepReview ? "deep" : "quick",
-        rawErrorMessage: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800)
-      })
     } finally {
       stopAfterLoadingProgress()
       setIsEvaluatingAfterResponse(false)
@@ -2059,55 +1713,18 @@ export default function PromptOptimizerApp() {
 
   async function handleRunDeepAnalysis() {
     if (!afterVerdict || isEvaluatingAfterResponse || isDeepAnalyzingAfterResponse) return
-    recordDeepArtifactEvent({
-      eventType: "deep_analysis_requested",
-      status: "observed",
-      detail: "The user requested deep analysis."
-    })
 
     const targetOverride = buildCurrentAfterTargetOverride()
-    if (!targetOverride) {
-      const readiness = await assessAssistantResponseReadiness()
-      if (!readiness.ready) {
-        const blockedVerdict = buildStreamingOrEarlyVerdict(readiness.popupState)
-        setAfterDisplayedReviewMode("quick")
-        setAfterVerdict(blockedVerdict)
-        recordDeepArtifactEvent({
-          eventType:
-            readiness.popupState === "RESPONSE_STILL_STREAMING"
-              ? "analysis_blocked_streaming"
-              : "analysis_blocked_early",
-          status: "observed",
-          detail:
-            readiness.popupState === "RESPONSE_STILL_STREAMING"
-              ? "Deep analysis was blocked because the assistant response was still generating."
-              : "Deep analysis was blocked because the response changed before it settled."
-        })
-        recordAfterExperienceEvent({
-          eventType:
-            readiness.popupState === "RESPONSE_STILL_STREAMING"
-              ? "analysis_blocked_streaming"
-              : "analysis_blocked_early",
-          verdictOverride: blockedVerdict
-        })
-        return
-      }
-    }
-
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
-      const artifactSignature = buildArtifactSignature(
-        await resolveSurfaceAdapter().collectDeepArtifacts({
-          responseText: targetOverride.responseText,
-          reviewContract: afterReviewCacheRef.current?.quick?.review_contract ?? afterVerdict.review_contract
-        })
-      )
-      const cachedReviews = await getCachedAfterReviewsForTarget(
+      const cachedReviews = isSameCachedAfterTarget(
+        afterReviewCacheRef.current,
         targetOverride.threadIdentity,
         targetOverride.responseIdentity,
-        normalizedText,
-        artifactSignature
+        normalizedText
       )
+        ? afterReviewCacheRef.current
+        : null
 
       if (cachedReviews?.deep) {
         setAfterDisplayedReviewMode("deep")
@@ -2123,28 +1740,21 @@ export default function PromptOptimizerApp() {
       const opened = await runAfterEvaluation(true, true, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
-          buildStreamingOrEarlyVerdict("ANALYSIS_RAN_TOO_EARLY")
+          buildAfterPlaceholder(
+            "NoRetry could not re-open the latest AI answer for a deeper review.",
+            ["Wait for the answer to finish, then try Deep Analyze again."],
+            afterVerdict.next_prompt
+          )
         )
       }
     } catch (error) {
-      logHiddenInternalError("deep", error)
-      const internalVerdict = buildInternalAnalysisFailureVerdict("deep", afterVerdict.next_prompt)
       setAfterVerdict(
-        internalVerdict
+        buildAfterPlaceholder(
+          error instanceof Error ? error.message : "NoRetry could not complete a deeper review.",
+          ["Try Deep Analyze again after the response fully settles."],
+          afterVerdict.next_prompt
+        )
       )
-      recordAfterExperienceEvent({
-        eventType: "internal_error_hidden_from_user",
-        verdictOverride: internalVerdict,
-        errorCode: error instanceof Error && /400/.test(error.message) ? "BAD_REQUEST" : "UNKNOWN",
-        errorType:
-          error instanceof Error && /too_big/i.test(error.message)
-            ? "validation_too_big"
-            : error instanceof Error && /abort/i.test(error.message)
-              ? "aborted_request"
-              : "internal_error",
-        requestStage: "deep",
-        rawErrorMessage: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800)
-      })
     } finally {
       stopAfterLoadingProgress()
       setIsDeepAnalyzingAfterResponse(false)
@@ -2164,21 +1774,14 @@ export default function PromptOptimizerApp() {
     const targetOverride = buildCurrentAfterTargetOverride()
     if (targetOverride) {
       const normalizedText = normalizeAssistantTextForReuse(targetOverride.responseText)
-      const artifactSignature =
-        mode === "deep"
-          ? buildArtifactSignature(
-              await resolveSurfaceAdapter().collectDeepArtifacts({
-                responseText: targetOverride.responseText,
-                reviewContract: afterReviewCacheRef.current?.quick?.review_contract ?? afterVerdict.review_contract
-              })
-            )
-          : ""
-      const cachedReviews = await getCachedAfterReviewsForTarget(
+      const cachedReviews = isSameCachedAfterTarget(
+        afterReviewCacheRef.current,
         targetOverride.threadIdentity,
         targetOverride.responseIdentity,
-        normalizedText,
-        artifactSignature
+        normalizedText
       )
+        ? afterReviewCacheRef.current
+        : null
 
       const cachedResult = mode === "deep" ? cachedReviews?.deep : cachedReviews?.quick
       if (cachedResult) {
@@ -2199,76 +1802,97 @@ export default function PromptOptimizerApp() {
       const opened = await runAfterEvaluation(true, false, targetOverride ?? undefined)
       if (!opened) {
         setAfterVerdict(
-          buildStreamingOrEarlyVerdict("ANALYSIS_RAN_TOO_EARLY")
+          buildAfterPlaceholder(
+            "NoRetry could not reopen the latest AI answer for a quick review.",
+            ["Try switching analysis mode again after the answer fully settles."],
+            afterVerdict.next_prompt
+          )
         )
       }
     } catch (error) {
-      logHiddenInternalError("switch", error)
-      const internalVerdict = buildInternalAnalysisFailureVerdict("switch", afterVerdict.next_prompt)
       setAfterVerdict(
-        internalVerdict
+        buildAfterPlaceholder(
+          error instanceof Error ? error.message : "NoRetry could not switch back to quick review.",
+          ["Try switching analysis mode again after the answer fully settles."],
+          afterVerdict.next_prompt
+        )
       )
-      recordAfterExperienceEvent({
-        eventType: "internal_error_hidden_from_user",
-        verdictOverride: internalVerdict,
-        errorCode: error instanceof Error && /400/.test(error.message) ? "BAD_REQUEST" : "UNKNOWN",
-        errorType:
-          error instanceof Error && /too_big/i.test(error.message)
-            ? "validation_too_big"
-            : error instanceof Error && /abort/i.test(error.message)
-              ? "aborted_request"
-              : "internal_error",
-        requestStage: "switch",
-        rawErrorMessage: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800)
-      })
     } finally {
       stopAfterLoadingProgress()
       setIsEvaluatingAfterResponse(false)
     }
   }
 
-  async function handleCopyAfterNextPrompt() {
-    if (!afterVerdict?.next_prompt?.trim()) return
-    await navigator.clipboard.writeText(afterVerdict.next_prompt.trim())
-    setAfterPromptActionTaken(true)
-    recordAfterExperienceEvent({ eventType: "prompt_copy_clicked" })
-  }
-
-  function handleAfterProofDetailsExpanded() {
-    recordAfterExperienceEvent({ eventType: "proof_details_expanded" })
-  }
-
-  function handleAfterHelpfulFeedback(helpful: boolean) {
-    setAfterHelpfulFeedback(helpful)
-    if (afterVerdict) {
-      setAfterVerdict({
-        ...afterVerdict,
-        helpful_feedback: {
-          ...afterVerdict.helpful_feedback,
-          helpful
+  function getReviewPopupOrchestrator() {
+    if (!reviewPopupOrchestratorRef.current) {
+      reviewPopupOrchestratorRef.current = createReviewPopupOrchestrator({
+        resolveTarget: getReviewTargetResolver(),
+        runAnalysis: getReviewAnalysisRunner(),
+        onStateChange: (nextState) => {
+          setReviewPopupControllerState(nextState.controller)
+          setReviewPopupViewModel(nextState.viewModel)
+        },
+        onOpenChange: setReviewPopupOpen,
+        onCopyPrompt: (prompt) => {
+          void copyReviewPopupPrompt(prompt)
         }
       })
     }
-    recordAfterExperienceEvent({ eventType: helpful ? "feedback_helpful_yes" : "feedback_helpful_no", helpful })
+
+    return reviewPopupOrchestratorRef.current
   }
 
-  function handleAfterNextPromptSuccessFeedback(success: boolean) {
-    setAfterNextPromptSuccessFeedback(success)
-    if (afterVerdict) {
-      setAfterVerdict({
-        ...afterVerdict,
-        helpful_feedback: {
-          ...afterVerdict.helpful_feedback,
-          helpful: afterHelpfulFeedback,
-          next_prompt_success: success
+  function getReviewPromptModeOrchestrator() {
+    if (!reviewPromptModeOrchestratorRef.current) {
+      reviewPromptModeOrchestratorRef.current = createReviewPromptModeOrchestrator({
+        getPlatform: () => getAttemptPlatform(),
+        getSurface: () => getPromptSurface(),
+        getSessionSummary: () => summarizeSessionMemory(currentSession) ?? null,
+        getProjectMemoryContext: () => getCompactProjectMemory(),
+        extendQuestions: (request) => extendQuestions(request),
+        refinePrompt: (request) => refinePrompt(request),
+        onStateChange: (nextState) => {
+          setReviewPromptModeState(nextState)
         }
       })
     }
-    recordAfterExperienceEvent({
-      eventType: success ? "feedback_next_prompt_success_yes" : "feedback_next_prompt_success_no",
-      helpful: afterHelpfulFeedback ?? undefined,
-      nextPromptSuccess: success
-    })
+
+    return reviewPromptModeOrchestratorRef.current
+  }
+
+  async function handleOpenReviewPopup() {
+    setPanelOpen(false)
+    setAfterPanelOpen(false)
+    const currentDraft = getCurrentDraftSnapshot().text.trim()
+    if (reviewTypingState.active && hasUnsentPromptDraft(currentDraft)) {
+      setReviewPopupSurface("prompt_mode")
+      setReviewPopupOpen(true)
+      await getReviewPromptModeOrchestrator().open({
+        promptText: currentDraft,
+        beforeIntent: beforeResult?.intent
+      })
+      return
+    }
+
+    setReviewPopupSurface("answer_mode")
+    await getReviewPopupOrchestrator().open()
+  }
+
+  async function handleSwitchReviewPopupSurface(surface: ReviewPopupSurface) {
+    if (surface === "prompt_mode") {
+      const currentDraft = getCurrentDraftSnapshot().text.trim()
+      if (!currentDraft) return
+      setReviewPopupSurface("prompt_mode")
+      setReviewPopupOpen(true)
+      await getReviewPromptModeOrchestrator().open({
+        promptText: currentDraft,
+        beforeIntent: beforeResult?.intent
+      })
+      return
+    }
+
+    setReviewPopupSurface("answer_mode")
+    await getReviewPopupOrchestrator().open()
   }
 
   async function handleStartNextStep() {
@@ -2630,7 +2254,6 @@ export default function PromptOptimizerApp() {
     if (!draftSnapshot.exists || !afterNextPromptReady || !afterNextPromptDraft.trim()) return
 
     const normalizedNextPrompt = afterNextPromptDraft.trim()
-    setAfterPromptActionTaken(true)
     lastStablePromptValueRef.current = normalizedNextPrompt
     getActiveSurfaceAdapter().writeDraftPrompt(normalizedNextPrompt)
     const sourcePrompt = promptPreview || getCurrentDraftSnapshot().text
@@ -2706,14 +2329,55 @@ export default function PromptOptimizerApp() {
     showPlanningGoalNotice(projectMemoryDepth === "deep" ? "Deep context request copied" : "Quick context request copied")
   }
 
-  async function handleSubmit() {
-    const input = promptRef.current
-    if (!input) return
+  async function handleSubmit(source = "unknown", inputOverride?: HTMLElement | null) {
+    const input = inputOverride ?? promptRef.current ?? findPromptInput()
+    if (!input) {
+      logReviewDebug("send detected but no prompt input was available", { source })
+      return
+    }
+
+    if (promptRef.current !== input) {
+      promptRef.current = input
+      lastFocusedPromptRef.current = input
+      submitRef.current = findSubmitButton(input)
+    }
+
     const prompt = readPromptValue(input).trim()
-    if (!prompt) return
-    lastStablePromptValueRef.current = prompt
+    logReviewDebug("send detected", { source, promptLength: prompt.length })
+    if (!prompt) {
+      logReviewDebug("send ignored because prompt was empty", { source })
+      return
+    }
 
     const now = Date.now()
+    const lastDetectedSend = lastDetectedSendRef.current
+    if (lastDetectedSend && lastDetectedSend.prompt === prompt && now - lastDetectedSend.at < SEND_DETECTION_DEDUPE_MS) {
+      logReviewDebug("duplicate send detection suppressed", {
+        source,
+        promptLength: prompt.length,
+        elapsedMs: now - lastDetectedSend.at
+      })
+      return
+    }
+    lastDetectedSendRef.current = { prompt, at: now }
+    logReviewDebug("captured prompt for submitted attempt", {
+      source,
+      promptLength: prompt.length,
+      promptPreview: prompt.slice(0, 120)
+    })
+
+    lastSubmittedOrAppliedPromptRef.current = prompt
+    updateReviewTypingState("")
+    submittedAssistantBaselineKeyRef.current = buildLiveAssistantSignalKey()
+    awaitingFreshReviewAnswerRef.current = true
+    lastObservedAssistantSignalKeyRef.current = submittedAssistantBaselineKeyRef.current
+    lastSettledAssistantSignalKeyRef.current = ""
+    reviewSignalCacheRef.current = null
+    reviewPopupOrchestratorRef.current?.invalidate()
+    setReviewSignal(createLoadingReviewSignal(null))
+
+    lastStablePromptValueRef.current = prompt
+
     const retryCount =
       pendingPromptRef.current && now - pendingPromptRef.current.sentAt < DETECTION_THRESHOLDS.retryWindowMs
         ? currentSession.retryCount + 1
@@ -2741,13 +2405,18 @@ export default function PromptOptimizerApp() {
     }
     const activeAttempt = await getActiveAttempt()
     if (activeAttempt) {
-      await markAttemptSubmitted(
+      const submittedAttempt = await markAttemptSubmitted(
         activeAttempt.attempt_id,
         buildSubmittedAttemptPatch({
           prompt,
           beforeIntent: beforeResult?.intent
         })
       )
+      logReviewDebug("submitted attempt marked from active attempt", {
+        source,
+        attemptId: submittedAttempt?.attempt_id ?? activeAttempt.attempt_id,
+        promptLength: prompt.length
+      })
     } else {
       const fallbackAttempt = await createAttempt(
         buildFallbackSubmittedAttemptInput({
@@ -2756,17 +2425,17 @@ export default function PromptOptimizerApp() {
           beforeIntent: beforeResult?.intent
         })
       )
-      await markAttemptSubmitted(fallbackAttempt.attempt_id)
+      const submittedAttempt = await markAttemptSubmitted(fallbackAttempt.attempt_id)
+      logReviewDebug("submitted attempt created from fallback", {
+        source,
+        attemptId: submittedAttempt?.attempt_id ?? fallbackAttempt.attempt_id,
+        promptLength: prompt.length
+      })
     }
     setAfterVerdict(null)
     setAfterPanelOpen(false)
     resetAfterNextStepFlow()
     latestAssistantNodeRef.current = null
-    lastEvaluatedAssistantTextRef.current = ""
-    lastEvaluatedAssistantMessageIdRef.current = ""
-    lastEvaluatedChatHrefRef.current = ""
-    strongestAfterVerdictRef.current = null
-    afterReviewCacheRef.current = null
     setHasSubmittedPrompt(true)
 
     const nextSession = buildSessionAfterSubmit({
@@ -2862,19 +2531,9 @@ export default function PromptOptimizerApp() {
   function handleReplacePrompt() {
     const input = promptRef.current
     if (!draftReady || !input || !editableDraft.trim()) return
-    const beforeValue = readPromptValue(input).trim()
     writePromptValue(input, editableDraft.trim())
-    const afterValue = readPromptValue(input).trim()
-    const sourcePrompt = promptPreview || afterValue
+    const sourcePrompt = promptPreview || readPromptValue(input)
     void saveDraftAttempt(sourcePrompt, editableDraft.trim())
-    recordDeepArtifactEvent({
-      eventType: "prompt_replaced",
-      status: afterValue === editableDraft.trim() && afterValue !== beforeValue ? "success" : "observed",
-      detail:
-        afterValue === editableDraft.trim() && afterValue !== beforeValue
-          ? "Replace wrote the improved prompt back into the active textarea and the visible text changed."
-          : "Replace was triggered, but the textarea change could not be fully confirmed."
-    })
     setPanelOpen(false)
   }
 
@@ -3007,6 +2666,46 @@ export default function PromptOptimizerApp() {
     await markOnboardingSeen()
   }
 
+  const displayedReviewSignal = reviewTypingState.active
+    ? createTypingReviewSignal(reviewTypingState.sessionKey)
+    : reviewSignal
+
+  const reviewPopupSurfaceActions: {
+    id: string
+    label: string
+    kind?: "primary" | "secondary" | "ghost"
+    onClick?: () => void
+  }[] = [
+    {
+      id: "prompt-mode",
+      label: "Prompt",
+      kind: reviewPopupSurface === "prompt_mode" ? "primary" : "secondary",
+      onClick: () => void handleSwitchReviewPopupSurface("prompt_mode")
+    },
+    {
+      id: "answer-mode",
+      label: "Answer",
+      kind: reviewPopupSurface === "answer_mode" ? "primary" : "secondary",
+      onClick: () => void handleSwitchReviewPopupSurface("answer_mode")
+    }
+  ]
+
+  const reviewPromptActions =
+    reviewPromptModeState.promptReady && reviewPromptModeState.promptDraft.trim()
+      ? [
+          {
+            id: "copy-prompt-mode-draft",
+            label: "Copy prompt",
+            kind: "primary" as const,
+            onClick: () => void copyReviewPopupPrompt(reviewPromptModeState.promptDraft)
+          }
+        ]
+      : []
+
+  const reviewPromptQuestions = reviewPromptModeState.questionHistory.length
+    ? reviewPromptModeState.questionHistory
+    : reviewPromptModeState.currentLevelQuestions
+
   async function syncPromptFromPage() {
     const latestInput = findPromptInput()
     if (latestInput) {
@@ -3020,6 +2719,7 @@ export default function PromptOptimizerApp() {
     const prompt = sourceInput ? readPromptValue(sourceInput).trim() : lastPromptValueRef.current.trim()
 
     setPromptPreview(prompt.slice(0, 220))
+    updateReviewTypingState(prompt)
 
     if (!prompt) {
       setBeforeResult(null)
@@ -3252,21 +2952,15 @@ export default function PromptOptimizerApp() {
     host.style.right = "auto"
   }
 
-  function schedulePositionHost() {
-    if (positionFrameRef.current != null) return
-    positionFrameRef.current = window.requestAnimationFrame(() => {
-      positionFrameRef.current = null
-      positionHost()
-    })
-  }
-
   return (
     <>
-      <OptimizerShell
-        mounted={mounted}
-        panelOpen={panelOpen}
-        afterPanelOpen={afterPanelOpen}
-        promptPreview={promptPreview}
+        <OptimizerShell
+          mounted={mounted}
+          panelOpen={panelOpen}
+          afterPanelOpen={afterPanelOpen}
+          reviewPopupOpen={reviewPopupOpen}
+          reviewSignal={displayedReviewSignal}
+          promptPreview={promptPreview}
         beforeResult={beforeResult}
         isAnalyzingPrompt={isAnalyzingPrompt}
         diagnosis={diagnosis}
@@ -3291,13 +2985,20 @@ export default function PromptOptimizerApp() {
         isEvaluatingAfterResponse={isEvaluatingAfterResponse}
         onClosePanel={() => setPanelOpen(false)}
         onOpenPanel={() => {
+          reviewPopupOrchestratorRef.current?.close()
+          setReviewPopupOpen(false)
           void syncPromptFromPage().then((snapshot) => {
             if (!snapshot) return
             void loadAiQuestionsForCurrentPrompt(snapshot.prompt, snapshot.result)
           })
           setPanelOpen(true)
         }}
-        onOpenAfterPanel={() => void handleOpenAfterPanel()}
+        onOpenAfterPanel={() => {
+          reviewPopupOrchestratorRef.current?.close()
+          setReviewPopupOpen(false)
+          void handleOpenAfterPanel()
+        }}
+        onOpenReviewPopup={() => void handleOpenReviewPopup()}
         onRewrite={handleRewrite}
         onExplain={() => void handleExplain()}
         onApplyFix={handleApplyFix}
@@ -3322,10 +3023,6 @@ export default function PromptOptimizerApp() {
           loadingProgress={afterLoadingProgress}
           codeAnalysisMode={codeAnalysisMode}
           displayedReviewMode={afterDisplayedReviewMode}
-          deepDeltaNote={deepDeltaNote}
-          afterHelpfulFeedback={afterHelpfulFeedback}
-          afterNextPromptSuccessFeedback={afterNextPromptSuccessFeedback}
-          afterPromptActionTaken={afterPromptActionTaken}
           nextStepStarted={afterNextStepStarted}
           planningGoal={afterPlanningGoal}
           planningGoalNotice={planningGoalNotice}
@@ -3352,10 +3049,6 @@ export default function PromptOptimizerApp() {
           isSavingProjectMemory={isSavingProjectMemory}
           onRunDeepAnalysis={() => void handleRunDeepAnalysis()}
           onSelectCodeAnalysisMode={(mode) => void handleSelectCodeAnalysisMode(mode)}
-          onCopyNextPrompt={() => void handleCopyAfterNextPrompt()}
-          onProofDetailsExpanded={() => handleAfterProofDetailsExpanded()}
-          onHelpfulFeedback={(helpful) => handleAfterHelpfulFeedback(helpful)}
-          onNextPromptSuccessFeedback={(success) => handleAfterNextPromptSuccessFeedback(success)}
           onStartNextStep={() => void handleStartNextStep()}
           onPlanningGoalChange={setAfterPlanningGoal}
           onSuggestedDirectionClick={(chipId) => void handleSuggestedDirectionClick(chipId)}
@@ -3379,6 +3072,32 @@ export default function PromptOptimizerApp() {
           }}
         />
       ) : null}
+      <ReviewPopupContainer
+        open={reviewPopupOpen}
+        surface={reviewPopupSurface}
+        viewModel={reviewPopupViewModel}
+        promptModeState={reviewPromptModeState}
+        surfaceActions={reviewPopupSurfaceActions}
+        promptActions={reviewPromptActions}
+        onPromptQuestionIndexChange={(index) => getReviewPromptModeOrchestrator().setActiveQuestionIndex(index)}
+        onPromptAnswerChange={(questionId, value) => {
+          const question = reviewPromptQuestions.find((item) => item.id === questionId)
+          if (!question) return
+          void getReviewPromptModeOrchestrator().setAnswer(question, value)
+        }}
+        onPromptOtherAnswerChange={(questionId, value) => {
+          const question = reviewPromptQuestions.find((item) => item.id === questionId)
+          if (!question) return
+          getReviewPromptModeOrchestrator().setOtherAnswer(question, value)
+        }}
+        onPromptAdvanceOther={() => void getReviewPromptModeOrchestrator().advanceOther()}
+        onPromptGenerate={() => void getReviewPromptModeOrchestrator().generatePrompt()}
+        onClose={() => {
+          reviewPopupOrchestratorRef.current?.close()
+          setReviewPopupSurface("answer_mode")
+          setReviewPopupOpen(false)
+        }}
+      />
     </>
   )
 }
