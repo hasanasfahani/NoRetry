@@ -7,11 +7,14 @@ import type {
   SessionSummary,
   StrengthScore
 } from "@prompt-optimizer/shared/src/schemas"
+import type { ReviewSignalState } from "../lib/review/types"
 
 type OptimizerShellProps = {
   mounted: boolean
   panelOpen: boolean
   afterPanelOpen: boolean
+  reviewPopupOpen: boolean
+  reviewSignal: ReviewSignalState
   promptPreview: string
   beforeResult: AnalyzePromptResponse | null
   isAnalyzingPrompt: boolean
@@ -34,6 +37,7 @@ type OptimizerShellProps = {
   onClosePanel: () => void
   onOpenPanel: () => void
   onOpenAfterPanel: () => void
+  onOpenReviewPopup: () => void
   onRewrite: () => void
   onExplain: () => void
   onApplyFix: () => void
@@ -102,6 +106,86 @@ function CardManIcon({ color }: { color: string }) {
   )
 }
 
+function ReviewSparkIcon() {
+  return (
+    <svg viewBox="0 0 24 24" style={styles.reviewIcon} aria-hidden="true">
+      <path
+        d="M6.5 5.5h11a1.5 1.5 0 0 1 1.5 1.5v7.6a1.5 1.5 0 0 1-1.5 1.5H11l-4.5 3.1V16.1H6.5A1.5 1.5 0 0 1 5 14.6V7a1.5 1.5 0 0 1 1.5-1.5Z"
+        fill="none"
+        stroke="#0f172a"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m13.8 7.8-.9 1.9-2.1.2 1.6 1.3-.5 2 1.9-1 1.8 1-.4-2 1.5-1.3-2-.2-.9-1.9Z"
+        fill="#4f46e5"
+      />
+    </svg>
+  )
+}
+
+function reviewSignalAppearance(signal: ReviewSignalState) {
+  switch (signal.state) {
+    case "typing":
+      return {
+        background: "rgba(224,231,255,0.98)",
+        border: "rgba(79,70,229,0.22)",
+        color: "#4338ca",
+        overlay: ""
+      }
+    case "green":
+      return {
+        background: "rgba(220,252,231,0.96)",
+        border: "rgba(22,163,74,0.24)",
+        color: "#15803d",
+        overlay: "✓"
+      }
+    case "red":
+      return {
+        background: "rgba(254,226,226,0.96)",
+        border: "rgba(239,68,68,0.22)",
+        color: "#dc2626",
+        overlay: "×"
+      }
+    case "yellow_warning":
+      return {
+        background: "rgba(254,249,195,0.98)",
+        border: "rgba(234,179,8,0.28)",
+        color: "#ca8a04",
+        overlay: "⚠"
+      }
+    case "yellow_search":
+      return {
+        background: "rgba(254,249,195,0.98)",
+        border: "rgba(234,179,8,0.28)",
+        color: "#ca8a04",
+        overlay: "🔎"
+      }
+    case "yellow_puzzle":
+      return {
+        background: "rgba(254,249,195,0.98)",
+        border: "rgba(234,179,8,0.28)",
+        color: "#ca8a04",
+        overlay: "🧩"
+      }
+    case "loading":
+      return {
+        background: "rgba(224,231,255,0.98)",
+        border: "rgba(79,70,229,0.2)",
+        color: "#4338ca",
+        overlay: ""
+      }
+    default:
+      return {
+        background: "rgba(255,255,255,0.96)",
+        border: "rgba(15,23,42,0.14)",
+        color: "#0f172a",
+        overlay: ""
+      }
+  }
+}
+
 export function OptimizerShell(props: OptimizerShellProps) {
   const otherOption = "Other"
   const holdPromptFocus = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -109,6 +193,7 @@ export function OptimizerShell(props: OptimizerShellProps) {
   }
 
   const isBusy = props.isAnalyzingPrompt || props.isLoadingQuestions
+  const reviewSignal = reviewSignalAppearance(props.reviewSignal)
   const tone = isBusy
     ? { bg: "#eff6ff", fg: "#1d4ed8", border: "rgba(29,78,216,0.18)" }
     : badgeTone(props.beforeResult?.score)
@@ -237,9 +322,18 @@ export function OptimizerShell(props: OptimizerShellProps) {
             75% { transform: translateX(4px) scaleX(-1) scale(1); opacity: 1; }
             100% { transform: translateX(-4px) scaleX(-1) scale(0.96); opacity: 0.72; }
           }
+          @keyframes reviewTypingPulse {
+            0% { transform: scale(0.95); opacity: 0.76; }
+            50% { transform: scale(1.04); opacity: 1; }
+            100% { transform: scale(0.95); opacity: 0.76; }
+          }
+          @keyframes reviewTypingDot {
+            0%, 80%, 100% { transform: translateY(0); opacity: 0.42; }
+            40% { transform: translateY(-3px); opacity: 1; }
+          }
         `}
       </style>
-      {!props.panelOpen && !props.afterPanelOpen ? (
+      {!props.panelOpen && !props.afterPanelOpen && !props.reviewPopupOpen ? (
         <div style={styles.badgeStack}>
           <button
           type="button"
@@ -261,6 +355,32 @@ export function OptimizerShell(props: OptimizerShellProps) {
             title="Check the AI response"
           >
             <span style={props.isEvaluatingAfterResponse ? styles.afterBadgeSpin : undefined}>⚡</span>
+          </button>
+          <button
+            type="button"
+            style={styles.reviewBadge(reviewSignal.background, reviewSignal.border, reviewSignal.color)}
+            onMouseDown={holdPromptFocus}
+            onClick={props.onOpenReviewPopup}
+            aria-label={props.reviewSignal.ariaLabel}
+            title={props.reviewSignal.tooltip}
+          >
+            {props.reviewSignal.state === "loading" ? (
+              <span style={styles.reviewSignalSpinner} />
+            ) : props.reviewSignal.state === "typing" ? (
+              <span style={styles.reviewTypingWrap}>
+                <ReviewSparkIcon />
+                <span style={styles.reviewTypingDots}>
+                  <span style={styles.reviewTypingDot(0)} />
+                  <span style={styles.reviewTypingDot(0.15)} />
+                  <span style={styles.reviewTypingDot(0.3)} />
+                </span>
+              </span>
+            ) : (
+              <>
+                <ReviewSparkIcon />
+                {reviewSignal.overlay ? <span style={styles.reviewSignalOverlay}>{reviewSignal.overlay}</span> : null}
+              </>
+            )}
           </button>
         </div>
       ) : null}
@@ -624,6 +744,26 @@ const styles = {
     outline: "none",
     transition: "transform 140ms ease, box-shadow 140ms ease"
   }),
+  reviewBadge: (background: string, borderColor: string, color: string): CSSProperties => ({
+    border: `1px solid ${borderColor}`,
+    borderRadius: "999px",
+    background,
+    color,
+    minWidth: 26,
+    width: 26,
+    height: 26,
+    padding: 0,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    boxShadow: "0 8px 18px rgba(15,23,42,0.12)",
+    backdropFilter: "blur(10px)",
+    WebkitBackdropFilter: "blur(10px)",
+    outline: "none",
+    transition: "transform 140ms ease, box-shadow 140ms ease",
+    position: "relative"
+  }),
   afterBadgeSpin: {
     display: "inline-flex",
     animation: "promptOptimizerSpin 0.9s linear infinite"
@@ -654,11 +794,65 @@ const styles = {
     animation: "promptOptimizerCharge 1s ease-in-out infinite",
     transformOrigin: "50% 50%"
   } as CSSProperties,
+  loadingRunner: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 20,
+    height: 20
+  } as CSSProperties,
   badgeCardMan: {
     width: 18,
     height: 18,
     transform: "translateY(-0.25px)",
     filter: "drop-shadow(0 1px 4px rgba(15,23,42,0.14))"
+  } as CSSProperties,
+  reviewIcon: {
+    width: 16,
+    height: 16
+  } as CSSProperties,
+  reviewTypingWrap: {
+    position: "relative",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    animation: "reviewTypingPulse 1.1s ease-in-out infinite"
+  } as CSSProperties,
+  reviewTypingDots: {
+    position: "absolute",
+    right: -5,
+    bottom: -5,
+    display: "inline-flex",
+    gap: 3,
+    padding: "2px 5px",
+    borderRadius: 999,
+    background: "rgba(255,255,255,0.92)",
+    boxShadow: "0 8px 18px rgba(15,23,42,0.12)"
+  } as CSSProperties,
+  reviewTypingDot: (delay: number) =>
+    ({
+      width: 4,
+      height: 4,
+      borderRadius: 999,
+      background: "#4338ca",
+      animation: "reviewTypingDot 0.95s ease-in-out infinite",
+      animationDelay: `${delay}s`
+    }) satisfies CSSProperties,
+  reviewSignalOverlay: {
+    position: "absolute",
+    right: -3,
+    bottom: -3,
+    fontSize: 10,
+    lineHeight: 1,
+    filter: "drop-shadow(0 1px 2px rgba(255,255,255,0.9))"
+  } as CSSProperties,
+  reviewSignalSpinner: {
+    width: 12,
+    height: 12,
+    borderRadius: "50%",
+    border: "2px solid rgba(67,56,202,0.18)",
+    borderTopColor: "#4338ca",
+    animation: "promptOptimizerSpin 0.9s linear infinite"
   } as CSSProperties,
   onboarding: {
     marginTop: 4

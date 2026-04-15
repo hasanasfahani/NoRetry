@@ -18,7 +18,10 @@
     "dev": "plasmo dev",
     "build": "plasmo build",
     "package": "plasmo package",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:review-answer-mode": "node ./scripts/review-answer-mode-smoke.mjs",
+    "test:review-routing": "node ./scripts/review-routing-smoke.mjs",
+    "test:review-prompt-mode": "node ./scripts/review-prompt-mode-smoke.mjs"
   },
   "dependencies": {
     "@plasmohq/storage": "^1.12.0",

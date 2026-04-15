@@ -19,6 +19,8 @@ import {
 import { summarizeSessionMemory } from "@prompt-optimizer/shared/src/session"
 import { AfterVerdictPanel } from "../components/AfterVerdictPanel"
 import { OptimizerShell } from "../components/OptimizerShell"
+import { ReviewPopupContainer } from "../components/review-popup/review/ReviewPopupContainer"
+import type { ReviewPopupViewModel } from "../components/review-popup/review/review-types"
 import { analyzeAfterAttempt, analyzePromptRemote, detectOutcome, diagnoseFailure, extendQuestions, generateAfterNextQuestion, refinePrompt, sendFeedback } from "../lib/api"
 import { readAssistantMessageIdentity } from "../lib/after/surface"
 import {
@@ -69,6 +71,7 @@ import {
   createAttempt,
   getActiveAttempt,
   getCodeAnalysisMode,
+  getRecentReviewableAttempts,
   getLatestSubmittedAttempt,
   markAttemptSubmitted,
   setCodeAnalysisMode
@@ -94,6 +97,25 @@ import {
   saveProjectMemory,
   saveSessionSummary
 } from "../lib/storage"
+import { createReviewPopupOrchestrator } from "../lib/review/orchestrator/review-popup-orchestrator"
+import { createReviewPromptModeOrchestrator } from "../lib/review/orchestrator/review-prompt-mode-orchestrator"
+import { buildReviewLoadingViewModel } from "../lib/review/mappers/review-view-model"
+import {
+  createIdleReviewSignal,
+  createLoadingReviewSignal,
+  createTypingReviewSignal,
+  mapReviewResultToSignal
+} from "../lib/review/mappers/review-signal"
+import { createReviewAnalysisRunner } from "../lib/review/services/review-analysis"
+import { buildPromptModeSessionKey } from "../lib/review/services/review-prompt-mode"
+import { createReviewTargetResolver } from "../lib/review/services/review-target"
+import type {
+  ReviewPopupControllerState,
+  ReviewPromptModeState,
+  ReviewPopupSurface,
+  ReviewSignalState,
+  ReviewTypingState
+} from "../lib/review/types"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://replit.com/*", "https://www.replit.com/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
@@ -109,6 +131,18 @@ export const getRootContainer: PlasmoGetRootContainer = async () => {
   }
 
   return host
+}
+
+const SEND_DETECTION_DEDUPE_MS = 1200
+const REVIEW_SIGNAL_SETTLE_MS = 1200
+
+function logReviewDebug(message: string, details?: Record<string, unknown>) {
+  if (details) {
+    console.debug("[NoRetry][Review]", message, details)
+    return
+  }
+
+  console.debug("[NoRetry][Review]", message)
 }
 
 export default function PromptOptimizerApp() {
@@ -152,6 +186,48 @@ export default function PromptOptimizerApp() {
   const [afterAttempt, setAfterAttempt] = useState<Attempt | null>(null)
   const [afterVerdict, setAfterVerdict] = useState<AfterAnalysisResult | null>(null)
   const [afterPanelOpen, setAfterPanelOpen] = useState(false)
+  const [reviewPopupOpen, setReviewPopupOpen] = useState(false)
+  const [reviewPopupSurface, setReviewPopupSurface] = useState<ReviewPopupSurface>("answer_mode")
+  const [reviewSignal, setReviewSignal] = useState<ReviewSignalState>(createIdleReviewSignal())
+  const [reviewTypingState, setReviewTypingState] = useState<ReviewTypingState>({
+    active: false,
+    promptText: "",
+    sessionKey: null
+  })
+  const [reviewPopupViewModel, setReviewPopupViewModel] = useState<ReviewPopupViewModel>(
+    buildReviewLoadingViewModel("deep")
+  )
+  const [reviewPopupControllerState, setReviewPopupControllerState] = useState<ReviewPopupControllerState>({
+    surface: "answer_mode",
+    popupState: "idle",
+    activeMode: "deep",
+    targetKey: null,
+    cacheStatus: "none",
+    analysisStarted: false,
+    analysisFinished: false,
+    errorReason: null
+  })
+  const [reviewPromptModeState, setReviewPromptModeState] = useState<ReviewPromptModeState>({
+    popupState: "idle",
+    sessionKey: null,
+    sourcePrompt: "",
+    planningGoal: "",
+    planningAttempt: null,
+    analysisSeed: null,
+    localAnalysis: null,
+    questionHistory: [],
+    questionLevels: {},
+    currentLevelQuestions: [],
+    currentLevel: 1,
+    activeQuestionIndex: 0,
+    answerState: {},
+    otherAnswerState: {},
+    isLoadingQuestions: false,
+    isGeneratingPrompt: false,
+    promptDraft: "",
+    promptReady: false,
+    errorMessage: null
+  })
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
   const [isDeepAnalyzingAfterResponse, setIsDeepAnalyzingAfterResponse] = useState(false)
   const [afterDisplayedReviewMode, setAfterDisplayedReviewMode] = useState<"quick" | "deep">("quick")
@@ -190,6 +266,7 @@ export default function PromptOptimizerApp() {
   const promptRef = useRef<HTMLElement | null>(null)
   const submitRef = useRef<HTMLButtonElement | null>(null)
   const pendingPromptRef = useRef<PendingPrompt | null>(null)
+  const lastDetectedSendRef = useRef<{ prompt: string; at: number } | null>(null)
   const retryTimeoutRef = useRef<number | null>(null)
   const outcomeEventIdRef = useRef<string | null>(null)
   const lastAnalyzedPromptRef = useRef("")
@@ -198,6 +275,7 @@ export default function PromptOptimizerApp() {
   const lastFocusedPromptRef = useRef<HTMLElement | null>(null)
   const lastPromptValueRef = useRef("")
   const lastStablePromptValueRef = useRef("")
+  const lastSubmittedOrAppliedPromptRef = useRef("")
   const latestAssistantNodeRef = useRef<HTMLElement | null>(null)
   const lastEvaluatedAssistantTextRef = useRef("")
   const lastEvaluatedAssistantMessageIdRef = useRef("")
@@ -220,6 +298,23 @@ export default function PromptOptimizerApp() {
   } | null>(null)
   const strongestAfterVerdictRef = useRef<AfterAnalysisResult | null>(null)
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
+  const reviewPopupOrchestratorRef = useRef<ReturnType<typeof createReviewPopupOrchestrator> | null>(null)
+  const reviewPromptModeOrchestratorRef = useRef<ReturnType<typeof createReviewPromptModeOrchestrator> | null>(null)
+  const reviewPopupOpenStateRef = useRef(false)
+  const reviewPopupTargetKeyRef = useRef<string | null>(null)
+  const reviewTypingTimeoutRef = useRef<number | null>(null)
+  const reviewTargetResolverRef = useRef<ReturnType<typeof createReviewTargetResolver> | null>(null)
+  const reviewAnalysisRunnerRef = useRef<ReturnType<typeof createReviewAnalysisRunner> | null>(null)
+  const reviewSignalRequestIdRef = useRef(0)
+  const reviewSignalSettleTimeoutRef = useRef<number | null>(null)
+  const reviewSignalCacheRef = useRef<{
+    targetKey: string
+    signal: ReviewSignalState
+  } | null>(null)
+  const lastObservedAssistantSignalKeyRef = useRef("")
+  const lastSettledAssistantSignalKeyRef = useRef("")
+  const awaitingFreshReviewAnswerRef = useRef(false)
+  const submittedAssistantBaselineKeyRef = useRef("")
 
   function isReplitSurface() {
     return getPromptSurface() === "REPLIT"
@@ -499,6 +594,61 @@ export default function PromptOptimizerApp() {
     return getActiveSurfaceAdapter().getDraftPrompt()
   }
 
+  function hasUnsentPromptDraft(promptText = getCurrentDraftSnapshot().text) {
+    const trimmedPrompt = promptText.trim()
+    if (!trimmedPrompt) return false
+
+    return trimmedPrompt !== lastSubmittedOrAppliedPromptRef.current.trim()
+  }
+
+  function updateReviewTypingState(promptText: string) {
+    const trimmedPrompt = promptText.trim()
+    const shouldType = hasUnsentPromptDraft(trimmedPrompt)
+
+    if (!shouldType) {
+      if (reviewTypingTimeoutRef.current) {
+        window.clearTimeout(reviewTypingTimeoutRef.current)
+        reviewTypingTimeoutRef.current = null
+      }
+      setReviewTypingState({
+        active: false,
+        promptText: "",
+        sessionKey: null
+      })
+      return
+    }
+
+    const sessionKey = buildPromptModeSessionKey(trimmedPrompt)
+    setReviewTypingState({
+      active: true,
+      promptText: trimmedPrompt,
+      sessionKey
+    })
+
+    if (reviewTypingTimeoutRef.current) {
+      window.clearTimeout(reviewTypingTimeoutRef.current)
+    }
+
+    reviewTypingTimeoutRef.current = window.setTimeout(() => {
+      const currentDraft = getCurrentDraftSnapshot().text.trim()
+      if (!hasUnsentPromptDraft(currentDraft)) {
+        setReviewTypingState({
+          active: false,
+          promptText: "",
+          sessionKey: null
+        })
+        reviewTypingTimeoutRef.current = null
+        return
+      }
+
+      setReviewTypingState((current) => ({
+        ...current,
+        active: document.activeElement === promptRef.current
+      }))
+      reviewTypingTimeoutRef.current = null
+    }, 2200)
+  }
+
   function getCurrentAssistantSnapshot() {
     return getActiveSurfaceAdapter().getLatestAssistantResponse()
   }
@@ -509,6 +659,29 @@ export default function PromptOptimizerApp() {
 
   function getCurrentThreadSnapshot() {
     return getActiveSurfaceAdapter().getThread()
+  }
+
+  function buildLiveAssistantSignalKey(input?: {
+    threadIdentity: string
+    responseIdentity: string
+    responseText: string
+  }) {
+    const source =
+      input ??
+      (() => {
+        const assistant = getCurrentAssistantResponseText()
+        const thread = getCurrentThreadSnapshot()
+        return {
+          threadIdentity: thread.identity,
+          responseIdentity: assistant.identity,
+          responseText: assistant.text
+        }
+      })()
+
+    const normalizedResponseText = normalizeAssistantTextForReuse(source.responseText)
+    if (!normalizedResponseText) return ""
+
+    return [source.threadIdentity, source.responseIdentity || "no-response-id", normalizedResponseText].join("::")
   }
 
   async function ensureSubmittedAttempt() {
@@ -563,6 +736,45 @@ export default function PromptOptimizerApp() {
 
   function normalizeAssistantTextForReuse(value: string) {
     return value.replace(/\s+/g, " ").trim()
+  }
+
+  function getReviewTargetResolver() {
+    if (!reviewTargetResolverRef.current) {
+      reviewTargetResolverRef.current = createReviewTargetResolver({
+        getLatestAssistantResponse: () => {
+          const snapshot = getCurrentAssistantResponseText()
+          return {
+            node: snapshot.latestMessage,
+            text: snapshot.text,
+            identity: snapshot.identity
+          }
+        },
+        getLatestUserPrompt: () => getCurrentUserSnapshot(),
+        getThread: () => getCurrentThreadSnapshot(),
+        getLatestSubmittedAttempt: () => getLatestSubmittedAttempt(),
+        getReviewableAttempts: () => getRecentReviewableAttempts(),
+        ensureSubmittedAttempt,
+        readAssistantMessageIdentity: (node, text) => readAssistantMessageIdentity(node, text),
+        normalizeResponseText: (value) => normalizeAssistantTextForReuse(value)
+      })
+    }
+
+    return reviewTargetResolverRef.current
+  }
+
+  function getReviewAnalysisRunner() {
+    if (!reviewAnalysisRunnerRef.current) {
+      reviewAnalysisRunnerRef.current = createReviewAnalysisRunner({
+        analyzeAfterAttempt,
+        attachAnalysisResult,
+        preprocessResponse,
+        getProjectMemoryContext: () => getCompactProjectMemory(),
+        collectChangedFilesSummary,
+        collectVisibleErrorSummary
+      })
+    }
+
+    return reviewAnalysisRunnerRef.current
   }
 
   function isGenericChecklistLabel(label: string) {
@@ -656,6 +868,134 @@ export default function PromptOptimizerApp() {
       responseIdentity,
       threadIdentity
     }
+  }
+
+  async function copyReviewPopupPrompt(prompt: string) {
+    await navigator.clipboard.writeText(prompt)
+  }
+
+  async function runReviewSignalAnalysis(reason: string) {
+    const requestId = ++reviewSignalRequestIdRef.current
+    const resolution = await getReviewTargetResolver()()
+
+    if (requestId !== reviewSignalRequestIdRef.current) return
+
+    if (!resolution.ok) {
+      logReviewDebug("signal target unavailable", { reason, failure: resolution.reason })
+      setReviewSignal(createIdleReviewSignal())
+      return
+    }
+
+    const target = resolution.target
+    const targetKey = buildLiveAssistantSignalKey({
+      threadIdentity: target.threadIdentity,
+      responseIdentity: target.responseIdentity,
+      responseText: target.responseText
+    })
+
+    if (reviewSignalCacheRef.current?.targetKey === targetKey) {
+      logReviewDebug("signal cache hit", { reason, targetKey })
+      setReviewSignal(reviewSignalCacheRef.current.signal)
+    } else {
+      logReviewDebug("signal analysis running", {
+        reason,
+        targetKey,
+        responseIdentity: target.responseIdentity,
+        responseLength: target.responseText.length
+      })
+      setReviewSignal(createLoadingReviewSignal(targetKey))
+      const result = await getReviewAnalysisRunner()({
+        target,
+        mode: "quick",
+        quickBaseline: null
+      })
+      if (requestId !== reviewSignalRequestIdRef.current) return
+
+      const signal = mapReviewResultToSignal({
+        result,
+        taskType: target.taskType,
+        targetKey
+      })
+      reviewSignalCacheRef.current = {
+        targetKey,
+        signal
+      }
+      setReviewSignal(signal)
+      logReviewDebug("signal analysis completed", {
+        reason,
+        targetKey,
+        signal: signal.state
+      })
+    }
+
+    if (
+      reviewPopupOpenStateRef.current &&
+      reviewPopupSurface === "answer_mode" &&
+      reviewPopupTargetKeyRef.current !== targetKey
+    ) {
+      logReviewDebug("popup switching to newer answer", {
+        previousTargetKey: reviewPopupTargetKeyRef.current,
+        nextTargetKey: targetKey
+      })
+      reviewPopupOrchestratorRef.current?.invalidate()
+      void getReviewPopupOrchestrator().open()
+    }
+  }
+
+  function scheduleReviewSignalRefresh(reason: string) {
+    const assistant = getCurrentAssistantResponseText()
+    const thread = getCurrentThreadSnapshot()
+    const liveKey = buildLiveAssistantSignalKey({
+      threadIdentity: thread.identity,
+      responseIdentity: assistant.identity,
+      responseText: assistant.text
+    })
+
+    if (!liveKey) return
+
+    if (awaitingFreshReviewAnswerRef.current && liveKey === submittedAssistantBaselineKeyRef.current) {
+      return
+    }
+
+    if (liveKey === lastObservedAssistantSignalKeyRef.current) return
+
+    lastObservedAssistantSignalKeyRef.current = liveKey
+    logReviewDebug("new answer detected", {
+      reason,
+      liveKey,
+      responseIdentity: assistant.identity,
+      responseLength: assistant.text.trim().length
+    })
+
+    if (reviewSignalSettleTimeoutRef.current) {
+      window.clearTimeout(reviewSignalSettleTimeoutRef.current)
+    }
+
+    reviewSignalSettleTimeoutRef.current = window.setTimeout(() => {
+      const currentAssistant = getCurrentAssistantResponseText()
+      const currentThread = getCurrentThreadSnapshot()
+      const settledKey = buildLiveAssistantSignalKey({
+        threadIdentity: currentThread.identity,
+        responseIdentity: currentAssistant.identity,
+        responseText: currentAssistant.text
+      })
+
+      if (!settledKey || settledKey !== liveKey || settledKey === lastSettledAssistantSignalKeyRef.current) {
+        return
+      }
+
+      awaitingFreshReviewAnswerRef.current = false
+      lastSettledAssistantSignalKeyRef.current = settledKey
+      reviewSignalCacheRef.current = null
+      logReviewDebug("answer settled", {
+        reason,
+        settledKey,
+        responseIdentity: currentAssistant.identity,
+        responseLength: currentAssistant.text.trim().length
+      })
+      reviewPopupOrchestratorRef.current?.invalidate()
+      void runReviewSignalAnalysis("answer_settled")
+    }, REVIEW_SIGNAL_SETTLE_MS)
   }
 
   function compactContextForApi(value: string, maxLength: number) {
@@ -821,6 +1161,7 @@ export default function PromptOptimizerApp() {
     const scan = () => {
       if (popupOpenRef.current) {
         positionHost()
+        scheduleReviewSignalRefresh("popup-open-mutation")
         return
       }
 
@@ -831,12 +1172,14 @@ export default function PromptOptimizerApp() {
           promptRef.current = fallbackInput
           submitRef.current = findSubmitButton(fallbackInput)
           positionHost()
+          scheduleReviewSignalRefresh("fallback-scan")
           return
         }
 
         promptRef.current = null
         submitRef.current = null
         positionHost()
+        scheduleReviewSignalRefresh("no-input-scan")
         return
       }
 
@@ -845,6 +1188,7 @@ export default function PromptOptimizerApp() {
       lastFocusedPromptRef.current = input
       submitRef.current = findSubmitButton(input)
       positionHost()
+      scheduleReviewSignalRefresh("scan")
       if (inputChanged) {
         setInputBindingVersion((current) => current + 1)
       }
@@ -861,6 +1205,8 @@ export default function PromptOptimizerApp() {
       lastFocusedPromptRef.current = target
       submitRef.current = findSubmitButton(target)
       positionHost()
+      updateReviewTypingState(readPromptValue(target))
+      scheduleReviewSignalRefresh("focus")
       if (inputChanged) {
         setInputBindingVersion((current) => current + 1)
       }
@@ -872,6 +1218,9 @@ export default function PromptOptimizerApp() {
     document.addEventListener("focusin", handleFocusIn)
     window.addEventListener("resize", positionHost)
     window.addEventListener("scroll", positionHost, true)
+    const freshnessIntervalId = window.setInterval(() => {
+      scheduleReviewSignalRefresh("poll")
+    }, 1000)
     setMounted(true)
 
     return () => {
@@ -879,16 +1228,27 @@ export default function PromptOptimizerApp() {
       document.removeEventListener("focusin", handleFocusIn)
       window.removeEventListener("resize", positionHost)
       window.removeEventListener("scroll", positionHost, true)
+      window.clearInterval(freshnessIntervalId)
       if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current)
       if (afterLoadingIntervalRef.current) {
         window.clearInterval(afterLoadingIntervalRef.current)
         afterLoadingIntervalRef.current = null
       }
+      if (reviewSignalSettleTimeoutRef.current) {
+        window.clearTimeout(reviewSignalSettleTimeoutRef.current)
+        reviewSignalSettleTimeoutRef.current = null
+      }
+      if (reviewTypingTimeoutRef.current) {
+        window.clearTimeout(reviewTypingTimeoutRef.current)
+        reviewTypingTimeoutRef.current = null
+      }
     }
   }, [])
 
   useEffect(() => {
-    popupOpenRef.current = panelOpen || afterPanelOpen
+    popupOpenRef.current = panelOpen || afterPanelOpen || reviewPopupOpen
+    reviewPopupOpenStateRef.current = reviewPopupOpen
+    reviewPopupTargetKeyRef.current = reviewPopupControllerState.targetKey
 
     if (popupOpenRef.current && !frozenHostPositionRef.current) {
       popupAnchorPromptRef.current = promptRef.current
@@ -901,7 +1261,7 @@ export default function PromptOptimizerApp() {
     }
 
     positionHost()
-  }, [panelOpen, afterPanelOpen])
+  }, [panelOpen, afterPanelOpen, reviewPopupOpen, reviewPopupControllerState.targetKey])
 
   useEffect(() => {
     const input = promptRef.current
@@ -931,6 +1291,7 @@ export default function PromptOptimizerApp() {
         lastStablePromptValueRef.current = prompt.trim()
       }
       setPromptPreview(prompt.slice(0, 220))
+      updateReviewTypingState(prompt)
       setIssueVisible(false)
       setDiagnosis(null)
       if (promptChanged && prompt.trim() && afterVerdict) {
@@ -1012,22 +1373,62 @@ export default function PromptOptimizerApp() {
       handleInput(candidate)
     }
 
-    const handleKeydown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-        void handleSubmit()
-      }
+    const handleDocumentKeydown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.shiftKey || event.altKey || event.isComposing || event.repeat) return
+
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+
+      const candidate =
+        isPromptLikeElement(target)
+          ? target
+          : target.closest<HTMLElement>("textarea, input, [role='textbox'], [contenteditable='true']")
+
+      if (!candidate || !isPromptLikeElement(candidate)) return
+
+      bindPromptTarget(candidate)
+      void handleSubmit(event.metaKey || event.ctrlKey ? "shortcut-enter" : "enter", candidate)
     }
 
-    const submitButton = submitRef.current
+    const handleDocumentSubmit = (event: Event) => {
+      const target = event.target
+      if (!(target instanceof HTMLFormElement)) return
+
+      const candidate = promptRef.current ?? findPromptInput()
+      if (!candidate || !target.contains(candidate)) return
+
+      bindPromptTarget(candidate)
+      void handleSubmit("form-submit", candidate)
+    }
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement) || target.closest("#prompt-optimizer-root")) return
+
+      const button = target.closest<HTMLButtonElement>("button")
+      if (!button) return
+
+      const candidate = promptRef.current ?? findPromptInput()
+      if (!candidate) return
+
+      const submitButton = findSubmitButton(candidate)
+      if (!submitButton || submitButton !== button) return
+
+      bindPromptTarget(candidate)
+      void handleSubmit("submit-click", candidate)
+    }
+
     document.addEventListener("input", handleDocumentInput, true)
-    input?.addEventListener("keydown", handleKeydown)
-    submitButton?.addEventListener("click", handleSubmit)
+    document.addEventListener("keydown", handleDocumentKeydown, true)
+    document.addEventListener("submit", handleDocumentSubmit, true)
+    document.addEventListener("click", handleDocumentClick, true)
     handleInput(input ?? undefined)
 
     return () => {
       document.removeEventListener("input", handleDocumentInput, true)
-      input?.removeEventListener("keydown", handleKeydown)
-      submitButton?.removeEventListener("click", handleSubmit)
+      document.removeEventListener("keydown", handleDocumentKeydown, true)
+      document.removeEventListener("submit", handleDocumentSubmit, true)
+      document.removeEventListener("click", handleDocumentClick, true)
       if (debounceId) window.clearTimeout(debounceId)
     }
   }, [currentSession, inputBindingVersion])
@@ -1047,6 +1448,48 @@ export default function PromptOptimizerApp() {
       resetAfterNextStepFlow()
       setProjectContextSetupActive(false)
       setProjectContextReadyActive(false)
+      reviewPopupOrchestratorRef.current?.close()
+      reviewPromptModeOrchestratorRef.current?.reset()
+      setReviewPopupOpen(false)
+      setReviewPopupSurface("answer_mode")
+      setReviewPopupControllerState({
+        surface: "answer_mode",
+        popupState: "idle",
+        activeMode: "deep",
+        targetKey: null,
+        cacheStatus: "none",
+        analysisStarted: false,
+        analysisFinished: false,
+        errorReason: null
+      })
+      setReviewPopupViewModel(buildReviewLoadingViewModel("deep"))
+      setReviewPromptModeState({
+        popupState: "idle",
+        sessionKey: null,
+        sourcePrompt: "",
+        planningGoal: "",
+        planningAttempt: null,
+        analysisSeed: null,
+        localAnalysis: null,
+        questionHistory: [],
+        questionLevels: {},
+        currentLevelQuestions: [],
+        currentLevel: 1,
+        activeQuestionIndex: 0,
+        answerState: {},
+        otherAnswerState: {},
+        isLoadingQuestions: false,
+        isGeneratingPrompt: false,
+        promptDraft: "",
+        promptReady: false,
+        errorMessage: null
+      })
+      setReviewSignal(createIdleReviewSignal())
+      setReviewTypingState({
+        active: false,
+        promptText: "",
+        sessionKey: null
+      })
       setIsEvaluatingAfterResponse(false)
       setIsDeepAnalyzingAfterResponse(false)
       setHasSubmittedPrompt(false)
@@ -1056,7 +1499,17 @@ export default function PromptOptimizerApp() {
       lastEvaluatedAssistantMessageIdRef.current = ""
       lastEvaluatedChatHrefRef.current = ""
       strongestAfterVerdictRef.current = null
+      lastSubmittedOrAppliedPromptRef.current = ""
       afterReviewCacheRef.current = null
+      reviewSignalCacheRef.current = null
+      lastObservedAssistantSignalKeyRef.current = ""
+      lastSettledAssistantSignalKeyRef.current = ""
+      awaitingFreshReviewAnswerRef.current = false
+      submittedAssistantBaselineKeyRef.current = ""
+      if (reviewSignalSettleTimeoutRef.current) {
+        window.clearTimeout(reviewSignalSettleTimeoutRef.current)
+        reviewSignalSettleTimeoutRef.current = null
+      }
       pendingPromptRef.current = null
     }, 500)
 
@@ -1368,6 +1821,78 @@ export default function PromptOptimizerApp() {
       stopAfterLoadingProgress()
       setIsEvaluatingAfterResponse(false)
     }
+  }
+
+  function getReviewPopupOrchestrator() {
+    if (!reviewPopupOrchestratorRef.current) {
+      reviewPopupOrchestratorRef.current = createReviewPopupOrchestrator({
+        resolveTarget: getReviewTargetResolver(),
+        runAnalysis: getReviewAnalysisRunner(),
+        onStateChange: (nextState) => {
+          setReviewPopupControllerState(nextState.controller)
+          setReviewPopupViewModel(nextState.viewModel)
+        },
+        onOpenChange: setReviewPopupOpen,
+        onCopyPrompt: (prompt) => {
+          void copyReviewPopupPrompt(prompt)
+        }
+      })
+    }
+
+    return reviewPopupOrchestratorRef.current
+  }
+
+  function getReviewPromptModeOrchestrator() {
+    if (!reviewPromptModeOrchestratorRef.current) {
+      reviewPromptModeOrchestratorRef.current = createReviewPromptModeOrchestrator({
+        getPlatform: () => getAttemptPlatform(),
+        getSurface: () => getPromptSurface(),
+        getSessionSummary: () => summarizeSessionMemory(currentSession) ?? null,
+        getProjectMemoryContext: () => getCompactProjectMemory(),
+        extendQuestions: (request) => extendQuestions(request),
+        refinePrompt: (request) => refinePrompt(request),
+        onStateChange: (nextState) => {
+          setReviewPromptModeState(nextState)
+        }
+      })
+    }
+
+    return reviewPromptModeOrchestratorRef.current
+  }
+
+  async function handleOpenReviewPopup() {
+    setPanelOpen(false)
+    setAfterPanelOpen(false)
+    const currentDraft = getCurrentDraftSnapshot().text.trim()
+    if (reviewTypingState.active && hasUnsentPromptDraft(currentDraft)) {
+      setReviewPopupSurface("prompt_mode")
+      setReviewPopupOpen(true)
+      await getReviewPromptModeOrchestrator().open({
+        promptText: currentDraft,
+        beforeIntent: beforeResult?.intent
+      })
+      return
+    }
+
+    setReviewPopupSurface("answer_mode")
+    await getReviewPopupOrchestrator().open()
+  }
+
+  async function handleSwitchReviewPopupSurface(surface: ReviewPopupSurface) {
+    if (surface === "prompt_mode") {
+      const currentDraft = getCurrentDraftSnapshot().text.trim()
+      if (!currentDraft) return
+      setReviewPopupSurface("prompt_mode")
+      setReviewPopupOpen(true)
+      await getReviewPromptModeOrchestrator().open({
+        promptText: currentDraft,
+        beforeIntent: beforeResult?.intent
+      })
+      return
+    }
+
+    setReviewPopupSurface("answer_mode")
+    await getReviewPopupOrchestrator().open()
   }
 
   async function handleStartNextStep() {
@@ -1804,14 +2329,55 @@ export default function PromptOptimizerApp() {
     showPlanningGoalNotice(projectMemoryDepth === "deep" ? "Deep context request copied" : "Quick context request copied")
   }
 
-  async function handleSubmit() {
-    const input = promptRef.current
-    if (!input) return
+  async function handleSubmit(source = "unknown", inputOverride?: HTMLElement | null) {
+    const input = inputOverride ?? promptRef.current ?? findPromptInput()
+    if (!input) {
+      logReviewDebug("send detected but no prompt input was available", { source })
+      return
+    }
+
+    if (promptRef.current !== input) {
+      promptRef.current = input
+      lastFocusedPromptRef.current = input
+      submitRef.current = findSubmitButton(input)
+    }
+
     const prompt = readPromptValue(input).trim()
-    if (!prompt) return
-    lastStablePromptValueRef.current = prompt
+    logReviewDebug("send detected", { source, promptLength: prompt.length })
+    if (!prompt) {
+      logReviewDebug("send ignored because prompt was empty", { source })
+      return
+    }
 
     const now = Date.now()
+    const lastDetectedSend = lastDetectedSendRef.current
+    if (lastDetectedSend && lastDetectedSend.prompt === prompt && now - lastDetectedSend.at < SEND_DETECTION_DEDUPE_MS) {
+      logReviewDebug("duplicate send detection suppressed", {
+        source,
+        promptLength: prompt.length,
+        elapsedMs: now - lastDetectedSend.at
+      })
+      return
+    }
+    lastDetectedSendRef.current = { prompt, at: now }
+    logReviewDebug("captured prompt for submitted attempt", {
+      source,
+      promptLength: prompt.length,
+      promptPreview: prompt.slice(0, 120)
+    })
+
+    lastSubmittedOrAppliedPromptRef.current = prompt
+    updateReviewTypingState("")
+    submittedAssistantBaselineKeyRef.current = buildLiveAssistantSignalKey()
+    awaitingFreshReviewAnswerRef.current = true
+    lastObservedAssistantSignalKeyRef.current = submittedAssistantBaselineKeyRef.current
+    lastSettledAssistantSignalKeyRef.current = ""
+    reviewSignalCacheRef.current = null
+    reviewPopupOrchestratorRef.current?.invalidate()
+    setReviewSignal(createLoadingReviewSignal(null))
+
+    lastStablePromptValueRef.current = prompt
+
     const retryCount =
       pendingPromptRef.current && now - pendingPromptRef.current.sentAt < DETECTION_THRESHOLDS.retryWindowMs
         ? currentSession.retryCount + 1
@@ -1839,13 +2405,18 @@ export default function PromptOptimizerApp() {
     }
     const activeAttempt = await getActiveAttempt()
     if (activeAttempt) {
-      await markAttemptSubmitted(
+      const submittedAttempt = await markAttemptSubmitted(
         activeAttempt.attempt_id,
         buildSubmittedAttemptPatch({
           prompt,
           beforeIntent: beforeResult?.intent
         })
       )
+      logReviewDebug("submitted attempt marked from active attempt", {
+        source,
+        attemptId: submittedAttempt?.attempt_id ?? activeAttempt.attempt_id,
+        promptLength: prompt.length
+      })
     } else {
       const fallbackAttempt = await createAttempt(
         buildFallbackSubmittedAttemptInput({
@@ -1854,7 +2425,12 @@ export default function PromptOptimizerApp() {
           beforeIntent: beforeResult?.intent
         })
       )
-      await markAttemptSubmitted(fallbackAttempt.attempt_id)
+      const submittedAttempt = await markAttemptSubmitted(fallbackAttempt.attempt_id)
+      logReviewDebug("submitted attempt created from fallback", {
+        source,
+        attemptId: submittedAttempt?.attempt_id ?? fallbackAttempt.attempt_id,
+        promptLength: prompt.length
+      })
     }
     setAfterVerdict(null)
     setAfterPanelOpen(false)
@@ -2090,6 +2666,46 @@ export default function PromptOptimizerApp() {
     await markOnboardingSeen()
   }
 
+  const displayedReviewSignal = reviewTypingState.active
+    ? createTypingReviewSignal(reviewTypingState.sessionKey)
+    : reviewSignal
+
+  const reviewPopupSurfaceActions: {
+    id: string
+    label: string
+    kind?: "primary" | "secondary" | "ghost"
+    onClick?: () => void
+  }[] = [
+    {
+      id: "prompt-mode",
+      label: "Prompt",
+      kind: reviewPopupSurface === "prompt_mode" ? "primary" : "secondary",
+      onClick: () => void handleSwitchReviewPopupSurface("prompt_mode")
+    },
+    {
+      id: "answer-mode",
+      label: "Answer",
+      kind: reviewPopupSurface === "answer_mode" ? "primary" : "secondary",
+      onClick: () => void handleSwitchReviewPopupSurface("answer_mode")
+    }
+  ]
+
+  const reviewPromptActions =
+    reviewPromptModeState.promptReady && reviewPromptModeState.promptDraft.trim()
+      ? [
+          {
+            id: "copy-prompt-mode-draft",
+            label: "Copy prompt",
+            kind: "primary" as const,
+            onClick: () => void copyReviewPopupPrompt(reviewPromptModeState.promptDraft)
+          }
+        ]
+      : []
+
+  const reviewPromptQuestions = reviewPromptModeState.questionHistory.length
+    ? reviewPromptModeState.questionHistory
+    : reviewPromptModeState.currentLevelQuestions
+
   async function syncPromptFromPage() {
     const latestInput = findPromptInput()
     if (latestInput) {
@@ -2103,6 +2719,7 @@ export default function PromptOptimizerApp() {
     const prompt = sourceInput ? readPromptValue(sourceInput).trim() : lastPromptValueRef.current.trim()
 
     setPromptPreview(prompt.slice(0, 220))
+    updateReviewTypingState(prompt)
 
     if (!prompt) {
       setBeforeResult(null)
@@ -2337,11 +2954,13 @@ export default function PromptOptimizerApp() {
 
   return (
     <>
-      <OptimizerShell
-        mounted={mounted}
-        panelOpen={panelOpen}
-        afterPanelOpen={afterPanelOpen}
-        promptPreview={promptPreview}
+        <OptimizerShell
+          mounted={mounted}
+          panelOpen={panelOpen}
+          afterPanelOpen={afterPanelOpen}
+          reviewPopupOpen={reviewPopupOpen}
+          reviewSignal={displayedReviewSignal}
+          promptPreview={promptPreview}
         beforeResult={beforeResult}
         isAnalyzingPrompt={isAnalyzingPrompt}
         diagnosis={diagnosis}
@@ -2366,13 +2985,20 @@ export default function PromptOptimizerApp() {
         isEvaluatingAfterResponse={isEvaluatingAfterResponse}
         onClosePanel={() => setPanelOpen(false)}
         onOpenPanel={() => {
+          reviewPopupOrchestratorRef.current?.close()
+          setReviewPopupOpen(false)
           void syncPromptFromPage().then((snapshot) => {
             if (!snapshot) return
             void loadAiQuestionsForCurrentPrompt(snapshot.prompt, snapshot.result)
           })
           setPanelOpen(true)
         }}
-        onOpenAfterPanel={() => void handleOpenAfterPanel()}
+        onOpenAfterPanel={() => {
+          reviewPopupOrchestratorRef.current?.close()
+          setReviewPopupOpen(false)
+          void handleOpenAfterPanel()
+        }}
+        onOpenReviewPopup={() => void handleOpenReviewPopup()}
         onRewrite={handleRewrite}
         onExplain={() => void handleExplain()}
         onApplyFix={handleApplyFix}
@@ -2446,6 +3072,32 @@ export default function PromptOptimizerApp() {
           }}
         />
       ) : null}
+      <ReviewPopupContainer
+        open={reviewPopupOpen}
+        surface={reviewPopupSurface}
+        viewModel={reviewPopupViewModel}
+        promptModeState={reviewPromptModeState}
+        surfaceActions={reviewPopupSurfaceActions}
+        promptActions={reviewPromptActions}
+        onPromptQuestionIndexChange={(index) => getReviewPromptModeOrchestrator().setActiveQuestionIndex(index)}
+        onPromptAnswerChange={(questionId, value) => {
+          const question = reviewPromptQuestions.find((item) => item.id === questionId)
+          if (!question) return
+          void getReviewPromptModeOrchestrator().setAnswer(question, value)
+        }}
+        onPromptOtherAnswerChange={(questionId, value) => {
+          const question = reviewPromptQuestions.find((item) => item.id === questionId)
+          if (!question) return
+          getReviewPromptModeOrchestrator().setOtherAnswer(question, value)
+        }}
+        onPromptAdvanceOther={() => void getReviewPromptModeOrchestrator().advanceOther()}
+        onPromptGenerate={() => void getReviewPromptModeOrchestrator().generatePrompt()}
+        onClose={() => {
+          reviewPopupOrchestratorRef.current?.close()
+          setReviewPopupSurface("answer_mode")
+          setReviewPopupOpen(false)
+        }}
+      />
     </>
   )
 }
