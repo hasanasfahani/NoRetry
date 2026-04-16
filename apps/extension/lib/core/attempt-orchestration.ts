@@ -9,6 +9,10 @@ import type {
   ClarificationQuestion
 } from "@prompt-optimizer/shared/src/schemas"
 
+function toOptionalIntent(beforeIntent: AnalyzePromptResponse["intent"] | null | undefined): AnalyzePromptResponse["intent"] | undefined {
+  return beforeIntent == null ? undefined : beforeIntent
+}
+
 export function buildDraftAttemptInput(params: {
   promptText: string
   optimizedPrompt: string
@@ -18,6 +22,7 @@ export function buildDraftAttemptInput(params: {
   answers: Record<string, string | string[]>
 }) {
   const { promptText, optimizedPrompt, platform, beforeIntent, clarificationQuestions, answers } = params
+  const normalizedIntent = toOptionalIntent(beforeIntent)
 
   return {
     attempt_id: crypto.randomUUID(),
@@ -27,7 +32,7 @@ export function buildDraftAttemptInput(params: {
     intent: buildAttemptIntentFromBefore(
       promptText,
       optimizedPrompt,
-      beforeIntent,
+      normalizedIntent,
       clarificationQuestions,
       answers
     )
@@ -39,11 +44,12 @@ export function buildSubmittedAttemptPatch(params: {
   beforeIntent: AnalyzePromptResponse["intent"] | null | undefined
 }) {
   const { prompt, beforeIntent } = params
+  const normalizedIntent = toOptionalIntent(beforeIntent)
 
   return {
     raw_prompt: prompt,
     optimized_prompt: prompt,
-    intent: buildAttemptIntentFromSubmittedPrompt(prompt, beforeIntent)
+    intent: buildAttemptIntentFromSubmittedPrompt(prompt, normalizedIntent)
   } satisfies Partial<Pick<Attempt, "raw_prompt" | "optimized_prompt" | "intent">>
 }
 
@@ -69,13 +75,14 @@ export function buildFallbackSubmittedAttemptInput(params: {
   beforeIntent: AnalyzePromptResponse["intent"] | null | undefined
 }) {
   const { prompt, platform, beforeIntent } = params
+  const normalizedIntent = toOptionalIntent(beforeIntent)
 
   return {
     attempt_id: crypto.randomUUID(),
     platform,
     raw_prompt: prompt,
     optimized_prompt: prompt,
-    intent: buildAttemptIntentFromSubmittedPrompt(prompt, beforeIntent)
+    intent: buildAttemptIntentFromSubmittedPrompt(prompt, normalizedIntent)
   }
 }
 
@@ -84,5 +91,5 @@ export function buildPlanningAttemptIntentFromPrompt(params: {
   beforeIntent: AnalyzePromptResponse["intent"] | null | undefined
 }): AttemptIntent {
   const { prompt, beforeIntent } = params
-  return buildAttemptIntentFromSubmittedPrompt(prompt, beforeIntent)
+  return buildAttemptIntentFromSubmittedPrompt(prompt, toOptionalIntent(beforeIntent))
 }
