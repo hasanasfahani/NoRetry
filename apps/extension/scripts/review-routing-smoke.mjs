@@ -152,6 +152,14 @@ function checklistStatusFor(result, label) {
   return result.acceptance_checklist.find((item) => item.label === label)?.status
 }
 
+function assertNoMonolithicGoalChecklist(result) {
+  const labels = result.acceptance_checklist.map((item) => item.label)
+  for (const label of labels) {
+    assert.doesNotMatch(label, /^task\s*\/\s*goal:/i)
+    assert.ok(label.length < 120, `Checklist label should stay decomposed: ${label}`)
+  }
+}
+
 async function runPromptArtifactReview({ runner, attempt, taskType, responseText, responseIdentity }) {
   return runner({
     target: {
@@ -213,15 +221,16 @@ async function main() {
     assert.deepEqual(
       creationResult.acceptance_checklist.map((item) => item.label),
       [
-        "The answer provides the requested deliverable",
-        "The output matches the requested format and scope",
-        "The deliverable is complete enough to use as a starting point"
+        "Requested deliverable type is present",
+        "HTML requirement is present",
+        "CSS requirement is present"
       ]
     )
     assert.deepEqual(
       creationResult.acceptance_checklist.map((item) => item.status),
       ["met", "met", "met"]
     )
+    assertNoMonolithicGoalChecklist(creationResult)
     const creationViewModel = mapAfterAnalysisToReviewViewModel({
       result: creationResult,
       mode: "deep",
@@ -311,7 +320,10 @@ Why it fits:
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
-    assert.equal(checklistStatusFor(syrianLunchResult, "The output matches the requested format and scope"), "missed")
+    assertNoMonolithicGoalChecklist(syrianLunchResult)
+    assert.equal(checklistStatusFor(syrianLunchResult, "Serving count matches (1 person)"), "missed")
+    assert.equal(checklistStatusFor(syrianLunchResult, "Time constraint matches (<=30 min)"), "met")
+    assert.equal(checklistStatusFor(syrianLunchResult, "Cuisine or style requirement is preserved (Syrian)"), "missed")
     const syrianCombinedText = [...syrianLunchResult.issues, ...syrianLunchResult.stage_2.missing_criteria].join("\n").toLowerCase()
     assert.match(syrianCombinedText, /syrian/)
     assert.match(syrianCombinedText, /1 person/)
@@ -405,13 +417,20 @@ Nutritional information (per serving):
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
+    assertNoMonolithicGoalChecklist(microwaveLunchResult)
+    assert.equal(checklistStatusFor(microwaveLunchResult, "Tool or method constraint matches (microwave only)"), "missed")
+    assert.equal(checklistStatusFor(microwaveLunchResult, "Serving count matches (1 person)"), "missed")
+    assert.equal(checklistStatusFor(microwaveLunchResult, "Time constraint matches (<=5 min)"), "missed")
+    assert.equal(checklistStatusFor(microwaveLunchResult, "Calorie target matches (<=300 calories)"), "missed")
+    assert.equal(checklistStatusFor(microwaveLunchResult, "Requested grain or base ingredient is present (rice)"), "missed")
+    assert.equal(checklistStatusFor(microwaveLunchResult, "Exact rice quantity is confirmed"), "missed")
     const microwaveCombinedText = [...microwaveLunchResult.issues, ...microwaveLunchResult.stage_2.missing_criteria].join("\n").toLowerCase()
     assert.match(microwaveCombinedText, /microwave/)
-    assert.match(microwaveCombinedText, /25 minutes|5 minutes/)
-    assert.match(microwaveCombinedText, /serves 2-3|requested 1 person/)
-    assert.match(microwaveCombinedText, /390 calories|300 calories/)
+    assert.match(microwaveCombinedText, /<=5 min/)
+    assert.match(microwaveCombinedText, /1 person/)
+    assert.match(microwaveCombinedText, /300 calories/)
     assert.match(microwaveCombinedText, /rice/)
-    assert.match(microwaveCombinedText, /texture tips|creamy/)
+    assert.match(microwaveCombinedText, /exact rice quantity/)
     assert.doesNotMatch(microwaveCombinedText, /strong first draft/)
 
     const structuredCvPrompt = `Task / goal:
@@ -450,14 +469,11 @@ Quality bar / style guardrails:
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
-    assert.deepEqual(
-      structuredCvResult.acceptance_checklist.map((item) => item.label),
-      [
-        "The answer provides the requested deliverable",
-        "The output matches the requested format and scope",
-        "The deliverable is complete enough to use as a starting point"
-      ]
-    )
+    assertNoMonolithicGoalChecklist(structuredCvResult)
+    assert.equal(checklistStatusFor(structuredCvResult, "Requested deliverable type is present"), "met")
+    assert.equal(checklistStatusFor(structuredCvResult, "Full HTML file output is present"), "met")
+    assert.equal(checklistStatusFor(structuredCvResult, "Inline CSS constraint matches"), "met")
+    assert.equal(checklistStatusFor(structuredCvResult, "HTML requirement is present"), "met")
 
     const forcedStructuredCvOverride = await runner({
       target: {
@@ -471,14 +487,9 @@ Quality bar / style guardrails:
       mode: "deep",
       quickBaseline: null
     })
-    assert.deepEqual(
-      forcedStructuredCvOverride.acceptance_checklist.map((item) => item.label),
-      [
-        "The answer provides the requested deliverable",
-        "The output matches the requested format and scope",
-        "The deliverable is complete enough to use as a starting point"
-      ]
-    )
+    assertNoMonolithicGoalChecklist(forcedStructuredCvOverride)
+    assert.equal(checklistStatusFor(forcedStructuredCvOverride, "Requested deliverable type is present"), "met")
+    assert.equal(checklistStatusFor(forcedStructuredCvOverride, "HTML requirement is present"), "met")
 
     const debugAttempt = makeAttempt("find and fix why the button is not visible", "debug")
     const debugTaskType = classifyReviewTaskType(debugAttempt)
@@ -515,14 +526,39 @@ Quality bar / style guardrails:
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
-    assert.deepEqual(
-      writingResult.acceptance_checklist.map((item) => item.label),
-      [
-        "The answer provides the requested rewrite",
-        "The rewrite matches the requested tone and clarity",
-        "The rewritten text is polished enough to use"
-      ]
-    )
+    assertNoMonolithicGoalChecklist(writingResult)
+    assert.ok(writingResult.acceptance_checklist.length >= 3)
+
+    const structuredRewritePrompt = `Task / goal:
+Rewrite this product update for executives in a professional, concise tone.
+
+Key requirements:
+- Audience: executives
+- Tone: professional
+- Length: concise
+
+Output format:
+- Return the rewritten text only.`
+    const structuredRewriteAttempt = makeAttempt(structuredRewritePrompt, "other")
+    const structuredRewriteTaskType = classifyReviewTaskType(structuredRewriteAttempt)
+    assert.equal(structuredRewriteTaskType, "writing")
+    const structuredRewriteResult = await runner({
+      target: {
+        attempt: structuredRewriteAttempt,
+        taskType: structuredRewriteTaskType,
+        responseText: "We delivered the release on schedule, improved reliability, and reduced support load. The update is ready for executive review.",
+        responseIdentity: "resp-rewrite-structured-1",
+        threadIdentity: "thread-rewrite-structured-1",
+        normalizedResponseText: "delivered release on schedule improved reliability reduced support load"
+      },
+      mode: "deep",
+      quickBaseline: null
+    })
+    assertNoMonolithicGoalChecklist(structuredRewriteResult)
+    assert.equal(checklistStatusFor(structuredRewriteResult, "Requested rewrite output is present"), "met")
+    assert.equal(checklistStatusFor(structuredRewriteResult, "Tone requirement is preserved"), "met")
+    assert.equal(checklistStatusFor(structuredRewriteResult, "Concise tone or style requirement is preserved"), "met")
+    assert.equal(checklistStatusFor(structuredRewriteResult, "Audience requirement is preserved"), "met")
 
     const verificationAttempt = makeAttempt("verify whether this solution is actually working", "other")
     const verificationTaskType = classifyReviewTaskType(verificationAttempt)
@@ -589,14 +625,10 @@ Why it fits:
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
-    assert.deepEqual(
-      structuredAdviceResult.acceptance_checklist.map((item) => item.label),
-      [
-        "The answer directly gives relevant ideas for the request",
-        "The ideas are clear and easy to use",
-        "The answer offers enough practical variety to use"
-      ]
-    )
+    assertNoMonolithicGoalChecklist(structuredAdviceResult)
+    assert.equal(checklistStatusFor(structuredAdviceResult, "Requested answer type is present"), "met")
+    assert.equal(checklistStatusFor(structuredAdviceResult, "Requested count or exactness matches"), "met")
+    assert.equal(checklistStatusFor(structuredAdviceResult, "Exclusion constraint is preserved: do not use artificial sweeteners"), "met")
     const structuredAdviceViewModel = mapAfterAnalysisToReviewViewModel({
       result: structuredAdviceResult,
       mode: "deep",
@@ -641,14 +673,9 @@ Why it fits:
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
-    assert.deepEqual(
-      forcedAdviceOverrideResult.acceptance_checklist.map((item) => item.label),
-      [
-        "The answer directly gives relevant ideas for the request",
-        "The ideas are clear and easy to use",
-        "The answer offers enough practical variety to use"
-      ]
-    )
+    assertNoMonolithicGoalChecklist(forcedAdviceOverrideResult)
+    assert.equal(checklistStatusFor(forcedAdviceOverrideResult, "Requested answer type is present"), "met")
+    assert.equal(checklistStatusFor(forcedAdviceOverrideResult, "Requested count or exactness matches"), "met")
 
     const promptArtifactRunner = createReviewAnalysisRunner({
       analyzeAfterAttempt: async ({ attempt }) => {
@@ -1082,8 +1109,10 @@ Why it fits:
       mode: "deep",
       quickBaseline: null
     })
-    assert.equal(checklistStatusFor(missingPartsCreationResult, "The answer provides the requested deliverable"), "met")
-    assert.notEqual(checklistStatusFor(missingPartsCreationResult, "The output matches the requested format and scope"), "met")
+    assertNoMonolithicGoalChecklist(missingPartsCreationResult)
+    assert.equal(checklistStatusFor(missingPartsCreationResult, "Requested deliverable type is present"), "met")
+    assert.equal(checklistStatusFor(missingPartsCreationResult, "HTML requirement is present"), "met")
+    assert.notEqual(checklistStatusFor(missingPartsCreationResult, "CSS requirement is present"), "met")
 
     const forcedOverrideRunner = createReviewAnalysisRunner({
       analyzeAfterAttempt: async () => {
