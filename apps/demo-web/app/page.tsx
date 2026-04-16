@@ -13,14 +13,14 @@ import {
   type PromptIntent,
   type RefinePromptResponse
 } from "@prompt-optimizer/shared"
-import { ReviewPopup } from "../../extension/components/review-popup/review/ReviewPopup"
-import type { ReviewPopupViewModel } from "../../extension/components/review-popup/review/review-types"
-import type { PopupAction } from "../../extension/components/review-popup/shared/types"
-import { buildLevelMap, findNextUnansweredQuestionIndex, mergeUniqueQuestions, normalizePlannerAnswers } from "../../extension/lib/core/after-orchestration"
-import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "../../extension/lib/review/mappers/review-view-model"
-import { classifyReviewTaskType } from "../../extension/lib/review/services/review-task-type"
-import { buildPromptModeFallbackQuestions, formatPromptModeStructuredDraft } from "../../extension/lib/review/services/review-prompt-mode"
-import type { ReviewPromptModeState, ReviewPopupSurface } from "../../extension/lib/review/types"
+import { ReviewPopup } from "@prompt-optimizer/extension/components/review-popup/review/ReviewPopup"
+import type { ReviewPopupViewModel } from "@prompt-optimizer/extension/components/review-popup/review/review-types"
+import type { PopupAction } from "@prompt-optimizer/extension/components/review-popup/shared/types"
+import { buildLevelMap, findNextUnansweredQuestionIndex, mergeUniqueQuestions, normalizePlannerAnswers } from "@prompt-optimizer/extension/lib/core/after-orchestration"
+import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "@prompt-optimizer/extension/lib/review/mappers/review-view-model"
+import { classifyReviewTaskType } from "@prompt-optimizer/extension/lib/review/services/review-task-type"
+import { buildPromptModeFallbackQuestions, formatPromptModeStructuredDraft } from "@prompt-optimizer/extension/lib/review/services/review-prompt-mode"
+import type { ReviewPromptModeState, ReviewPopupSurface } from "@prompt-optimizer/extension/lib/review/types"
 
 const API_BASE = process.env.NEXT_PUBLIC_REEVA_API_URL?.replace(/\/$/, "") || "http://localhost:3000"
 const OTHER_OPTION = "Other"
