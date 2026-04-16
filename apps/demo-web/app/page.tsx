@@ -13,9 +13,9 @@ import {
   type PromptIntent,
   type RefinePromptResponse
 } from "@prompt-optimizer/shared"
-import { ReviewPopup } from "@prompt-optimizer/extension/components/review-popup/review/ReviewPopup"
-import type { ReviewPopupViewModel } from "@prompt-optimizer/extension/components/review-popup/review/review-types"
-import type { PopupAction } from "@prompt-optimizer/extension/components/review-popup/shared/types"
+import { ReviewPopup } from "../components/review-popup/review/ReviewPopup"
+import type { ReviewPopupViewModel } from "../components/review-popup/review/review-types"
+import type { PopupAction } from "../components/review-popup/shared/types"
 import { buildLevelMap, findNextUnansweredQuestionIndex, mergeUniqueQuestions, normalizePlannerAnswers } from "@prompt-optimizer/extension/lib/core/after-orchestration"
 import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "@prompt-optimizer/extension/lib/review/mappers/review-view-model"
 import { classifyReviewTaskType } from "@prompt-optimizer/extension/lib/review/services/review-task-type"
