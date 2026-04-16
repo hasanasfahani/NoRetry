@@ -4,23 +4,28 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEven
 import {
   type AfterAnalysisResult,
   analyzePromptLocally,
+  buildLevelMap,
   buildAttemptIntentFromSubmittedPrompt,
+  buildPromptModeFallbackQuestions,
   detectIntent,
+  findNextUnansweredQuestionIndex,
+  formatPromptModeStructuredDraft,
+  mergeUniqueQuestions,
+  normalizePlannerAnswers,
   preprocessResponse,
   type AnalyzePromptResponse,
   type ClarificationQuestion,
   type ExtendQuestionsResponse,
   type PromptIntent,
-  type RefinePromptResponse
+  type RefinePromptResponse,
+  type ReviewPromptModeState,
+  type ReviewPopupSurface,
+  classifyReviewTaskType
 } from "@prompt-optimizer/shared"
 import { ReviewPopup } from "../components/review-popup/review/ReviewPopup"
 import type { ReviewPopupViewModel } from "../components/review-popup/review/review-types"
 import type { PopupAction } from "../components/review-popup/shared/types"
-import { buildLevelMap, findNextUnansweredQuestionIndex, mergeUniqueQuestions, normalizePlannerAnswers } from "../lib/after"
-import { buildPromptModeFallbackQuestions, formatPromptModeStructuredDraft } from "../lib/prompt-mode"
 import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "../lib/review-view-model"
-import { classifyReviewTaskType } from "../lib/review-task-type"
-import type { ReviewPromptModeState, ReviewPopupSurface } from "../lib/review-types"
 
 const API_BASE = process.env.NEXT_PUBLIC_REEVA_API_URL?.replace(/\/$/, "") || "http://localhost:3000"
 const OTHER_OPTION = "Other"

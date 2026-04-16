@@ -14,7 +14,7 @@ import { ReviewProofSection } from "./ReviewProofSection"
 import type { ReviewPopupViewModel } from "./review-types"
 import { ReviewWhySection } from "./ReviewWhySection"
 import type { PopupAction } from "../shared/types"
-import type { ReviewPopupSurface, ReviewPromptModeState } from "../../../lib/review-types"
+import type { ReviewPopupSurface, ReviewPromptModeState } from "@prompt-optimizer/shared"
 
 type ReviewPopupProps = {
   open: boolean

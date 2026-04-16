@@ -1,6 +1,6 @@
 import type { AfterAnalysisResult, ResponsePreprocessorOutput, Stage1Output, Stage2Output, VerdictOutput } from "@prompt-optimizer/shared/src/schemas"
 import type { ReviewTarget } from "../types"
-import { isAnswerQualityTask } from "./review-task-type"
+import { isAnswerQualityTask, looksLikeAdviceRequestPrompt, looksLikeCreationRequestPrompt } from "./review-task-type"
 
 export type ReviewAnalysisInput = {
   target: ReviewTarget
@@ -84,6 +84,38 @@ const PROMPT_ARTIFACT_SECTION_PATTERNS = [
   /output:/i
 ]
 
+const PROMPT_ARTIFACT_CONTROL_PATTERNS = [
+  /\bconstraints?:/i,
+  /\bkey requirements?:/i,
+  /\brequired inputs?(?: or ingredients)?:/i,
+  /\boutput format:/i,
+  /\bstyle:/i,
+  /\btone:/i,
+  /\bquality bar/i,
+  /\bguardrails?:/i,
+  /\breturn only\b/i,
+  /\breturn\b.*\bonly\b/i,
+  /\binclude\b/i,
+  /\bpreserve\b/i,
+  /\bavoid\b/i,
+  /\bcode only\b/i
+]
+
+const PROMPT_ARTIFACT_DIRECTIVE_PATTERNS = [
+  /^(?:task\s*\/\s*goal:\s*)?(?:give me|suggest|write|create|draft|generate|rewrite|research|compare|explain|outline|plan|analyze)\b/i,
+  /^(?:task\s*\/\s*goal:\s*)?(?:you are|act as)\b/i,
+  /^(?:task\s*\/\s*goal:\s*)?(?:return|provide|produce)\b/i
+]
+
+const PROOF_ORIENTED_CHECKLIST_PATTERNS = [
+  /\bconcrete change or fix\b/i,
+  /\bexact change\b/i,
+  /\bproof the result works\b/i,
+  /\bshows evidence the result works\b/i,
+  /\bexplains how the change addresses the goal\b/i,
+  /\bnames the concrete change or fix\b/i
+]
+
 const PROMPT_ARTIFACT_CHECKLIST_LABELS = [
   "The generated prompt preserves the user’s core goal",
   "The generated prompt preserves important constraints",
@@ -91,8 +123,302 @@ const PROMPT_ARTIFACT_CHECKLIST_LABELS = [
   "The generated prompt is usable as a send-ready prompt"
 ] as const
 
+const KNOWN_CUISINES = [
+  "syrian",
+  "lebanese",
+  "palestinian",
+  "jordanian",
+  "turkish",
+  "greek",
+  "italian",
+  "mexican",
+  "asian",
+  "japanese",
+  "korean",
+  "thai",
+  "indian",
+  "american",
+  "french",
+  "spanish",
+  "mediterranean",
+  "middle eastern"
+] as const
+
 function normalize(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase()
+}
+
+function singularizeConstraintTarget(value: string) {
+  const trimmed = normalize(value)
+  if (!trimmed) return ""
+  if (trimmed.endsWith("ies") && trimmed.length > 4) return `${trimmed.slice(0, -3)}y`
+  if (trimmed.endsWith("oes") && trimmed.length > 4) return trimmed.slice(0, -2)
+  if (trimmed.endsWith("s") && !trimmed.endsWith("ss") && trimmed.length > 3) return trimmed.slice(0, -1)
+  return trimmed
+}
+
+function pluralizeConstraintTarget(value: string) {
+  const trimmed = normalize(value)
+  if (!trimmed) return ""
+  if (trimmed.endsWith("ies") || trimmed.endsWith("oes")) return trimmed
+  if (trimmed.endsWith("y") && !/[aeiou]y$/.test(trimmed)) return `${trimmed.slice(0, -1)}ies`
+  if (trimmed.endsWith("o")) return `${trimmed}es`
+  if (trimmed.endsWith("s")) return trimmed
+  return `${trimmed}s`
+}
+
+function normalizeExclusionTarget(value: string) {
+  const trimmed = normalize(value)
+    .replace(/\b(?:and|or|but|while|that|which|keep|with|for|to|so|because)\b.*$/i, "")
+    .replace(/\b(?:ingredient|ingredients|item|items)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (!trimmed) return ""
+
+  return trimmed
+}
+
+function preferredExclusionTarget(value: string) {
+  const normalizedTarget = normalizeExclusionTarget(value)
+  if (!normalizedTarget) return ""
+  if (/\b(?:dairy|gluten|soy)\b/.test(normalizedTarget) && !normalizedTarget.includes(" ")) return normalizedTarget
+  if (!normalizedTarget.includes(" ")) return pluralizeConstraintTarget(normalizedTarget)
+  return normalizedTarget
+}
+
+function buildExclusionTargetForms(target: string) {
+  const normalizedTarget = normalizeExclusionTarget(target)
+  if (!normalizedTarget) return []
+
+  if (normalizedTarget.includes(" ")) {
+    return [normalizedTarget]
+  }
+
+  const singular = singularizeConstraintTarget(normalizedTarget)
+  const plural = pluralizeConstraintTarget(singular)
+  return [...new Set([normalizedTarget, singular, plural].filter(Boolean))]
+}
+
+function buildExclusionVariants(target: string) {
+  const normalizedTarget = normalizeExclusionTarget(target)
+  if (!normalizedTarget) return []
+
+  const targetForms = buildExclusionTargetForms(normalizedTarget)
+  const variants = targetForms.flatMap((form) => {
+    const hyphenated = form.replace(/\s+/g, "-")
+    return [
+      `without ${form}`,
+      `no ${form}`,
+      `exclude ${form}`,
+      `excluding ${form}`,
+      `do not use ${form}`,
+      `avoid ${form}`,
+      `${hyphenated}-free`,
+      `${hyphenated} free`
+    ]
+  })
+
+  return [...new Set(variants)]
+}
+
+function splitIngredientList(value: string) {
+  return value
+    .split(/,|\/|\band\b/gi)
+    .map((item) => normalizeExclusionTarget(item))
+    .filter(Boolean)
+}
+
+function extractExclusionTargets(text: string) {
+  const extracted = new Set<string>()
+  const source = text.replace(/[()\n]/g, " ")
+  const patterns = [
+    /\b(?:without|no|exclude|excluding|avoid)\s+([a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,3})/gi,
+    /\bdo not use\s+([a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,3})/gi,
+    /\b([a-z][a-z-]*)-free\b/gi
+  ]
+
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const target = normalizeExclusionTarget(match[1] ?? "")
+      if (!target) continue
+      extracted.add(target)
+    }
+  }
+
+  const dislikePatterns = [
+    /\b(?:any\s+ingredients\s+you\s+dislike\??|ingredients\s+you\s+dislike\??|disliked\s+ingredients?\??|ingredients\s+to\s+avoid\??|avoid(?:ing)?\s+ingredients?\??)\s*[:\-]\s*([^\n.]+)/gi
+  ]
+
+  for (const pattern of dislikePatterns) {
+    for (const match of source.matchAll(pattern)) {
+      for (const item of splitIngredientList(match[1] ?? "")) {
+        extracted.add(item)
+      }
+    }
+  }
+
+  return [...extracted]
+}
+
+function extractStructuredPromptValues(promptText: string) {
+  const values: Array<{ label: string; value: string }> = []
+  for (const line of promptText.split("\n")) {
+    const match = line.match(/^\s*-\s*([^:\n]+):\s*(.+?)\s*$/)
+    if (!match) continue
+    values.push({
+      label: normalize(match[1] ?? ""),
+      value: stripTrailingPunctuation(match[2] ?? "")
+    })
+  }
+  return values.filter((item) => item.label && item.value)
+}
+
+function stripTrailingPunctuation(value: string) {
+  return value.trim().replace(/[.:;\s]+$/, "")
+}
+
+function isEmptyConstraintValue(value: string) {
+  return /^(?:none|non|n\/a|na|no restrictions?)$/i.test(stripTrailingPunctuation(value))
+}
+
+function extractStructuredPromptConstraints(promptText: string) {
+  const constraints: string[] = []
+  for (const item of extractStructuredPromptValues(promptText)) {
+    if (isEmptyConstraintValue(item.value)) continue
+
+    if (/cuisine style|cuisine/i.test(item.label)) {
+      constraints.push(`${normalize(item.value)} cuisine`)
+      continue
+    }
+
+    if (/type of meal|meal type/i.test(item.label)) {
+      constraints.push(normalize(item.value))
+      continue
+    }
+
+    if (/how many people|servings?/i.test(item.label)) {
+      constraints.push(normalize(item.value))
+      continue
+    }
+
+    if (/dietary restrictions?|allergies|dietary limits/i.test(item.label)) {
+      constraints.push(normalize(item.value))
+      continue
+    }
+
+    if (/cooking limits?|maximum cooking time|time/i.test(item.label) && /\bminutes?\b/i.test(item.value)) {
+      const normalizedValue = normalize(item.value)
+      if (/\bunder\b|\bless than\b|≤|<=|\bmax(?:imum)?\b/i.test(item.value)) {
+        const minuteMatch = normalizedValue.match(/(\d+)\s*minutes?/)
+        if (minuteMatch) constraints.push(`<=${minuteMatch[1]} minutes`)
+      } else {
+        constraints.push(normalizedValue)
+      }
+    }
+  }
+  return constraints
+}
+
+function parseResponseMinutes(responseText: string) {
+  const patterns = [
+    /\b(?:total\s+)?time\s*:\s*(\d+)\s*minutes?\b/i,
+    /\bready\s+in\s+(\d+)\s*minutes?\b/i,
+    /\bin\s+(\d+)\s*minutes?\b/i
+  ]
+
+  for (const pattern of patterns) {
+    const match = responseText.match(pattern)
+    if (match) return Number(match[1])
+  }
+
+  return null
+}
+
+function parseConstraintMaxMinutes(constraint: string) {
+  const normalizedConstraint = normalize(constraint)
+  const bounded = normalizedConstraint.match(/^<=\s*(\d+)\s*minutes?$/)
+  if (bounded) return { min: null, max: Number(bounded[1]) }
+  const range = normalizedConstraint.match(/^(\d+)\s*-\s*(\d+)\s*minutes?$/)
+  if (range) return { min: Number(range[1]), max: Number(range[2]) }
+  return null
+}
+
+function parseResponseServingCount(responseText: string) {
+  const explicitRange = responseText.match(/\bservings?\s*:\s*(\d+)\s*[-–]\s*(\d+)\b/i)
+  if (explicitRange) return { min: Number(explicitRange[1]), max: Number(explicitRange[2]) }
+  const explicitSingle = responseText.match(/\bservings?\s*:\s*(\d+)\b/i)
+  if (explicitSingle) return { min: Number(explicitSingle[1]), max: Number(explicitSingle[1]) }
+  return null
+}
+
+function parseConstraintServingCount(constraint: string) {
+  const normalizedConstraint = normalize(constraint)
+  const range = normalizedConstraint.match(/^(\d+)\s*-\s*(\d+)\s*(?:servings?|people|kids|children|person)$/)
+  if (range) return { min: Number(range[1]), max: Number(range[2]) }
+  const single = normalizedConstraint.match(/^(\d+)\s*(?:servings?|people|kids|children|person)$/)
+  if (single) return { min: Number(single[1]), max: Number(single[1]) }
+  return null
+}
+
+function rangesOverlap(a: { min: number | null; max: number }, b: { min: number; max: number }) {
+  const effectiveMin = a.min ?? Number.NEGATIVE_INFINITY
+  return b.max >= effectiveMin && b.min <= a.max
+}
+
+function matchesCuisineConstraint(constraint: string, responseText: string) {
+  const normalizedConstraint = normalize(constraint)
+  const cuisineMatch = normalizedConstraint.match(/^(.+?) cuisine$/)
+  if (!cuisineMatch) return null
+
+  const requestedCuisine = cuisineMatch[1]
+  const normalizedResponse = normalize(responseText)
+  if (normalizedResponse.includes(requestedCuisine)) return true
+
+  const mentionedOtherCuisine = KNOWN_CUISINES.some(
+    (cuisine) => cuisine !== requestedCuisine && normalizedResponse.includes(cuisine)
+  )
+  return mentionedOtherCuisine ? false : false
+}
+
+function canonicalizeExclusionConstraint(target: string) {
+  const normalizedTarget = preferredExclusionTarget(target)
+  if (!normalizedTarget) return ""
+
+  if (/\b(?:dairy|nut|egg|gluten|soy)\b/.test(normalizedTarget) && !normalizedTarget.includes(" ")) {
+    return `${normalizedTarget}-free`
+  }
+
+  return `do not use ${normalizedTarget}`
+}
+
+function buildExclusionConstraintRecords(text: string) {
+  return extractExclusionTargets(text).map((target) => ({
+    target,
+    canonical: canonicalizeExclusionConstraint(target),
+    variants: buildExclusionVariants(target)
+  }))
+}
+
+function findConstraintExclusionRecord(constraint: string) {
+  const normalizedConstraint = normalize(constraint)
+  return buildExclusionConstraintRecords(constraint).find((record) =>
+    record.variants.some((variant) => normalize(variant) === normalizedConstraint) ||
+    normalize(record.canonical) === normalizedConstraint
+  )
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function exclusionConstraintViolated(record: ReturnType<typeof buildExclusionConstraintRecords>[number], responseText: string) {
+  const scrubbed = record.variants.reduce((text, variant) => {
+    const pattern = new RegExp(`\\b${escapeRegExp(normalize(variant))}\\b`, "gi")
+    return text.replace(pattern, " ")
+  }, normalize(responseText))
+
+  return buildExclusionTargetForms(record.target).some((form) => new RegExp(`\\b${escapeRegExp(form)}\\b`, "i").test(scrubbed))
 }
 
 function countStructuredSteps(text: string) {
@@ -113,27 +439,111 @@ function hasCssSignals(text: string) {
   return /<style\b|```css\b|[.#][\w-]+\s*\{|color\s*:|font-family\s*:|max-width\s*:/i.test(text)
 }
 
+function hasResearchSignals(text: string) {
+  return /\bfindings?\b|\btrends?\b|\bsources?\b|\brisks?\b|\bopen questions?\b|\bimplications?\b/i.test(text)
+}
+
+function hasProfessionalToneSignals(text: string) {
+  return /\bthank you\b|\bi appreciate\b|\bopportunity\b|\bat your convenience\b|\bglad to\b|\bwould appreciate\b/i.test(
+    text
+  )
+}
+
 function countPromptArtifactSections(text: string) {
   return PROMPT_ARTIFACT_SECTION_PATTERNS.filter((pattern) => pattern.test(text)).length
 }
 
+function getPromptArtifactLines(text: string) {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function countPromptArtifactControls(text: string) {
+  return PROMPT_ARTIFACT_CONTROL_PATTERNS.filter((pattern) => pattern.test(text)).length
+}
+
+function firstPromptArtifactLine(text: string) {
+  return getPromptArtifactLines(text)[0] ?? ""
+}
+
+function looksLikePromptDirective(text: string) {
+  const firstLine = firstPromptArtifactLine(text)
+  return PROMPT_ARTIFACT_DIRECTIVE_PATTERNS.some((pattern) => pattern.test(firstLine))
+}
+
+function isShortSendReadyPromptArtifactText(text: string) {
+  const trimmed = text.trim()
+  if (!trimmed || trimmed.length < 40 || trimmed.length > 700) return false
+  if (/```|<html\b|<style\b|function\s+\w+|const\s+\w+/i.test(trimmed)) return false
+  if (/\b(updated|changed|fixed|implemented|patched|debugged|verified|runtime|test(?:ed|ing)?)\b/i.test(trimmed)) {
+    return false
+  }
+
+  return (
+    looksLikePromptDirective(trimmed) &&
+    (countPromptArtifactControls(trimmed) >= 1 || countListStyleIdeas(trimmed) >= 2)
+  )
+}
+
+function isGeneratedPromptArtifact(input: {
+  promptText: string
+  responseText: string
+  responseSummary: ResponsePreprocessorOutput
+}) {
+  const { promptText, responseText, responseSummary } = input
+  const normalizedPrompt = normalize(promptText)
+  const sectionCount = countPromptArtifactSections(responseText)
+  const controlCount = countPromptArtifactControls(responseText)
+  const listCount = countListStyleIdeas(responseText)
+  const directive = looksLikePromptDirective(responseText)
+  const promptRequested =
+    /\bprompt\b/i.test(promptText) ||
+    /\b(prompt|rewrite|research|code|recipe|meal|breakfast|lunch|email|message|outline|brief)\b/i.test(normalizedPrompt)
+  const implementationSignals =
+    responseSummary.has_code_blocks ||
+    responseSummary.change_claims.length > 0 ||
+    responseSummary.mentioned_files.length > 0 ||
+    /\b(updated|changed|fixed|implemented|patched|debugged|runtime|verified|test(?:ed|ing)?)\b/i.test(responseText)
+
+  if (sectionCount >= 2) return true
+  if (directive && controlCount >= 2 && listCount >= 2) return true
+  if (promptRequested && directive && controlCount >= 1 && !implementationSignals) return true
+  if (promptRequested && isShortSendReadyPromptArtifactText(responseText)) return true
+
+  return false
+}
+
 function isStructuredPromptArtifactText(text: string) {
-  return countPromptArtifactSections(text) >= 2
+  return countPromptArtifactSections(text) >= 2 || isShortSendReadyPromptArtifactText(text)
 }
 
 function extractPromptArtifactConstraints(promptText: string) {
-  const constraints: string[] = []
+  const constraints: string[] = [...extractStructuredPromptConstraints(promptText)]
   const normalizedPrompt = promptText.trim()
 
   const servingsMatch = normalizedPrompt.match(/(\d+(?:\s*[-–]\s*\d+)?)\s*(?:servings?|people|kids?|children)\b/i)
   if (servingsMatch) {
+    const unit = /\bchildren\b/i.test(servingsMatch[0])
+      ? "children"
+      : /\bkids?\b/i.test(servingsMatch[0])
+        ? "kids"
+        : /\bpeople\b/i.test(servingsMatch[0])
+          ? "people"
+          : "servings"
     constraints.push(
-      `${servingsMatch[1].replace(/\s+/g, "")} ${/people|kids?|children/i.test(servingsMatch[0]) ? "people" : "servings"}`
+      `${servingsMatch[1].replace(/\s+/g, "")} ${unit}`
     )
   }
 
-  const minuteMatch = normalizedPrompt.match(/(\d+)\s*[-–]?\s*minutes?\b/i)
-  if (minuteMatch) constraints.push(`${minuteMatch[1]} minutes`)
+  const boundedMinuteMatch = normalizedPrompt.match(/(?:under|less than|<=|≤|maximum of|max(?:imum)?)\s*(\d+)\s*minutes?\b/i)
+  if (boundedMinuteMatch) {
+    constraints.push(`<=${boundedMinuteMatch[1]} minutes`)
+  } else {
+    const minuteMatch = normalizedPrompt.match(/(\d+)\s*[-–]?\s*minutes?\b/i)
+    if (minuteMatch) constraints.push(`${minuteMatch[1]} minutes`)
+  }
 
   const phrasePatterns = [
     /\bhtml\b/i,
@@ -141,7 +551,6 @@ function extractPromptArtifactConstraints(promptText: string) {
     /\bjavascript\b/i,
     /\bjson\b/i,
     /\bstep[-\s]?by[-\s]?step\b/i,
-    /\bingredients?\b/i,
     /\bquantities\b/i,
     /\bcalories per serving\b/i,
     /\bstovetop\b/i,
@@ -156,10 +565,11 @@ function extractPromptArtifactConstraints(promptText: string) {
     if (match) constraints.push(match[0])
   }
 
-  const exclusionMatch = normalizedPrompt.match(/\b(?:without|exclude|excluding|no)\s+([a-z][a-z\s-]+)/i)
-  if (exclusionMatch) constraints.push(`without ${normalizeSentence(exclusionMatch[1])}`)
+  for (const exclusion of buildExclusionConstraintRecords(normalizedPrompt)) {
+    constraints.push(exclusion.canonical)
+  }
 
-  return [...new Set(constraints.map((item) => item.trim()).filter(Boolean))].slice(0, 6)
+  return [...new Set(constraints.map((item) => item.trim()).filter(Boolean))].slice(0, 8)
 }
 
 function constraintAppearsInResponse(constraint: string, responseText: string) {
@@ -168,11 +578,173 @@ function constraintAppearsInResponse(constraint: string, responseText: string) {
   if (!constraintText) return true
   if (response.includes(constraintText)) return true
 
+  const cuisineMatch = matchesCuisineConstraint(constraint, responseText)
+  if (cuisineMatch !== null) return cuisineMatch
+
+  const constraintMinutes = parseConstraintMaxMinutes(constraint)
+  if (constraintMinutes) {
+    const responseMinutes = parseResponseMinutes(responseText)
+    if (responseMinutes == null) return false
+    if (constraintMinutes.min == null) return responseMinutes <= constraintMinutes.max
+    return responseMinutes >= constraintMinutes.min && responseMinutes <= constraintMinutes.max
+  }
+
+  const constraintServings = parseConstraintServingCount(constraint)
+  if (constraintServings) {
+    const responseServings = parseResponseServingCount(responseText)
+    if (!responseServings) return false
+    return rangesOverlap(constraintServings, responseServings)
+  }
+
+  const exclusionRecord = findConstraintExclusionRecord(constraint)
+  if (exclusionRecord) {
+    const preserved = exclusionRecord.variants.some((variant) => response.includes(normalize(variant)))
+    return preserved && !exclusionConstraintViolated(exclusionRecord, responseText)
+  }
+
   const tokens = extractMeaningfulTokens(constraint)
   if (!tokens.length) return true
 
   const matched = tokens.filter((token) => response.includes(token))
   return matched.length >= Math.min(tokens.length, 2)
+}
+
+function buildConstraintCoverage(constraints: string[], responseText: string) {
+  const preserved = constraints.filter((constraint) => constraintAppearsInResponse(constraint, responseText))
+  const missing = constraints.filter((constraint) => !preserved.includes(constraint))
+  const allPreserved = constraints.length === 0 || missing.length === 0
+  const mostlyPreserved =
+    constraints.length === 0 || preserved.length >= constraints.length || preserved.length >= Math.max(1, constraints.length - 1)
+
+  return {
+    preserved,
+    missing,
+    allPreserved,
+    mostlyPreserved
+  }
+}
+
+function assessWritingFormatAndScope(input: {
+  promptText: string
+  responseText: string
+  responseSummary: ResponsePreprocessorOutput
+}) {
+  const { promptText, responseText, responseSummary } = input
+  const constraints = extractPromptArtifactConstraints(promptText)
+  const professionalRequested = /\bprofessional\b/i.test(promptText)
+  const professionalSatisfied = !professionalRequested || hasProfessionalToneSignals(responseText)
+  const coverage = buildConstraintCoverage(
+    constraints.filter((constraint) => normalize(constraint) !== "professional"),
+    responseText
+  )
+  const constraintsMissing = [
+    ...coverage.missing,
+    ...(professionalRequested && !professionalSatisfied ? ["professional"] : [])
+  ]
+  const goalKeywords = extractPromptKeywords(promptText)
+  const normalizedResponse = normalize(responseText)
+  const hasRewriteArtifact = responseText.trim().length >= 24 && !responseSummary.has_code_blocks
+  const scopePreserved = !/\bhere(?:'s| is)\b|\bi rewrote\b|\bexplanation\b|\banalysis\b/i.test(responseText)
+  const goalPreserved =
+    goalKeywords.length === 0 ||
+    goalKeywords.filter((keyword) => normalizedResponse.includes(keyword)).length >= Math.min(1, goalKeywords.length)
+  const majorComponentMissing = responseText.trim().length < 24
+
+  return {
+    matchesFormatAndScope:
+      hasRewriteArtifact && scopePreserved && !majorComponentMissing && (goalPreserved || professionalSatisfied) && constraintsMissing.length === 0,
+    completeEnough: hasRewriteArtifact && scopePreserved && !majorComponentMissing && responseText.trim().length >= 48,
+    constraintsMissing
+  }
+}
+
+function assessCreationFormatAndScope(input: {
+  promptText: string
+  responseText: string
+  responseSummary: ResponsePreprocessorOutput
+}) {
+  const { promptText, responseText, responseSummary } = input
+  const normalizedPrompt = normalize(promptText)
+  const normalizedResponse = normalize(responseText)
+  const constraints = extractPromptArtifactConstraints(promptText)
+  const coverage = buildConstraintCoverage(constraints, responseText)
+  const goalKeywords = extractPromptKeywords(promptText)
+  const goalPreserved =
+    goalKeywords.length === 0 ||
+    goalKeywords.filter((keyword) => normalizedResponse.includes(keyword)).length >= Math.min(2, goalKeywords.length)
+
+  const wantsHtml = /\bhtml\b/i.test(promptText)
+  const wantsCss = /\bcss\b/i.test(promptText)
+  const wantsJs = /\bjavascript\b|\bjs\b/i.test(promptText)
+  const wantsWebsite = /\bwebsite\b|\bpage\b|\bsite\b/i.test(promptText)
+  const wantsCv = /\bcv\b|\bresume\b/i.test(promptText)
+  const wantsIngredients = /\bingredients?\b/i.test(promptText)
+  const wantsQuantities = /\bquantities\b/i.test(promptText)
+  const wantsSteps = /\bstep[-\s]?by[-\s]?step\b|\bsteps?\b/i.test(promptText)
+  const wantsCalories = /\bcalories per serving\b/i.test(promptText)
+  const wantsResearch = /\bresearch\b/i.test(promptText)
+  const wantsPrompt = /\bprompt\b/i.test(promptText)
+
+  const hasHtml = responseSummary.has_code_blocks || hasHtmlStructure(responseText) || responseSummary.mentioned_files.some((file) => /\.html$/i.test(file))
+  const hasCss = hasCssSignals(responseText) || responseSummary.mentioned_files.some((file) => /\.css$/i.test(file))
+  const hasJs = /```(?:js|javascript)\b|<script\b|function\s+\w+|const\s+\w+/i.test(responseText) || responseSummary.mentioned_files.some((file) => /\.(?:js|ts|tsx)$/i.test(file))
+  const websiteSignals = hasHtml || /\blayout\b|\bsection\b|\bpage\b/i.test(normalizedResponse)
+  const cvSignals = /\bcv\b|\bresume\b|\bexperience\b|\beducation\b|\bskills\b|\bcontact\b/i.test(normalizedResponse)
+  const ingredientSignals = /\bingredients?\b/i.test(normalizedResponse)
+  const quantitySignals = /\b\d+\s*(?:cups?|tbsp|tsp|g|kg|ml|l|oz)\b/i.test(responseText) || /\bquantities\b/i.test(normalizedResponse)
+  const stepSignals = countStructuredSteps(responseText) >= 2 || /\bstep[-\s]?by[-\s]?step\b/i.test(normalizedResponse)
+  const calorieSignals = /\bcalories per serving\b|\btotal calories per serving\b/i.test(normalizedResponse)
+  const researchSignals = hasResearchSignals(responseText)
+  const promptSignals = isGeneratedPromptArtifact({
+    promptText,
+    responseText,
+    responseSummary
+  })
+  const scopePreserved = !/\bbackend\b|\bapi\b|\bdatabase\b|\bserver\b|\bauth\b/i.test(normalizedResponse)
+
+  const requestedComponentChecks = [
+    { requested: wantsHtml, present: hasHtml },
+    { requested: wantsCss, present: hasCss },
+    { requested: wantsJs, present: hasJs },
+    { requested: wantsWebsite, present: websiteSignals },
+    { requested: wantsCv, present: cvSignals },
+    { requested: wantsIngredients, present: ingredientSignals },
+    { requested: wantsQuantities, present: quantitySignals },
+    { requested: wantsSteps, present: stepSignals },
+    { requested: wantsCalories, present: calorieSignals },
+    { requested: wantsResearch, present: researchSignals },
+    { requested: wantsPrompt, present: promptSignals }
+  ].filter((item) => item.requested)
+
+  const majorMissingComponents = requestedComponentChecks.filter((item) => !item.present).length
+  const artifactTypePresent =
+    hasHtml ||
+    hasCss ||
+    hasJs ||
+    promptSignals ||
+    responseSummary.has_code_blocks ||
+    ingredientSignals ||
+    researchSignals ||
+    responseSummary.response_length >= 80
+  const mediumFormatPresent = requestedComponentChecks.every((item) => item.present)
+  const noMajorRequestedComponentMissing = majorMissingComponents === 0
+
+  return {
+    matchesFormatAndScope:
+      artifactTypePresent &&
+      mediumFormatPresent &&
+      goalPreserved &&
+      coverage.mostlyPreserved &&
+      scopePreserved &&
+      noMajorRequestedComponentMissing,
+    completeEnough:
+      artifactTypePresent &&
+      goalPreserved &&
+      scopePreserved &&
+      noMajorRequestedComponentMissing &&
+      (responseSummary.has_code_blocks || responseSummary.response_length >= 180 || requestedComponentChecks.length >= 2),
+    constraintsMissing: coverage.missing
+  }
 }
 
 function buildPromptArtifactChecklist(input: {
@@ -187,11 +759,17 @@ function buildPromptArtifactChecklist(input: {
   const goalMatched =
     promptKeywords.length === 0 ||
     promptKeywords.filter((keyword) => normalizedResponse.includes(keyword)).length >= Math.min(2, promptKeywords.length)
-  const preservedConstraints = extractedConstraints.filter((constraint) =>
-    constraintAppearsInResponse(constraint, responseText)
-  )
-  const structured = countPromptArtifactSections(responseText) >= 2
-  const sendReady = structured && responseSummary.response_length >= 180 && responseSummary.uncertainty_signals.length < 3
+  const constraintCoverage = buildConstraintCoverage(extractedConstraints, responseText)
+  const preservedConstraints = constraintCoverage.preserved
+  const structured =
+    countPromptArtifactSections(responseText) >= 2 ||
+    (looksLikePromptDirective(responseText) && countPromptArtifactControls(responseText) >= 2 && countListStyleIdeas(responseText) >= 1)
+  const sendReady =
+    goalMatched &&
+    constraintCoverage.mostlyPreserved &&
+    structured &&
+    responseSummary.uncertainty_signals.length < 3 &&
+    responseSummary.response_length >= 90
 
   return {
     checklist: [
@@ -204,9 +782,9 @@ function buildPromptArtifactChecklist(input: {
         status:
           extractedConstraints.length === 0
             ? "met"
-            : preservedConstraints.length === extractedConstraints.length
+            : constraintCoverage.allPreserved
               ? "met"
-              : preservedConstraints.length > 0
+              : constraintCoverage.mostlyPreserved
                 ? "not_sure"
                 : "missed"
       },
@@ -227,6 +805,12 @@ function buildPromptArtifactChecklist(input: {
   }
 }
 
+function usesPromptQualityChecklist(checklist: AfterAnalysisResult["acceptance_checklist"]) {
+  return checklist.some((item) =>
+    PROMPT_ARTIFACT_CHECKLIST_LABELS.includes(item.label as (typeof PROMPT_ARTIFACT_CHECKLIST_LABELS)[number])
+  )
+}
+
 function isPromptArtifactChecklistLabel(label: string) {
   const normalizedLabel = normalize(label)
   if (!normalizedLabel) return false
@@ -234,6 +818,10 @@ function isPromptArtifactChecklistLabel(label: string) {
   if (PROMPT_ARTIFACT_SECTION_PATTERNS.some((pattern) => pattern.test(label))) return true
   if (label.length > 120) return true
   return /^task\s*\/\s*goal\b/i.test(label.trim())
+}
+
+function isProofOrientedChecklistLabel(label: string) {
+  return PROOF_ORIENTED_CHECKLIST_PATTERNS.some((pattern) => pattern.test(label))
 }
 
 function matchesCreationFormatAndScope(input: {
@@ -326,8 +914,18 @@ function pickFirstMeaningful(values: Array<string | null | undefined>) {
   return values.map((value) => value?.trim() ?? "").find(Boolean) ?? ""
 }
 
+function extractPrimaryGoalText(prompt: string) {
+  const match = prompt.match(
+    /task\s*\/\s*goal:\s*([\s\S]*?)(?:\n\s*\n|\n(?:key requirements|constraints|output format|quality bar\s*\/\s*style guardrails|style|requirements|output)\s*:|$)/i
+  )
+  return match?.[1]?.replace(/\s+/g, " ").trim() ?? ""
+}
+
 function buildNormalizedGoal(target: ReviewTarget, responseSummary: ResponsePreprocessorOutput) {
   const rawGoal = pickFirstMeaningful([
+    extractPrimaryGoalText(target.attempt.intent.goal || ""),
+    extractPrimaryGoalText(target.attempt.optimized_prompt || ""),
+    extractPrimaryGoalText(target.attempt.raw_prompt || ""),
     target.attempt.intent.goal,
     target.attempt.optimized_prompt,
     target.attempt.raw_prompt
@@ -383,7 +981,13 @@ function buildFallbackStructuredChecklist(
   responseSummary: ResponsePreprocessorOutput,
   normalizedGoal: string
 ): AfterAnalysisResult["acceptance_checklist"] {
-  if (isStructuredPromptArtifactText(target.responseText)) {
+  if (
+    isGeneratedPromptArtifact({
+      promptText: target.attempt.raw_prompt || target.attempt.optimized_prompt || target.attempt.intent.goal || "",
+      responseText: target.responseText,
+      responseSummary
+    })
+  ) {
     return buildPromptArtifactChecklist({
       promptText: target.attempt.raw_prompt || target.attempt.optimized_prompt || target.attempt.intent.goal || "",
       responseText: target.responseText,
@@ -477,7 +1081,12 @@ function sanitizeChecklist(
       label: normalizeSentence(item.label),
       status: item.status
     }))
-    .filter((item) => item.label && !isGenericChecklistLabel(item.label, normalizedGoal, rawPrompt))
+    .filter(
+      (item) =>
+        item.label &&
+        !isGenericChecklistLabel(item.label, normalizedGoal, rawPrompt) &&
+        !isProofOrientedChecklistLabel(item.label)
+    )
 
   if (meaningfulRaw.length) return meaningfulRaw.slice(0, 6)
 
@@ -923,7 +1532,11 @@ function buildInformationalReviewResult(input: {
   responseSummary: ResponsePreprocessorOutput
 }): AfterAnalysisResult {
   const { target, mode, responseSummary } = input
-  const isPromptArtifact = isStructuredPromptArtifactText(target.responseText)
+  const isPromptArtifact = isGeneratedPromptArtifact({
+    promptText: target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || "",
+    responseText: target.responseText,
+    responseSummary
+  })
   const isCreation = target.taskType === "creation"
   const isWriting = target.taskType === "writing"
   const isInstructional = target.taskType === "instructional"
@@ -938,22 +1551,32 @@ function buildInformationalReviewResult(input: {
         responseSummary
       })
     : null
+  const creationAssessment = isCreation
+    ? assessCreationFormatAndScope({
+        promptText,
+        responseText: target.responseText,
+        responseSummary
+      })
+    : null
+  const writingAssessment = isWriting
+    ? assessWritingFormatAndScope({
+        promptText,
+        responseText: target.responseText,
+        responseSummary
+      })
+    : null
   const promptKeywords = extractPromptKeywords(promptText)
   const keywordMatches = promptKeywords.filter((keyword) => normalizedResponse.includes(keyword)).length
   const structuredSteps = countStructuredSteps(target.responseText)
   const ideaCount = countListStyleIdeas(target.responseText)
   const directAnswer = isPromptArtifact
     ? promptArtifactSignals?.goalMatched ?? false
+    : isWriting
+      ? target.responseText.trim().length >= 24 && !responseSummary.has_code_blocks
     : target.responseText.trim().length >= 80 && (keywordMatches >= 1 || promptKeywords.length === 0)
-  const creationMatchesFormat = isCreation
-    ? matchesCreationFormatAndScope({
-        promptText,
-        responseText: target.responseText,
-        responseSummary
-      })
-    : false
+  const creationMatchesFormat = creationAssessment?.matchesFormatAndScope ?? false
   const clearEnough = isPromptArtifact
-    ? promptArtifactSignals?.structured ?? false
+    ? (promptArtifactSignals?.structured ?? false) && (promptArtifactSignals?.goalMatched ?? false) && (promptArtifactSignals?.preservedConstraints.length ?? 0) >= Math.max(0, (promptArtifactSignals?.extractedConstraints.length ?? 0) - 1)
     : isInstructional
     ? structuredSteps >= 2 || responseSummary.response_length >= 180
     : isAdvice || isIdeation
@@ -961,7 +1584,7 @@ function buildInformationalReviewResult(input: {
       : isCreation
         ? creationMatchesFormat
         : isWriting
-          ? responseSummary.response_length >= 80
+          ? writingAssessment?.matchesFormatAndScope ?? false
       : responseSummary.response_length >= 120
   const completeEnough =
     isPromptArtifact
@@ -971,9 +1594,9 @@ function buildInformationalReviewResult(input: {
       : isAdvice || isIdeation
         ? (ideaCount >= 4 && responseSummary.response_length >= 220) || responseSummary.key_paragraphs.length >= 2
         : isCreation
-          ? responseSummary.has_code_blocks || responseSummary.mentioned_files.length >= 1 || responseSummary.response_length >= 260
+          ? creationAssessment?.completeEnough ?? false
           : isWriting
-            ? responseSummary.response_length >= 120 && responseSummary.key_paragraphs.length >= 1
+            ? writingAssessment?.completeEnough ?? false
         : responseSummary.response_length >= 180 && responseSummary.key_paragraphs.length >= 1
   const uncertaintyHeavy = responseSummary.uncertainty_signals.length >= 3
   const missingItems: string[] = []
@@ -1037,6 +1660,12 @@ function buildInformationalReviewResult(input: {
     if (unresolvedConstraints.length) {
       missingItems.push(`The generated prompt is missing or weak on these constraints: ${unresolvedConstraints.join("; ")}.`)
     }
+  }
+  if (isCreation && creationAssessment?.constraintsMissing.length) {
+    missingItems.push(`The generated output is missing or weak on these requested constraints: ${creationAssessment.constraintsMissing.join("; ")}.`)
+  }
+  if (isWriting && writingAssessment?.constraintsMissing.length) {
+    missingItems.push(`The rewrite is missing or weak on these requested constraints: ${writingAssessment.constraintsMissing.join("; ")}.`)
   }
   if (uncertaintyHeavy) {
     missingItems.push("The answer uses too much uncertainty for a dependable guide.")
@@ -1315,14 +1944,40 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
     const projectMemory = input.getProjectMemoryContext()
     const responseSummary = input.preprocessResponse(target.responseText) as ResponsePreprocessorOutput
     const changedFiles = input.collectChangedFilesSummary()
-    const promptArtifactReview =
-      target.taskType !== "debug" &&
-      target.taskType !== "verification" &&
-      isStructuredPromptArtifactText(target.responseText)
+    const promptText = target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || ""
+    const implementationSignals =
+      responseSummary.has_code_blocks ||
+      responseSummary.change_claims.length > 0 ||
+      responseSummary.mentioned_files.length > 0
+    const creationLikeResponse =
+      responseSummary.has_code_blocks ||
+      responseSummary.mentioned_files.length > 0 ||
+      hasHtmlStructure(target.responseText) ||
+      hasCssSignals(target.responseText)
+    const effectiveTaskType =
+      (target.taskType === "implementation" || target.taskType === "writing") &&
+      looksLikeCreationRequestPrompt(promptText) &&
+      creationLikeResponse
+        ? "creation"
+        : target.taskType === "implementation" && looksLikeAdviceRequestPrompt(promptText) && !implementationSignals
+          ? "advice"
+          : target.taskType
+    const effectiveTarget =
+      effectiveTaskType === target.taskType
+        ? target
+        : {
+            ...target,
+            taskType: effectiveTaskType
+          }
+    const promptArtifactReview = isGeneratedPromptArtifact({
+      promptText,
+      responseText: effectiveTarget.responseText,
+      responseSummary
+    })
 
-    if (promptArtifactReview || isAnswerQualityTask(target.taskType)) {
+    if (promptArtifactReview || isAnswerQualityTask(effectiveTarget.taskType)) {
       const informationalResult = buildInformationalReviewResult({
-        target,
+        target: effectiveTarget,
         mode,
         responseSummary
       })
@@ -1351,6 +2006,42 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
     const intermediateResult = isDebugContinuation(rawResult, responseSummary, target, mode)
       ? buildDebugContinuationResult(rawResult, target, responseSummary, mode)
       : rawResult
+    const forcedPromptArtifactReview =
+      promptArtifactReview ||
+      isGeneratedPromptArtifact({
+        promptText: target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || "",
+        responseText: target.responseText,
+        responseSummary
+      }) ||
+      usesPromptQualityChecklist(intermediateResult.acceptance_checklist)
+    const forcedAdviceReview =
+      effectiveTaskType === "advice" &&
+      !implementationSignals &&
+      (target.taskType === "implementation" ||
+        intermediateResult.acceptance_checklist.some((item) => isProofOrientedChecklistLabel(item.label)))
+    const forcedCreationReview =
+      effectiveTaskType === "creation" &&
+      creationLikeResponse &&
+      (target.taskType === "implementation" ||
+        target.taskType === "writing" ||
+        intermediateResult.acceptance_checklist.some((item) => /rewrite|tone and clarity|polished enough to use/i.test(item.label)))
+
+    if (forcedPromptArtifactReview || forcedAdviceReview || forcedCreationReview) {
+      const informationalResult = buildInformationalReviewResult({
+        target: effectiveTarget,
+        mode,
+        responseSummary
+      })
+
+      await input.attachAnalysisResult(
+        target.attempt.attempt_id,
+        target.responseText,
+        informationalResult,
+        target.responseIdentity
+      )
+
+      return informationalResult
+    }
     const result =
       mode === "deep"
         ? buildGroundedDeepResult(intermediateResult, target, responseSummary)
