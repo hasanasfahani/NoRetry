@@ -144,6 +144,16 @@ const KNOWN_CUISINES = [
   "middle eastern"
 ] as const
 
+const NOISY_CONSTRAINT_PATTERNS = [
+  /\breturn something directly usable as a strong first draft\b/i,
+  /\bdirectly usable as a strong first draft\b/i,
+  /\breturn something directly usable\b/i,
+  /\bassume a normal home kitchen\b/i,
+  /\bkeep it practical for real weekday use\b/i,
+  /\bkeep the request clear, specific, and easy for the ai assistant to follow\b/i,
+  /\bkeep the result simple and easy to use\b/i
+]
+
 function normalize(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase()
 }
@@ -307,10 +317,10 @@ function extractStructuredPromptConstraints(promptText: string) {
       continue
     }
 
-    if (/cooking limits?|maximum cooking time|time/i.test(item.label) && /\bminutes?\b/i.test(item.value)) {
+    if (/cooking limits?|maximum cooking time|time/i.test(item.label) && /\b(?:minutes?|mins?)\b/i.test(item.value)) {
       const normalizedValue = normalize(item.value)
       if (/\bunder\b|\bless than\b|≤|<=|\bmax(?:imum)?\b/i.test(item.value)) {
-        const minuteMatch = normalizedValue.match(/(\d+)\s*minutes?/)
+        const minuteMatch = normalizedValue.match(/(\d+)\s*(?:minutes?|mins?)/)
         if (minuteMatch) constraints.push(`<=${minuteMatch[1]} minutes`)
       } else {
         constraints.push(normalizedValue)
@@ -318,6 +328,13 @@ function extractStructuredPromptConstraints(promptText: string) {
     }
   }
   return constraints
+}
+
+function isNoisyConstraint(value: string) {
+  const normalizedValue = normalize(value)
+  if (!normalizedValue) return true
+  if (isEmptyConstraintValue(normalizedValue)) return true
+  return NOISY_CONSTRAINT_PATTERNS.some((pattern) => pattern.test(value))
 }
 
 function parseResponseMinutes(responseText: string) {
@@ -337,9 +354,9 @@ function parseResponseMinutes(responseText: string) {
 
 function parseConstraintMaxMinutes(constraint: string) {
   const normalizedConstraint = normalize(constraint)
-  const bounded = normalizedConstraint.match(/^<=\s*(\d+)\s*minutes?$/)
+  const bounded = normalizedConstraint.match(/^<=\s*(\d+)\s*(?:minutes?|mins?)$/)
   if (bounded) return { min: null, max: Number(bounded[1]) }
-  const range = normalizedConstraint.match(/^(\d+)\s*-\s*(\d+)\s*minutes?$/)
+  const range = normalizedConstraint.match(/^(\d+)\s*-\s*(\d+)\s*(?:minutes?|mins?)$/)
   if (range) return { min: Number(range[1]), max: Number(range[2]) }
   return null
 }
@@ -537,11 +554,11 @@ function extractPromptArtifactConstraints(promptText: string) {
     )
   }
 
-  const boundedMinuteMatch = normalizedPrompt.match(/(?:under|less than|<=|≤|maximum of|max(?:imum)?)\s*(\d+)\s*minutes?\b/i)
+  const boundedMinuteMatch = normalizedPrompt.match(/(?:under|less than|<=|≤|maximum of|max(?:imum)?)\s*(\d+)\s*(?:minutes?|mins?)\b/i)
   if (boundedMinuteMatch) {
     constraints.push(`<=${boundedMinuteMatch[1]} minutes`)
   } else {
-    const minuteMatch = normalizedPrompt.match(/(\d+)\s*[-–]?\s*minutes?\b/i)
+    const minuteMatch = normalizedPrompt.match(/(\d+)\s*[-–]?\s*(?:minutes?|mins?)\b/i)
     if (minuteMatch) constraints.push(`${minuteMatch[1]} minutes`)
   }
 
@@ -569,7 +586,155 @@ function extractPromptArtifactConstraints(promptText: string) {
     constraints.push(exclusion.canonical)
   }
 
-  return [...new Set(constraints.map((item) => item.trim()).filter(Boolean))].slice(0, 8)
+  return [
+    ...new Set(
+      constraints
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .filter((item) => !isNoisyConstraint(item))
+    )
+  ].slice(0, 8)
+}
+
+function parseResponseCaloriesPerServing(responseText: string) {
+  const patterns = [
+    /\bcalories?\s*:\s*(\d+)\s*(?:per serving)?\b/i,
+    /\b(\d+)\s*calories?\s+per serving\b/i
+  ]
+
+  for (const pattern of patterns) {
+    const match = responseText.match(pattern)
+    if (match) return Number(match[1])
+  }
+
+  return null
+}
+
+function parsePromptCalorieTarget(promptText: string) {
+  const normalizedPrompt = normalize(promptText)
+  const underMatch = normalizedPrompt.match(/(?:under|less than|<=|≤|max(?:imum)? of?)\s*(\d+)\s*(?:cal|calories)\b/)
+  if (underMatch) return { min: null, max: Number(underMatch[1]) }
+
+  const rangeMatch = normalizedPrompt.match(/(\d+)\s*-\s*(\d+)\s*(?:cal|calories)(?: per serving)?\b/)
+  if (rangeMatch) return { min: Number(rangeMatch[1]), max: Number(rangeMatch[2]) }
+
+  return null
+}
+
+function responseUsesMicrowaveOnly(responseText: string) {
+  const normalizedResponse = normalize(responseText)
+  if (/\bskillet\b|\bsaute\b|\bstovetop\b|\bfrying pan\b|\bpan\b|\boven\b|\bbake\b/.test(normalizedResponse)) return false
+  return /\bmicrowave\b/.test(normalizedResponse)
+}
+
+function responseMentionsRiceQuantity(responseText: string) {
+  return /\b\d+(?:\/\d+)?\s*(?:cup|cups|tbsp|tablespoons?|g|grams?)\s+(?:of\s+)?rice\b/i.test(responseText)
+}
+
+function responseIncludesRiceIngredient(responseText: string) {
+  const scrubbed = responseText.replace(/\brice vinegar\b/gi, " ")
+  return /(^|\n)\s*-\s*(?:\d+(?:\/\d+)?\s*(?:cup|cups?|tbsp|tablespoons?|g|grams?)\s+)?(?:cooked\s+)?rice\b/i.test(scrubbed)
+}
+
+function responseIncludesTextureTips(responseText: string) {
+  const normalizedResponse = normalize(responseText)
+  return /\btexture tips?\b|\bcream(?:y|iness)\b|\bto keep it creamy\b|\bfor extra creaminess\b|\bfinal texture\b/.test(normalizedResponse)
+}
+
+function parseRequestedCuisine(promptText: string) {
+  for (const item of extractStructuredPromptValues(promptText)) {
+    if (/cuisine style|cuisine/i.test(item.label) && item.value) {
+      return normalize(item.value)
+    }
+  }
+
+  const directMatch = normalize(promptText).match(/\b(?:syrian|lebanese|palestinian|jordanian|turkish|greek|italian|mexican|asian|japanese|korean|thai|indian|american|french|spanish|mediterranean|middle eastern)\b/)
+  return directMatch?.[0] ?? ""
+}
+
+function buildPrioritizedCreationIssues(input: {
+  promptText: string
+  responseText: string
+}) {
+  const { promptText, responseText } = input
+  const normalizedPrompt = normalize(promptText)
+  const normalizedResponse = normalize(responseText)
+  const prioritized: string[] = []
+
+  const requestedCuisine = parseRequestedCuisine(promptText)
+  if (requestedCuisine) {
+    const cuisineMatched = matchesCuisineConstraint(`${requestedCuisine} cuisine`, responseText)
+    if (cuisineMatched === false) {
+      prioritized.push(`The answer is not meaningfully ${requestedCuisine} as requested.`)
+    }
+  }
+
+  const servingConstraint = extractPromptArtifactConstraints(promptText)
+    .map((constraint) => parseConstraintServingCount(constraint))
+    .find(Boolean)
+  const responseServings = parseResponseServingCount(responseText)
+  if (servingConstraint && responseServings && !rangesOverlap(servingConstraint, responseServings)) {
+    const requested = servingConstraint.min === servingConstraint.max ? `${servingConstraint.min} person` : `${servingConstraint.min}-${servingConstraint.max} people`
+    const actual = responseServings.min === responseServings.max ? `${responseServings.min}` : `${responseServings.min}-${responseServings.max}`
+    prioritized.push(`The answer serves ${actual} instead of the requested ${requested}.`)
+  }
+
+  const minuteConstraint = extractPromptArtifactConstraints(promptText)
+    .map((constraint) => parseConstraintMaxMinutes(constraint))
+    .find(Boolean)
+  const responseMinutes = parseResponseMinutes(responseText)
+  if (minuteConstraint && responseMinutes != null) {
+    if ((minuteConstraint.min == null && responseMinutes > minuteConstraint.max) || (minuteConstraint.min != null && (responseMinutes < minuteConstraint.min || responseMinutes > minuteConstraint.max))) {
+      const requested = minuteConstraint.min == null ? `${minuteConstraint.max} minutes or less` : `${minuteConstraint.min}-${minuteConstraint.max} minutes`
+      prioritized.push(`The answer takes ${responseMinutes} minutes instead of staying within ${requested}.`)
+    }
+  }
+
+  if (/\bmicrowave only\b|\buses only a microwave\b/.test(normalizedPrompt) && !responseUsesMicrowaveOnly(responseText)) {
+    prioritized.push("The answer does not stay microwave-only; it uses non-microwave cooking.")
+  }
+
+  const calorieTarget = parsePromptCalorieTarget(promptText)
+  const responseCalories = parseResponseCaloriesPerServing(responseText)
+  if (calorieTarget && responseCalories != null) {
+    const violatesUpper = responseCalories > calorieTarget.max
+    const violatesLower = calorieTarget.min != null && responseCalories < calorieTarget.min
+    if (violatesUpper || violatesLower) {
+      const requested = calorieTarget.min == null ? `${calorieTarget.max} calories or less` : `${calorieTarget.min}-${calorieTarget.max} calories`
+      prioritized.push(`The answer is ${responseCalories} calories per serving instead of staying within ${requested}.`)
+    }
+  }
+
+  if (/\brice\b/.test(normalizedPrompt) && !responseIncludesRiceIngredient(responseText)) {
+    prioritized.push("The answer does not include rice even though rice was explicitly requested.")
+  }
+
+  if (/\bexact rice quantity\b|\bconfirm the exact rice quantity\b/.test(normalizedPrompt) && !responseMentionsRiceQuantity(responseText)) {
+    prioritized.push("The answer does not confirm an exact rice quantity for the calorie target.")
+  }
+
+  if (/\bcreamy\b/.test(normalizedPrompt) && !/\bcreamy\b|\bcreaminess\b/.test(normalizedResponse)) {
+    prioritized.push("The answer does not clearly deliver the requested creamy texture.")
+  }
+
+  if (/\btexture tips?\b|\bfinal texture tips?\b/.test(normalizedPrompt) && !responseIncludesTextureTips(responseText)) {
+    prioritized.push("The answer is missing the final texture tips that were requested.")
+  }
+
+  if (/\bingredients?\b/.test(normalizedPrompt) && !/\bingredients?\b/.test(normalizedResponse)) {
+    prioritized.push("The answer is missing the requested ingredients list.")
+  }
+
+  if ((/\bmacro breakdown\b|\bmacros?\b|\bnutritional highlights\b|\bnutritional information\b/.test(normalizedPrompt)) &&
+    !/\bprotein\b|\bcarbohydrates?\b|\bfat\b|\bfiber\b|\bnutritional\b|\bmacros?\b/.test(normalizedResponse)) {
+    prioritized.push("The answer is missing the requested macro or nutritional breakdown.")
+  }
+
+  if (/\bstep[-\s]?by[-\s]?step\b|\binstructions?\b/.test(normalizedPrompt) && countStructuredSteps(responseText) < 2) {
+    prioritized.push("The answer is missing clear step-by-step instructions.")
+  }
+
+  return [...new Set(prioritized)].slice(0, 6)
 }
 
 function constraintAppearsInResponse(constraint: string, responseText: string) {
@@ -1558,6 +1723,12 @@ function buildInformationalReviewResult(input: {
         responseSummary
       })
     : null
+  const prioritizedCreationIssues = isCreation
+    ? buildPrioritizedCreationIssues({
+        promptText,
+        responseText: target.responseText
+      })
+    : []
   const writingAssessment = isWriting
     ? assessWritingFormatAndScope({
         promptText,
@@ -1569,10 +1740,17 @@ function buildInformationalReviewResult(input: {
   const keywordMatches = promptKeywords.filter((keyword) => normalizedResponse.includes(keyword)).length
   const structuredSteps = countStructuredSteps(target.responseText)
   const ideaCount = countListStyleIdeas(target.responseText)
+  const creationDeliverableSignals =
+    isCreation &&
+    (responseSummary.has_code_blocks ||
+      (/\bingredients?\b/i.test(target.responseText) && structuredSteps >= 2) ||
+      /\bnutritional\b|\bmacros?\b|\bcalories?\b/i.test(normalizedResponse))
   const directAnswer = isPromptArtifact
     ? promptArtifactSignals?.goalMatched ?? false
     : isWriting
       ? target.responseText.trim().length >= 24 && !responseSummary.has_code_blocks
+    : isCreation
+      ? creationDeliverableSignals || (target.responseText.trim().length >= 80 && (keywordMatches >= 1 || promptKeywords.length === 0))
     : target.responseText.trim().length >= 80 && (keywordMatches >= 1 || promptKeywords.length === 0)
   const creationMatchesFormat = creationAssessment?.matchesFormatAndScope ?? false
   const clearEnough = isPromptArtifact
@@ -1617,7 +1795,7 @@ function buildInformationalReviewResult(input: {
           : "The answer should address the question more directly."
     )
   }
-  if (!clearEnough) {
+  if (!clearEnough && !(isCreation && prioritizedCreationIssues.length)) {
     missingItems.push(
       isPromptArtifact
         ? "The generated prompt should use a clearer structured format with labeled sections."
@@ -1633,7 +1811,7 @@ function buildInformationalReviewResult(input: {
           : "The explanation should be clearer and easier to follow."
     )
   }
-  if (!completeEnough) {
+  if (!completeEnough && !(isCreation && prioritizedCreationIssues.length)) {
     missingItems.push(
       isPromptArtifact
         ? "The generated prompt should be usable as a send-ready prompt without important gaps."
@@ -1661,8 +1839,13 @@ function buildInformationalReviewResult(input: {
       missingItems.push(`The generated prompt is missing or weak on these constraints: ${unresolvedConstraints.join("; ")}.`)
     }
   }
-  if (isCreation && creationAssessment?.constraintsMissing.length) {
-    missingItems.push(`The generated output is missing or weak on these requested constraints: ${creationAssessment.constraintsMissing.join("; ")}.`)
+  if (isCreation && prioritizedCreationIssues.length) {
+    missingItems.push(...prioritizedCreationIssues)
+  } else if (isCreation && creationAssessment?.constraintsMissing.length) {
+    const filteredMissingConstraints = creationAssessment.constraintsMissing.filter((constraint) => !isNoisyConstraint(constraint))
+    if (filteredMissingConstraints.length) {
+      missingItems.push(`The generated output is missing or weak on these requested constraints: ${filteredMissingConstraints.join("; ")}.`)
+    }
   }
   if (isWriting && writingAssessment?.constraintsMissing.length) {
     missingItems.push(`The rewrite is missing or weak on these requested constraints: ${writingAssessment.constraintsMissing.join("; ")}.`)
@@ -1679,7 +1862,8 @@ function buildInformationalReviewResult(input: {
     : missingItems.length >= 3
       ? "low"
       : "medium"
-  const status: AfterAnalysisResult["status"] = success ? "SUCCESS" : "PARTIAL"
+  const status: AfterAnalysisResult["status"] =
+    success ? "SUCCESS" : isCreation && prioritizedCreationIssues.length >= 3 ? "FAILED" : "PARTIAL"
 
   const checklist = isPromptArtifact && promptArtifactSignals
     ? promptArtifactSignals.checklist
@@ -1706,7 +1890,7 @@ function buildInformationalReviewResult(input: {
             : isAdvice || isIdeation
               ? "The ideas are clear and easy to use"
               : "The explanation is clear enough to follow",
-      status: clearEnough ? "met" : "not_sure"
+      status: clearEnough ? "met" : isCreation && prioritizedCreationIssues.length >= 2 ? "missed" : "not_sure"
     },
     {
       label: isCreation
@@ -1718,7 +1902,14 @@ function buildInformationalReviewResult(input: {
             : isAdvice || isIdeation
               ? "The answer offers enough practical variety to use"
               : "The explanation is complete enough to use",
-      status: completeEnough && !uncertaintyHeavy ? "met" : missingItems.length ? "not_sure" : "met"
+      status:
+        completeEnough && !uncertaintyHeavy
+          ? "met"
+          : isCreation && prioritizedCreationIssues.length >= 3
+            ? "missed"
+            : missingItems.length
+              ? "not_sure"
+              : "met"
     }
   ] satisfies AfterAnalysisResult["acceptance_checklist"]
 

@@ -311,11 +311,108 @@ Why it fits:
       quickBaseline: null
     })
     assert.equal(analyzeCalls, 0)
-    assert.equal(checklistStatusFor(syrianLunchResult, "The output matches the requested format and scope"), "not_sure")
+    assert.equal(checklistStatusFor(syrianLunchResult, "The output matches the requested format and scope"), "missed")
     const syrianCombinedText = [...syrianLunchResult.issues, ...syrianLunchResult.stage_2.missing_criteria].join("\n").toLowerCase()
     assert.match(syrianCombinedText, /syrian/)
     assert.match(syrianCombinedText, /1 person/)
     assert.doesNotMatch(syrianCombinedText, /under 30 minutes/)
+
+    const microwaveLunchPrompt = `Task / goal:
+Build a single vegan microwave lunch recipe that is high-protein, creamy, comfort-food style, under 300 cal, ready in ≤5 min, uses only a microwave, and contains no avocado. Base it on chickpeas and rice; confirm the exact rice quantity that keeps calories under 500. Must be 1 serving, leftovers allowed. Provide ingredients, microwave steps, macro breakdown, and final texture tips to guarantee creaminess.
+
+Key requirements:
+- Which meal?: Lunch.
+- Any diet rules?: Vegan.
+- Max cooking time?: 5 min.
+- Nutrition priority?: High protein.
+- Flavor vibe?: Comfort.
+- Eat it cold later?: Yes.
+- Preferred vegan protein?: Chickpeas.
+- Texture preference?: Creamy.
+
+Constraints:
+- Lunch.
+- Vegan.
+- 1.
+- 5 min.
+- Avocado.
+- High protein.
+- Microwave only.
+- Comfort.
+- Yes.
+- Chickpeas.
+- rice and under 300 calories.
+- Creamy.
+- How many servings?: 1.
+- Microwave or stove only?: Microwave only.
+- Include a grain?: rice and under 500 calories.
+
+Required inputs or ingredients:
+- Assume a normal home kitchen unless the prompt says otherwise.
+
+Output format:
+- Skip any ingredients?: Avocado.
+- Include a grain?: rice and under 300 calories.
+- Return something directly usable as a strong first draft.`
+    const microwaveLunchAttempt = makeAttempt(microwaveLunchPrompt, "other")
+    const microwaveLunchTaskType = classifyReviewTaskType(microwaveLunchAttempt)
+    assert.equal(microwaveLunchTaskType, "creation")
+    analyzeCalls = 0
+    const microwaveLunchResult = await runner({
+      target: {
+        attempt: microwaveLunchAttempt,
+        taskType: microwaveLunchTaskType,
+        responseText: `Bright Chickpea Lettuce Cup Lunch Bowl
+
+Servings: 2-3
+Time: 25 minutes
+Calories: 390 per serving
+
+Ingredients:
+- 2 cans chickpeas, drained and rinsed
+- 2 tbsp tamari
+- 1 tbsp rice vinegar
+- 1 tbsp lime juice
+- 1 tsp toasted sesame oil
+- 1 tsp grated ginger
+- 2 cloves garlic, minced
+- 1 tbsp chili crisp or sambal
+- 1 small cucumber, diced
+- 1 cup shredded red cabbage
+- 3 scallions, sliced
+- 1 cup shelled edamame
+- 1 large romaine heart or butter lettuce leaves
+- 1 tbsp sesame seeds
+
+Instructions:
+1. Pat the chickpeas dry, then sauté them in a skillet for 6-8 minutes until lightly golden.
+2. Stir in the tamari, rice vinegar, lime juice, sesame oil, ginger, garlic, and chili crisp, then cook for 2 more minutes so the chickpeas turn glossy and tangy.
+3. Fold in the cucumber, cabbage, scallions, and edamame just long enough to warm through while keeping the lunch fresh and crisp.
+4. Spoon the chickpea mixture into lettuce cups or bowls, then finish with sesame seeds and extra lime.
+
+Nutritional information (per serving):
+- Calories: 390
+- Protein: 23 g
+- Carbohydrates: 30 g
+- Net carbs: 18 g
+- Fat: 16 g
+- Fiber: 12 g`,
+        responseIdentity: "resp-microwave-lunch-1",
+        threadIdentity: "thread-microwave-lunch-1",
+        normalizedResponseText: "lettuce cup bowl servings 2-3 time 25 minutes skillet calories 390"
+      },
+      mode: "deep",
+      quickBaseline: null
+    })
+    assert.equal(analyzeCalls, 0)
+    const microwaveCombinedText = [...microwaveLunchResult.issues, ...microwaveLunchResult.stage_2.missing_criteria].join("\n").toLowerCase()
+    assert.match(microwaveCombinedText, /microwave/)
+    assert.match(microwaveCombinedText, /25 minutes|5 minutes/)
+    assert.match(microwaveCombinedText, /serves 2-3|requested 1 person/)
+    assert.match(microwaveCombinedText, /390 calories|300 calories/)
+    assert.match(microwaveCombinedText, /rice/)
+    assert.match(microwaveCombinedText, /texture tips|creamy/)
+    assert.doesNotMatch(microwaveCombinedText, /strong first draft/)
 
     const structuredCvPrompt = `Task / goal:
 Generate a complete, ready-to-save HTML file for a two-column résumé/CV that uses only inline CSS. The left sidebar must contain a bulleted skills list; the right column holds standard sections (summary, experience, education). Return the full file, no explanations.
