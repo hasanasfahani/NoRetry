@@ -1,6 +1,5 @@
-import type { CSSProperties } from "react"
+import { useEffect, useRef, type CSSProperties } from "react"
 import { ActionBar } from "../shared/ActionBar"
-import { LoadingState } from "../shared/LoadingState"
 import { PromptCard } from "../shared/PromptCard"
 import { SectionCard } from "../shared/SectionCard"
 import type { PopupAction } from "../shared/types"
@@ -24,26 +23,28 @@ function buildVisibleOptions(options: string[] | undefined) {
 }
 
 export function ReviewPromptMode(props: ReviewPromptModeProps) {
-  if (props.state.popupState === "loading") {
-    return (
-      <SectionCard title="Prompt mode" subtitle="Using your current typed prompt as the planning goal.">
-        <LoadingState />
-      </SectionCard>
-    )
-  }
+  const promptReadyRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!props.state.promptReady) return
+    promptReadyRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest"
+    })
+  }, [props.state.promptReady])
 
   if (props.state.popupState === "error") {
     return (
-      <SectionCard title="Prompt mode" subtitle="NoRetry couldn't start the prompt tree safely.">
+      <SectionCard title="Prompt mode" subtitle="reeva AI couldn't start the prompt tree safely.">
         <p style={styles.copy}>{props.state.errorMessage ?? "Try typing a prompt and opening the popup again."}</p>
       </SectionCard>
     )
   }
 
   const visibleQuestions = props.state.questionHistory.length ? props.state.questionHistory : props.state.currentLevelQuestions
-  const activeQuestion = visibleQuestions[props.state.activeQuestionIndex] ?? null
+  const activeQuestion = props.state.questionHistory[props.state.activeQuestionIndex] ?? props.state.currentLevelQuestions[0] ?? null
   const activeAnswer = activeQuestion ? props.state.answerState[activeQuestion.id] ?? "" : ""
-  const answeredCount = visibleQuestions.filter((question) => {
+  const answeredCount = props.state.questionHistory.filter((question) => {
     const raw = props.state.answerState[question.id]
     const other = props.state.otherAnswerState[question.id]?.trim()
     return Boolean(raw && (raw !== OTHER_OPTION || other))
@@ -54,7 +55,7 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
       <SectionCard title="Planning goal" subtitle="Your current unsent prompt now anchors the next-step tree.">
         <p style={styles.goal}>{props.state.planningGoal}</p>
         <p style={styles.copy}>
-          NoRetry starts the branch from this typed prompt, so you do not need to re-enter the direction inside the popup.
+          reeva AI starts the branch from this typed prompt, so you do not need to re-enter the direction inside the popup.
         </p>
       </SectionCard>
 
@@ -66,12 +67,13 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
               const rawValue = props.state.answerState[question.id]
               const otherValue = props.state.otherAnswerState[question.id]?.trim()
               const answered = Boolean(rawValue && (rawValue !== OTHER_OPTION || otherValue))
+              const isActive = index === props.state.activeQuestionIndex
 
               return (
                 <button
                   key={question.id}
                   type="button"
-                  style={styles.tab(index === props.state.activeQuestionIndex, answered)}
+                  style={styles.tab(isActive, answered)}
                   onClick={() => props.onQuestionIndexChange(index)}
                   disabled={props.state.isLoadingQuestions}
                 >
@@ -121,7 +123,7 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
                     style={styles.textarea}
                     value={props.state.otherAnswerState[activeQuestion.id] ?? ""}
                     onChange={(event) => props.onOtherAnswerChange(activeQuestion.id, event.target.value)}
-                    placeholder="Type the branch detail you want NoRetry to use next."
+                    placeholder="Type the branch detail you want reeva AI to use next."
                     disabled={props.state.isLoadingQuestions}
                   />
                   <button
@@ -129,6 +131,19 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
                     style={styles.primaryButton}
                     onClick={props.onAdvanceOther}
                     disabled={props.state.isLoadingQuestions || !(props.state.otherAnswerState[activeQuestion.id] ?? "").trim()}
+                  >
+                    {props.state.isLoadingQuestions ? "Generating..." : "Continue"}
+                  </button>
+                </div>
+              ) : null}
+
+              {activeQuestion.mode === "multi" && activeAnswer !== OTHER_OPTION ? (
+                <div style={styles.otherWrap}>
+                  <button
+                    type="button"
+                    style={styles.primaryButton}
+                    onClick={props.onAdvanceOther}
+                    disabled={props.state.isLoadingQuestions || !activeAnswer.trim()}
                   >
                     {props.state.isLoadingQuestions ? "Generating..." : "Continue"}
                   </button>
@@ -154,14 +169,14 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
       ) : null}
 
       {props.state.promptReady ? (
-        <>
+        <div ref={promptReadyRef} style={styles.promptReadyWrap}>
           <ActionBar actions={props.promptActions} />
           <PromptCard
             label="Next best prompt"
             prompt={props.state.promptDraft}
             note="Built from your typed prompt, the answered branch so far, and the constraints captured in this session."
           />
-        </>
+        </div>
       ) : null}
     </>
   )
@@ -283,6 +298,10 @@ const styles = {
   footerRow: {
     display: "grid",
     gap: 10
+  } satisfies CSSProperties,
+  promptReadyWrap: {
+    display: "grid",
+    gap: 12
   } satisfies CSSProperties,
   primaryButton: {
     justifySelf: "flex-start",

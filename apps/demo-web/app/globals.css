@@ -1,0 +1,80 @@
+:root {
+  --bg: #eef3ff;
+  --panel: rgba(255, 255, 255, 0.9);
+  --panel-strong: #ffffff;
+  --ink: #0f172f;
+  --muted: #5f6f92;
+  --line: rgba(28, 46, 102, 0.12);
+  --brand: #2f6efb;
+  --brand-deep: #214fba;
+  --brand-soft: rgba(47, 110, 251, 0.12);
+  --good: #1f8f5f;
+  --warn: #bc7f12;
+  --shadow: 0 24px 60px rgba(20, 32, 76, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top, rgba(47, 110, 251, 0.2), transparent 42%),
+    linear-gradient(180deg, #f7f9ff 0%, #edf3ff 100%);
+  color: var(--ink);
+  font-family:
+    "SF Pro Display",
+    "Inter",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    box-shadow 180ms ease,
+    filter 180ms ease,
+    opacity 180ms ease;
+  transform: translateY(0) scale(1);
+  will-change: transform;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px) scale(1.01);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
+  filter: saturate(1.05) brightness(0.98);
+}
+
+.pressable {
+  backface-visibility: hidden;
+}
+
+.pressable-dark:active:not(:disabled) {
+  box-shadow: inset 0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
+.pressable-strong:active:not(:disabled) {
+  box-shadow:
+    inset 0 10px 18px rgba(255, 255, 255, 0.12),
+    0 10px 18px rgba(49, 73, 181, 0.22);
+}
