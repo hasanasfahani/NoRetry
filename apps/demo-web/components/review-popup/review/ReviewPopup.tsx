@@ -13,8 +13,8 @@ import { ReviewPopupHeader } from "./ReviewPopupHeader"
 import { ReviewProofSection } from "./ReviewProofSection"
 import type { ReviewPopupViewModel } from "./review-types"
 import { ReviewWhySection } from "./ReviewWhySection"
-import type { ReviewPopupSurface, ReviewPromptModeState } from "@prompt-optimizer/extension/lib/review/types"
 import type { PopupAction } from "../shared/types"
+import type { ReviewPopupSurface, ReviewPromptModeState } from "../../../lib/review-types"
 
 type ReviewPopupProps = {
   open: boolean

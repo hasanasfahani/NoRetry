@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ["@prompt-optimizer/shared", "@prompt-optimizer/extension"],
+  transpilePackages: ["@prompt-optimizer/shared"],
   experimental: {
     externalDir: true
   },
