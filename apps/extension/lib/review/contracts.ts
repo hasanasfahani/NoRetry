@@ -1,6 +1,5 @@
 import type { ReviewEvidenceSummary } from "./evidence-model"
 import type { FailureType } from "./failure-taxonomy"
-import type { AttemptMemory } from "../session/attempt-memory"
 
 export type ReviewRequirementPriority = "P1" | "P2" | "P3" | "P4"
 
@@ -58,6 +57,14 @@ export type ReviewAnalysisDebugPayload = {
   }
 }
 
+export type ReviewAttemptMemory = {
+  retryCount: number
+  repeatedFailureTypes: FailureType[]
+  previousFailureTypes: FailureType[]
+  unresolvedIssues: string[]
+  progressState: "improving" | "stalled" | "regressing" | "first_attempt"
+}
+
 export type ReviewContract = {
   taskFamily: string
   checklistSource: "decomposed" | "prompt_artifact" | "informational_generic" | "fallback_structured" | "backend"
@@ -69,7 +76,7 @@ export type ReviewContract = {
   confidenceReasons: string[]
   failureTypes: FailureType[]
   evidenceSummary: ReviewEvidenceSummary
-  attemptMemory: AttemptMemory | null
+  attemptMemory: ReviewAttemptMemory | null
   requirements: ReviewRequirement[]
   topFailures: ReviewRequirement[]
   topPasses: ReviewRequirement[]
