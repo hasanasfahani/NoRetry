@@ -1,0 +1,12 @@
+{
+  "name": "debug-proof-needed",
+  "prompt": "Fix the failing auth redirect bug and prove it works with one concrete runtime verification step.",
+  "response": "I updated the auth flow to avoid the redirect loop. The bug should be fixed now.",
+  "expectedTaskType": "debug",
+  "mustIncludeChecklist": [
+    "Current runtime state is confirmed",
+    "Most likely failure point is identified",
+    "One minimal diagnostic step is proposed before more changes"
+  ],
+  "forbiddenPhrases": []
+}

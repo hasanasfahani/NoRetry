@@ -38,8 +38,8 @@ function buttonStyle(kind: PopupAction["kind"], disabled: boolean): CSSPropertie
   if (kind === "primary") {
     return {
       ...shared,
-      border: "1px solid rgba(79, 70, 229, 0.2)",
-      background: "#4f46e5",
+      border: "1px solid rgba(7, 102, 254, 0.18)",
+      background: "#0766fe",
       color: "#ffffff"
     }
   }

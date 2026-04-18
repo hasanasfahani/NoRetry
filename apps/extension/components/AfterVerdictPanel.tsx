@@ -473,7 +473,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
   const showModeToggle = !isInitialChecking && hasRealReview && !props.nextStepStarted
   const summarySentence =
     sanitizeUserFacingAfterText(props.verdict.findings.find((item) => item.trim().length > 0) || "") ||
-    "NoRetry reviewed the answer against your request."
+    "reeva AI reviewed the answer against your request."
   const isPlannerOnlyState = !hasRealReview && props.nextStepStarted
   const evidenceLabel = userFacingEvidenceLabel(props.verdict.confidence)
   const activeReviewMode = props.displayedReviewMode
@@ -695,7 +695,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             <div style={styles.contextSetupIntro}>
               <p style={styles.contextSetupTitle}>Let’s ground this review before we judge your latest project answer.</p>
               <p style={styles.contextSetupBody}>
-                Paste a structured Replit handoff once, and NoRetry will immediately return to your latest project answer
+                Paste a structured Replit handoff once, and reeva AI will immediately return to your latest project answer
                 and review it with the missing context.
               </p>
               <div style={styles.contextStatusRow}>
@@ -752,8 +752,8 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             <div style={styles.contextCard}>
               <p style={styles.contextHelper}>
                 {props.projectMemoryDepth === "deep"
-                  ? "Copy the deep handoff request, ask Replit for a richer markdown file, then paste or drop that .md here. After you save it, NoRetry will resume the original review automatically."
-                  : "Copy the quick handoff request, paste it into Replit, then paste the returned markdown handoff here. After you save it, NoRetry will resume the original review automatically."}
+                  ? "Copy the deep handoff request, ask Replit for a richer markdown file, then paste or drop that .md here. After you save it, reeva AI will resume the original review automatically."
+                  : "Copy the quick handoff request, paste it into Replit, then paste the returned markdown handoff here. After you save it, reeva AI will resume the original review automatically."}
               </p>
               <div
                 style={styles.dropZone(isDragActive)}
@@ -825,7 +825,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
             <div style={styles.contextSetupIntro}>
               <p style={styles.contextSetupTitle}>Your project context is now saved and ready.</p>
               <p style={styles.contextSetupBody}>
-                NoRetry has absorbed the background for this project. Continue working with Replit, and open AFTER on the
+                reeva AI has absorbed the background for this project. Continue working with Replit, and open AFTER on the
                 next real project answer when you want a cleaner, better-grounded review.
               </p>
               <div style={styles.contextStatusRow}>
@@ -1214,7 +1214,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               <div style={styles.questionCard}>
                 <p style={styles.questionLabel}>What do you want the next step to be?</p>
                 <p style={styles.questionHelper}>
-                  Give NoRetry a short direction so it can build the next decision-tree questions around it.
+                  Give reeva AI a short direction so it can build the next decision-tree questions around it.
                   {props.suggestedDirectionChips.length ? " Or tap a suggested issue below to add it for you." : ""}
                 </p>
                 {props.suggestedDirectionChips.length ? (

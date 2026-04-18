@@ -1,0 +1,19 @@
+{
+  "name": "recipe-microwave-constraints",
+  "prompt": "Task / goal:\nBuild a single vegan microwave lunch recipe that is high-protein, creamy, comfort-food style, under 300 cal, ready in ≤5 min, uses only a microwave, and contains no avocado. Base it on chickpeas and rice; confirm the exact rice quantity that keeps calories under 500. Must be 1 serving, leftovers allowed. Provide ingredients, microwave steps, macro breakdown, and final texture tips to guarantee creaminess.",
+  "response": "Bright Chickpea Lettuce Cup Lunch Bowl\n\nServings: 2-3\nTime: 25 minutes\nCalories: 390 per serving\n\nIngredients:\n- 2 cans chickpeas\n- 1 tbsp rice vinegar\n\nInstructions:\n1. Saute in a skillet.\n2. Finish in bowls.\n",
+  "expectedTaskType": "creation",
+  "mustIncludeChecklist": [
+    "Serving count matches",
+    "Time constraint matches",
+    "Tool or method constraint matches",
+    "Requested grain or base ingredient is present",
+    "Exact rice quantity is confirmed"
+  ],
+  "forbiddenPhrases": [
+    "Task / goal:",
+    "artifact proof",
+    "still-unproven part",
+    "strong first draft"
+  ]
+}

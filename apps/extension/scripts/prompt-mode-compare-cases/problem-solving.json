@@ -1,0 +1,33 @@
+{
+  "id": "problem-solving-bug",
+  "label": "Problem-solving - extension popup bug",
+  "taskType": "problem_solving",
+  "promptText": "Debug why the browser extension popup opens blank on first load. I want likely root cause, exact fix, and how to verify it.",
+  "beforeIntent": "DEBUG",
+  "legacy": {
+    "questions": [
+      {
+        "id": "legacy-problem-1",
+        "label": "What should the next step confirm first?",
+        "helper": "Pick the first runtime checkpoint the next prompt should verify before changing more code.",
+        "options": ["The extension loads", "The content script attaches", "The target element is detected", "The UI renders visibly", "Other"],
+        "answer": "The UI renders visibly"
+      },
+      {
+        "id": "legacy-problem-2",
+        "label": "What should the next answer optimize first?",
+        "helper": "Choose the most useful next debugging move.",
+        "options": ["Diagnosis first", "Fix first", "More examples", "Other"],
+        "answer": "Diagnosis first"
+      }
+    ]
+  },
+  "v2": {
+    "answers": [
+      { "sectionId": "expected_behavior", "answer": "The popup should render the review panel on first open." },
+      { "sectionId": "actual_behavior", "answer": "The popup opens blank until the user closes and reopens it." },
+      { "sectionId": "desired_ai_help", "answer": "Diagnosis first" },
+      { "sectionId": "fix_proof", "answer": ["UI visibly works", "Tests/checks pass"] }
+    ]
+  }
+}

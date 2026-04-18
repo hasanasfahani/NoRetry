@@ -1,0 +1,15 @@
+{
+  "name": "code-html-constraints",
+  "prompt": "Task / goal:\nGenerate a complete, ready-to-save HTML file for a two-column resume with inline CSS only. Return the full file only.",
+  "response": "<!doctype html><html><head><title>Resume</title></head><body><main style=\"display:flex\"><aside style=\"width:30%\">Skills</aside><section style=\"width:70%\">Experience</section></main></body></html>",
+  "expectedTaskType": "creation",
+  "mustIncludeChecklist": [
+    "Requested deliverable type is present",
+    "Tool or method constraint matches",
+    "Full HTML file output is present"
+  ],
+  "forbiddenPhrases": [
+    "Task / goal:",
+    "artifact proof"
+  ]
+}

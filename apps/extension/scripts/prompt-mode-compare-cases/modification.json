@@ -1,0 +1,33 @@
+{
+  "id": "modification-copy",
+  "label": "Modification - landing page copy tweak",
+  "taskType": "modification",
+  "promptText": "Modify the existing homepage hero copy to sound more premium without changing the offer, CTA, or layout.",
+  "beforeIntent": "BUILD",
+  "legacy": {
+    "questions": [
+      {
+        "id": "legacy-mod-1",
+        "label": "What should the next prompt lock down first?",
+        "helper": "Pick the first thing the next prompt should make explicit.",
+        "options": ["Exact output", "Key constraint", "Success criteria", "Scope limit", "Other"],
+        "answer": "Scope limit"
+      },
+      {
+        "id": "legacy-mod-2",
+        "label": "What should the starter include next?",
+        "helper": "Choose the next thing the answer should include.",
+        "options": ["Header", "Examples", "Short explanation", "Other"],
+        "answer": "Short explanation"
+      }
+    ]
+  },
+  "v2": {
+    "answers": [
+      { "sectionId": "requested_change", "answer": "Refine something existing" },
+      { "sectionId": "preserve_rules", "answer": ["Existing behavior", "Layout/format"] },
+      { "sectionId": "definition_of_complete", "answer": "Requested change is visible" },
+      { "sectionId": "note_box", "answer": "Do not rewrite the CTA or promise." }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "product-thinking-prioritization",
+  "label": "Product thinking - prioritization decision",
+  "taskType": "product_thinking",
+  "promptText": "Help decide whether we should prioritize Prompt Mode v2 rollout or focus first on improving answer-quality review trust for power users.",
+  "beforeIntent": "OTHER",
+  "legacy": {
+    "questions": [
+      {
+        "id": "legacy-product-1",
+        "label": "What should the next prompt lock down first?",
+        "helper": "Pick the first thing the next prompt should make explicit.",
+        "options": ["Exact output", "Key constraint", "Success criteria", "Scope limit", "Other"],
+        "answer": "Success criteria"
+      },
+      {
+        "id": "legacy-product-2",
+        "label": "What should the next answer optimize first?",
+        "helper": "Pick the most important quality bar.",
+        "options": ["Direct answer first", "Clear trade-offs", "Examples", "Other"],
+        "answer": "Clear trade-offs"
+      }
+    ]
+  },
+  "v2": {
+    "answers": [
+      { "sectionId": "decision_problem", "answer": "Prioritization" },
+      { "sectionId": "requirements_considerations", "answer": ["User value", "Engineering effort", "Business impact"] },
+      { "sectionId": "desired_output", "answer": "Recommendation" },
+      { "sectionId": "definition_of_complete", "answer": "Decision-ready summary" }
+    ]
+  }
+}

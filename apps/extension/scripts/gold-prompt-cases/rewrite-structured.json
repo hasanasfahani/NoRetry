@@ -1,0 +1,23 @@
+{
+  "name": "rewrite-structured-prompt",
+  "sourcePrompt": "rewrite this email",
+  "planningGoal": "rewrite this email",
+  "refinedPrompt": "Rewrite the email in a concise, professional tone for a hiring manager. Keep it under 120 words and preserve the original meaning.",
+  "answeredPath": [
+    "Professional tone",
+    "Hiring manager",
+    "Under 120 words"
+  ],
+  "constraints": [
+    "Professional",
+    "Concise",
+    "Under 120 words"
+  ],
+  "expectedIncludes": [
+    "Task / goal:",
+    "Constraints:"
+  ],
+  "forbiddenPhrases": [
+    "Keep the request clear, specific, and easy for the AI assistant to follow"
+  ]
+}

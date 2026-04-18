@@ -108,19 +108,14 @@ function CardManIcon({ color }: { color: string }) {
 
 function ReviewSparkIcon() {
   return (
-    <svg viewBox="0 0 24 24" style={styles.reviewIcon} aria-hidden="true">
-      <path
-        d="M6.5 5.5h11a1.5 1.5 0 0 1 1.5 1.5v7.6a1.5 1.5 0 0 1-1.5 1.5H11l-4.5 3.1V16.1H6.5A1.5 1.5 0 0 1 5 14.6V7a1.5 1.5 0 0 1 1.5-1.5Z"
-        fill="none"
-        stroke="#0f172a"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="m13.8 7.8-.9 1.9-2.1.2 1.6 1.3-.5 2 1.9-1 1.8 1-.4-2 1.5-1.3-2-.2-.9-1.9Z"
-        fill="#4f46e5"
-      />
+    <svg viewBox="0 0 1024 1024" style={styles.reviewIcon} aria-hidden="true">
+      <rect x="0" y="0" width="1024" height="1024" rx="0" fill="#1E6DEB" />
+      <circle cx="512" cy="512" r="305" fill="none" stroke="#FCFDFF" strokeWidth="38" />
+      <circle cx="512" cy="512" r="228" fill="none" stroke="#FCFDFF" strokeWidth="34" />
+      <circle cx="512" cy="512" r="153" fill="none" stroke="#FCFDFF" strokeWidth="30" />
+      <circle cx="512" cy="512" r="85" fill="none" stroke="#FCFDFF" strokeWidth="26" />
+      <circle cx="512" cy="512" r="28" fill="#FCFDFF" />
+      <path d="M452 186L512 154L572 186L540 236H484L452 186Z" fill="#1E6DEB" />
     </svg>
   )
 }
@@ -336,27 +331,6 @@ export function OptimizerShell(props: OptimizerShellProps) {
       {!props.panelOpen && !props.afterPanelOpen && !props.reviewPopupOpen ? (
         <div style={styles.badgeStack}>
           <button
-          type="button"
-          style={styles.badge(tone.bg, tone.fg, tone.border)}
-          onMouseDown={holdPromptFocus}
-          onClick={props.panelOpen ? props.onClosePanel : props.onOpenPanel}
-        >
-            <span style={isBusy ? styles.badgeCharge : styles.badgeDot}>
-              {isBusy ? <RunningManIcon /> : null}
-            </span>
-            {!isBusy ? <CardManIcon color={tone.fg} /> : null}
-          </button>
-          <button
-          type="button"
-          style={styles.afterBadge(props.isEvaluatingAfterResponse)}
-          onMouseDown={holdPromptFocus}
-          onClick={props.onOpenAfterPanel}
-          aria-label="Open after-response feedback"
-            title="Check the AI response"
-          >
-            <span style={props.isEvaluatingAfterResponse ? styles.afterBadgeSpin : undefined}>⚡</span>
-          </button>
-          <button
             type="button"
             style={styles.reviewBadge(reviewSignal.background, reviewSignal.border, reviewSignal.color)}
             onMouseDown={holdPromptFocus}
@@ -396,13 +370,13 @@ export function OptimizerShell(props: OptimizerShellProps) {
 
       {props.panelOpen ? (
         <>
-          <button type="button" style={styles.scrim} onClick={props.onClosePanel} aria-label="Close NoRetry" />
+          <button type="button" style={styles.scrim} onClick={props.onClosePanel} aria-label="Close reeva AI" />
           <section style={styles.panel}>
             <div style={styles.panelHeader}>
               <div>
                 <p style={styles.eyebrow}>{props.onboardingVisible ? "Welcome" : "Before Send"}</p>
                 <h3 style={styles.heading}>
-                  {props.onboardingVisible ? "NoRetry" : `Prompt strength ${props.beforeResult?.score ?? "LOW"}`}
+                  {props.onboardingVisible ? "reeva AI" : `Prompt strength ${props.beforeResult?.score ?? "LOW"}`}
                 </h3>
               </div>
               <button type="button" style={styles.closeButton} onClick={props.onClosePanel} aria-label="Close">
@@ -808,8 +782,11 @@ const styles = {
     filter: "drop-shadow(0 1px 4px rgba(15,23,42,0.14))"
   } as CSSProperties,
   reviewIcon: {
-    width: 16,
-    height: 16
+    width: 18,
+    height: 18,
+    borderRadius: 4,
+    display: "block",
+    boxShadow: "0 2px 6px rgba(37,99,235,0.28)"
   } as CSSProperties,
   reviewTypingWrap: {
     position: "relative",

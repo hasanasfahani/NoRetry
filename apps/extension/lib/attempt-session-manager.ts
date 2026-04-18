@@ -73,7 +73,7 @@ export async function getLatestSubmittedAttempt() {
   const latestAttempt =
     sortReviewableAttempts(attempts.filter((attempt) => attempt.status === "submitted" || attempt.status === "analyzed"))[0] ?? null
 
-  console.debug("[NoRetry][ReviewTarget]", "latest submitted attempt lookup", {
+  console.debug("[reeva AI][ReviewTarget]", "latest submitted attempt lookup", {
     attemptId: latestAttempt?.attempt_id ?? null,
     status: latestAttempt?.status ?? null,
     submittedAt: latestAttempt?.submitted_at ?? null,
@@ -90,7 +90,7 @@ export async function getRecentReviewableAttempts(limit = MAX_ATTEMPTS) {
     attempts.filter((attempt) => attempt.status === "submitted" || attempt.status === "analyzed")
   ).slice(0, Math.max(1, limit))
 
-  console.debug("[NoRetry][ReviewTarget]", "recent reviewable attempts lookup", {
+  console.debug("[reeva AI][ReviewTarget]", "recent reviewable attempts lookup", {
     totalAttempts: attempts.length,
     reviewableCount: reviewableAttempts.length,
     attemptIds: reviewableAttempts.map((attempt) => attempt.attempt_id)

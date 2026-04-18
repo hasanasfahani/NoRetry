@@ -10,6 +10,7 @@ type ReviewPromptModeProps = {
   promptActions: PopupAction[]
   onQuestionIndexChange: (index: number) => void
   onAnswerChange: (questionId: string, value: string) => void
+  onToggleMultiAnswer: (questionId: string, value: string) => void
   onOtherAnswerChange: (questionId: string, value: string) => void
   onAdvanceOther: () => void
   onGeneratePrompt: () => void
@@ -20,6 +21,18 @@ const OTHER_OPTION = "Other"
 function buildVisibleOptions(options: string[] | undefined) {
   const normalized = (options ?? []).map((option) => option.trim()).filter(Boolean)
   return [...normalized.filter((option) => option !== OTHER_OPTION), OTHER_OPTION]
+}
+
+function includesOption(value: string | string[], option: string) {
+  return Array.isArray(value) ? value.includes(option) : value === option
+}
+
+function hasAnsweredValue(value: string | string[], otherValue?: string) {
+  const other = otherValue?.trim() ?? ""
+  if (Array.isArray(value)) {
+    return value.length > 0 && (!value.includes(OTHER_OPTION) || Boolean(other))
+  }
+  return Boolean(value && (value !== OTHER_OPTION || other))
 }
 
 export function ReviewPromptMode(props: ReviewPromptModeProps) {
@@ -44,10 +57,11 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
   const visibleQuestions = props.state.questionHistory.length ? props.state.questionHistory : props.state.currentLevelQuestions
   const activeQuestion = props.state.questionHistory[props.state.activeQuestionIndex] ?? props.state.currentLevelQuestions[0] ?? null
   const activeAnswer = activeQuestion ? props.state.answerState[activeQuestion.id] ?? "" : ""
+  const activeOtherAnswer = activeQuestion ? props.state.otherAnswerState[activeQuestion.id] ?? "" : ""
   const answeredCount = props.state.questionHistory.filter((question) => {
     const raw = props.state.answerState[question.id]
     const other = props.state.otherAnswerState[question.id]?.trim()
-    return Boolean(raw && (raw !== OTHER_OPTION || other))
+    return hasAnsweredValue(raw ?? "", other)
   }).length
 
   return (
@@ -66,7 +80,7 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
             {visibleQuestions.map((question, index) => {
               const rawValue = props.state.answerState[question.id]
               const otherValue = props.state.otherAnswerState[question.id]?.trim()
-              const answered = Boolean(rawValue && (rawValue !== OTHER_OPTION || otherValue))
+              const answered = hasAnsweredValue(rawValue ?? "", otherValue)
               const isActive = index === props.state.activeQuestionIndex
 
               return (
@@ -102,13 +116,17 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
 
               <div style={styles.optionList}>
                 {buildVisibleOptions(activeQuestion.options).map((option) => {
-                  const selected = activeAnswer === option
+                  const selected = includesOption(activeAnswer, option)
                   return (
                     <button
                       key={option}
                       type="button"
                       style={styles.optionButton(selected, props.state.isLoadingQuestions)}
-                      onClick={() => props.onAnswerChange(activeQuestion.id, option)}
+                      onClick={() =>
+                        activeQuestion.mode === "multi"
+                          ? props.onToggleMultiAnswer(activeQuestion.id, option)
+                          : props.onAnswerChange(activeQuestion.id, option)
+                      }
                       disabled={props.state.isLoadingQuestions}
                     >
                       {option}
@@ -117,7 +135,7 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
                 })}
               </div>
 
-              {activeAnswer === OTHER_OPTION ? (
+              {includesOption(activeAnswer, OTHER_OPTION) ? (
                 <div style={styles.otherWrap}>
                   <textarea
                     style={styles.textarea}
@@ -130,20 +148,20 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
                     type="button"
                     style={styles.primaryButton}
                     onClick={props.onAdvanceOther}
-                    disabled={props.state.isLoadingQuestions || !(props.state.otherAnswerState[activeQuestion.id] ?? "").trim()}
+                    disabled={props.state.isLoadingQuestions || !activeOtherAnswer.trim()}
                   >
                     {props.state.isLoadingQuestions ? "Generating..." : "Continue"}
                   </button>
                 </div>
               ) : null}
 
-              {activeQuestion.mode === "multi" && activeAnswer !== OTHER_OPTION ? (
+              {activeQuestion.mode === "multi" && !includesOption(activeAnswer, OTHER_OPTION) ? (
                 <div style={styles.otherWrap}>
                   <button
                     type="button"
                     style={styles.primaryButton}
                     onClick={props.onAdvanceOther}
-                    disabled={props.state.isLoadingQuestions || !activeAnswer.trim()}
+                    disabled={props.state.isLoadingQuestions || !Array.isArray(activeAnswer) || activeAnswer.length === 0}
                   >
                     {props.state.isLoadingQuestions ? "Generating..." : "Continue"}
                   </button>
@@ -207,9 +225,9 @@ const styles = {
   } satisfies CSSProperties,
   tab: (active: boolean, answered: boolean) =>
     ({
-      border: active ? "1px solid rgba(79,70,229,0.28)" : "1px solid rgba(148,163,184,0.2)",
-      background: active ? "rgba(79,70,229,0.12)" : answered ? "rgba(220,252,231,0.82)" : "#ffffff",
-      color: active ? "#4338ca" : "#1e293b",
+      border: active ? "1px solid rgba(7,102,254,0.24)" : "1px solid rgba(148,163,184,0.2)",
+      background: active ? "rgba(7,102,254,0.1)" : answered ? "rgba(220,252,231,0.82)" : "#ffffff",
+      color: active ? "#0766fe" : "#1e293b",
       width: 34,
       height: 34,
       borderRadius: 999,
@@ -224,9 +242,9 @@ const styles = {
     alignSelf: "flex-start",
     padding: "10px 12px",
     borderRadius: 999,
-    border: "1px solid rgba(79,70,229,0.16)",
-    background: "rgba(79,70,229,0.08)",
-    color: "#4338ca",
+    border: "1px solid rgba(7,102,254,0.16)",
+    background: "rgba(7,102,254,0.08)",
+    color: "#0766fe",
     fontSize: 13,
     lineHeight: 1.4,
     fontWeight: 700
@@ -241,7 +259,7 @@ const styles = {
       width: 7,
       height: 7,
       borderRadius: 999,
-      background: "#4f46e5",
+      background: "#0766fe",
       opacity
     }) satisfies CSSProperties,
   questionCard: {
@@ -315,10 +333,10 @@ const styles = {
   } satisfies CSSProperties,
   secondaryButton: {
     justifySelf: "flex-start",
-    border: "1px solid rgba(79,70,229,0.2)",
+    border: "1px solid rgba(7,102,254,0.2)",
     borderRadius: 999,
-    background: "rgba(79,70,229,0.08)",
-    color: "#4338ca",
+    background: "rgba(7,102,254,0.08)",
+    color: "#0766fe",
     padding: "12px 18px",
     fontWeight: 800,
     cursor: "pointer"

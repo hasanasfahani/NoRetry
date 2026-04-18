@@ -10,7 +10,7 @@ export default function Popup() {
       setSummary(nextSummary)
 
       const shellText = [
-        "NoRetry popup opened.",
+        "reeva AI popup opened.",
         `Status: ${nextSummary?.lastProbableStatus ?? "UNKNOWN"}`,
         `Retries: ${nextSummary?.retryCount ?? 0}`,
         `Last intent: ${nextSummary?.lastIntent ?? "OTHER"}`
@@ -39,7 +39,7 @@ export default function Popup() {
 
   return (
     <main style={styles.shell}>
-      <p style={styles.eyebrow}>NoRetry</p>
+      <p style={styles.eyebrow}>reeva AI</p>
       <h1 style={styles.title}>AI prompt quality, minus the noise.</h1>
       <p style={styles.copy}>
         Before-send analysis is always cheap. After-send diagnosis only runs if visible failure signals appear or you ask

@@ -11,7 +11,7 @@ const toneMap: Record<PopupTone, { bg: string; fg: string; border: string }> = {
   success: { bg: "#dcfce7", fg: "#166534", border: "rgba(22,101,52,0.16)" },
   warning: { bg: "#fef3c7", fg: "#b45309", border: "rgba(180,83,9,0.16)" },
   danger: { bg: "#fee2e2", fg: "#b91c1c", border: "rgba(185,28,28,0.16)" },
-  info: { bg: "#e0e7ff", fg: "#4338ca", border: "rgba(67,56,202,0.16)" }
+  info: { bg: "#e0f0ff", fg: "#0766fe", border: "rgba(7,102,254,0.16)" }
 }
 
 export function StatusBadge({ label, tone = "neutral" }: StatusBadgeProps) {

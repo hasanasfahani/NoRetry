@@ -23,7 +23,7 @@ async function bundleModules(outdir) {
   })
 }
 
-function makeAttempt(id, prompt, createdAt) {
+function makeAttempt(id, prompt, createdAt, overrides = {}) {
   return {
     attempt_id: id,
     platform: "replit",
@@ -42,7 +42,8 @@ function makeAttempt(id, prompt, createdAt) {
     response_message_id: null,
     analysis_result: null,
     token_usage_total: 0,
-    stage_cache: {}
+    stage_cache: {},
+    ...overrides
   }
 }
 
@@ -107,6 +108,85 @@ async function main() {
     const fallbackResolved = await fallbackResolver()
     assert.equal(fallbackResolved.ok, true)
     assert.equal(fallbackResolved.target.attempt.attempt_id, "attempt-fallback")
+
+    const echoedPromptResolver = createReviewTargetResolver({
+      getLatestAssistantResponse: () => ({
+        node: null,
+        text: "latest prompt",
+        identity: "assistant-echo"
+      }),
+      getLatestUserPrompt: () => ({
+        text: "latest prompt"
+      }),
+      getThread: () => ({
+        identity: "thread-echo"
+      }),
+      getLatestSubmittedAttempt: async () => fallbackAttempt,
+      getReviewableAttempts: async () => [fallbackAttempt],
+      ensureSubmittedAttempt: async () => fallbackAttempt,
+      readAssistantMessageIdentity: () => "assistant-echo",
+      normalizeResponseText: (value) => value.trim().toLowerCase()
+    })
+
+    const echoedPromptResolution = await echoedPromptResolver()
+    assert.equal(echoedPromptResolution.ok, false)
+    assert.equal(echoedPromptResolution.reason, "no_response")
+
+    const staleLatestAttempt = makeAttempt("attempt-stale", "old recipe prompt", "2026-04-15T09:03:00.000Z", {
+      response_text: "Recipe answer",
+      response_message_id: "assistant-old"
+    })
+    const matchedResponseAttempt = makeAttempt("attempt-current", "clarify what had you changed", "2026-04-15T09:02:00.000Z", {
+      response_text: "Across this session, three changes were made to the extension:",
+      response_message_id: "assistant-current"
+    })
+
+    const responseMatchedResolver = createReviewTargetResolver({
+      getLatestAssistantResponse: () => ({
+        node: null,
+        text: "Across this session, three changes were made to the extension:",
+        identity: "assistant-current"
+      }),
+      getLatestUserPrompt: () => ({
+        text: ""
+      }),
+      getThread: () => ({
+        identity: "thread-current"
+      }),
+      getLatestSubmittedAttempt: async () => staleLatestAttempt,
+      getReviewableAttempts: async () => [staleLatestAttempt, matchedResponseAttempt],
+      ensureSubmittedAttempt: async () => null,
+      readAssistantMessageIdentity: () => "assistant-current",
+      normalizeResponseText: (value) => value.trim().toLowerCase()
+    })
+
+    const responseMatchedResolution = await responseMatchedResolver()
+    assert.equal(responseMatchedResolution.ok, true)
+    assert.equal(responseMatchedResolution.target.attempt.attempt_id, "attempt-current")
+
+    const ensuredAttempt = makeAttempt("attempt-ensured", "clarify what had you changed", "2026-04-15T09:04:00.000Z")
+    const ensureWhenPromptMissingResolver = createReviewTargetResolver({
+      getLatestAssistantResponse: () => ({
+        node: null,
+        text: "Across this session, three changes were made to the extension:",
+        identity: "assistant-fresh"
+      }),
+      getLatestUserPrompt: () => ({
+        text: ""
+      }),
+      getThread: () => ({
+        identity: "thread-fresh"
+      }),
+      getLatestSubmittedAttempt: async () => staleLatestAttempt,
+      getReviewableAttempts: async () => [staleLatestAttempt],
+      ensureSubmittedAttempt: async () => ensuredAttempt,
+      readAssistantMessageIdentity: () => "assistant-fresh",
+      normalizeResponseText: (value) => value.trim().toLowerCase()
+    })
+
+    const ensuredResolution = await ensureWhenPromptMissingResolver()
+    assert.equal(ensuredResolution.ok, true)
+    assert.equal(ensuredResolution.target.attempt.attempt_id, "attempt-ensured")
 
     const states = []
     let resolveCalls = 0

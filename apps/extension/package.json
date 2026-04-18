@@ -1,14 +1,24 @@
 {
   "name": "@prompt-optimizer/extension",
-  "displayName": "NoRetry",
+  "displayName": "reeva AI",
   "version": "0.1.0",
   "private": true,
   "manifest": {
-    "name": "NoRetry",
-    "description": "Sharpen prompts before you send them.",
+    "name": "reeva AI",
+    "description": "The trust layer for AI.",
     "action": {
-      "default_title": "NoRetry"
+      "default_title": "reeva AI"
     },
+    "web_accessible_resources": [
+      {
+        "resources": [
+          "review-popup-logo.png"
+        ],
+        "matches": [
+          "<all_urls>"
+        ]
+      }
+    ],
     "host_permissions": [
       "http://localhost/*",
       "http://127.0.0.1/*"
@@ -20,8 +30,12 @@
     "package": "plasmo package",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:review-answer-mode": "node ./scripts/review-answer-mode-smoke.mjs",
+    "test:review-analysis-compare": "node ./scripts/review-analysis-compare.mjs",
+    "test:gold-cases": "node ./scripts/gold-cases-smoke.mjs",
+    "test:review-prompt-mode-compare": "node ./scripts/review-prompt-mode-compare.mjs",
     "test:review-routing": "node ./scripts/review-routing-smoke.mjs",
-    "test:review-prompt-mode": "node ./scripts/review-prompt-mode-smoke.mjs"
+    "test:review-prompt-mode": "node ./scripts/review-prompt-mode-smoke.mjs",
+    "test:review-prompt-mode-v2": "node ./scripts/review-prompt-mode-v2-smoke.mjs"
   },
   "dependencies": {
     "@plasmohq/storage": "^1.12.0",

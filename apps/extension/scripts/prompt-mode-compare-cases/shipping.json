@@ -1,0 +1,33 @@
+{
+  "id": "shipping-release",
+  "label": "Shipping - browser extension release",
+  "taskType": "shipping",
+  "promptText": "Prepare a ship-ready plan for releasing the browser extension update to production with smoke tests before and after launch.",
+  "beforeIntent": "BUILD",
+  "legacy": {
+    "questions": [
+      {
+        "id": "legacy-shipping-1",
+        "label": "What matters most in the first draft?",
+        "helper": "Pick the first quality bar the next prompt should optimize for.",
+        "options": ["Correct structure first", "Requested format first", "Usable starter content", "Minimal starter only", "Other"],
+        "answer": "Usable starter content"
+      },
+      {
+        "id": "legacy-shipping-2",
+        "label": "What should the next prompt lock down first?",
+        "helper": "Pick the first thing the next prompt should make explicit.",
+        "options": ["Exact output", "Key constraint", "Success criteria", "Scope limit", "Other"],
+        "answer": "Exact output"
+      }
+    ]
+  },
+  "v2": {
+    "answers": [
+      { "sectionId": "current_status", "answer": "Blocked by a few issues" },
+      { "sectionId": "target_environment", "answer": ["Browser extension", "Production web app"] },
+      { "sectionId": "release_requirements", "answer": ["QA sign-off", "Launch checklist"] },
+      { "sectionId": "post_ship_verification", "answer": ["Smoke test", "User-visible behavior"] }
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "recipe-structured-prompt",
+  "sourcePrompt": "healthy syrian lunch for one",
+  "planningGoal": "healthy syrian lunch for one",
+  "refinedPrompt": "Suggest a healthy Syrian lunch for 1 person that can be prepared in under 30 minutes, focusing on staying fit. Include ingredients, step-by-step instructions, and nutritional highlights.",
+  "answeredPath": [
+    "Lunch",
+    "Syrian",
+    "1 person",
+    "Under 30 minutes"
+  ],
+  "constraints": [
+    "Lunch",
+    "Syrian cuisine",
+    "1 person",
+    "<=30 minutes"
+  ],
+  "expectedIncludes": [
+    "Task / goal:",
+    "Key requirements:",
+    "Constraints:",
+    "Output format:"
+  ],
+  "forbiddenPhrases": [
+    "strong first draft",
+    "Task / goal: Task / goal:"
+  ]
+}

@@ -16,9 +16,10 @@ export function PopupShell(props: PopupShellProps) {
       <button type="button" style={styles.scrim} onClick={props.onClose} aria-label="Close review popup" />
       <section style={styles.panel}>
         <div style={styles.header}>
-          <div>
+          <div style={styles.titleWrap}>
+            <ReviewPopupBrand />
             {props.eyebrow ? <p style={styles.eyebrow}>{props.eyebrow}</p> : null}
-            <h3 style={styles.title}>{props.title}</h3>
+            {props.title.trim() ? <h3 style={styles.title}>{props.title}</h3> : null}
           </div>
           <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close">
             ×
@@ -27,6 +28,22 @@ export function PopupShell(props: PopupShellProps) {
         <div style={styles.body}>{props.children}</div>
       </section>
     </>
+  )
+}
+
+function ReviewPopupBrand() {
+  return (
+    <div style={styles.brandRow} aria-label="reeva AI">
+      <svg viewBox="0 0 1024 1024" style={styles.brandIcon} aria-hidden="true">
+        <circle cx="512" cy="512" r="305" fill="none" stroke="#0766fe" strokeWidth="38" />
+        <circle cx="512" cy="512" r="228" fill="none" stroke="#0766fe" strokeWidth="34" />
+        <circle cx="512" cy="512" r="153" fill="none" stroke="#0766fe" strokeWidth="30" />
+        <circle cx="512" cy="512" r="85" fill="none" stroke="#0766fe" strokeWidth="26" />
+        <circle cx="512" cy="512" r="28" fill="#0766fe" />
+        <path d="M452 186L512 154L572 186L540 236H484L452 186Z" fill="#ffffff" />
+      </svg>
+      <span style={styles.brandWordmark}>reeva AI</span>
+    </div>
   )
 }
 
@@ -42,8 +59,9 @@ const styles: Record<string, CSSProperties> = {
   },
   panel: {
     position: "fixed",
-    top: 84,
-    right: 28,
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
     width: 420,
     maxWidth: "calc(100vw - 32px)",
     maxHeight: "calc(100vh - 112px)",
@@ -61,6 +79,28 @@ const styles: Record<string, CSSProperties> = {
     justifyContent: "space-between",
     gap: 16,
     marginBottom: 18
+  },
+  titleWrap: {
+    display: "grid",
+    gap: 10
+  },
+  brandRow: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 10
+  },
+  brandIcon: {
+    width: 34,
+    height: 34,
+    display: "block",
+    flex: "0 0 auto"
+  },
+  brandWordmark: {
+    fontSize: 20,
+    lineHeight: 1,
+    fontWeight: 700,
+    letterSpacing: "-0.02em",
+    color: "#0f172a"
   },
   eyebrow: {
     margin: 0,

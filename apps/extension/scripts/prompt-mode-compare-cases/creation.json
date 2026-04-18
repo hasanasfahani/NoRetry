@@ -1,0 +1,33 @@
+{
+  "id": "creation-recipe",
+  "label": "Creation - constrained recipe",
+  "taskType": "creation",
+  "promptText": "Create a single-serving, high-protein lunch salad under 300 kcal with ingredients, step-by-step instructions, and calories per serving.",
+  "beforeIntent": "BUILD",
+  "legacy": {
+    "questions": [
+      {
+        "id": "legacy-creation-1",
+        "label": "What matters most in the first draft?",
+        "helper": "Pick the first quality bar the next prompt should optimize for.",
+        "options": ["Correct structure first", "Requested format first", "Usable starter content", "Minimal starter only", "Other"],
+        "answer": "Requested format first"
+      },
+      {
+        "id": "legacy-creation-2",
+        "label": "What should the next prompt lock down first?",
+        "helper": "Pick the first thing the next prompt should make explicit.",
+        "options": ["Exact output", "Key constraint", "Success criteria", "Scope limit", "Other"],
+        "answer": "Key constraint"
+      }
+    ]
+  },
+  "v2": {
+    "answers": [
+      { "sectionId": "goal", "answer": "A usable first draft" },
+      { "sectionId": "requirements", "answer": ["Specific ingredients or parts", "Examples or evidence"] },
+      { "sectionId": "definition_of_complete", "answer": "All hard constraints satisfied" },
+      { "sectionId": "note_box", "answer": "Keep the salad easy to make on a weekday." }
+    ]
+  }
+}

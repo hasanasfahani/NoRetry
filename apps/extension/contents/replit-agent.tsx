@@ -99,19 +99,24 @@ import {
 } from "../lib/storage"
 import { createReviewPopupOrchestrator } from "../lib/review/orchestrator/review-popup-orchestrator"
 import { createReviewPromptModeOrchestrator } from "../lib/review/orchestrator/review-prompt-mode-orchestrator"
+import { createReviewPromptModeV2Orchestrator } from "../lib/review/orchestrator/review-prompt-mode-v2-orchestrator"
 import { buildReviewLoadingViewModel } from "../lib/review/mappers/review-view-model"
 import {
   createIdleReviewSignal,
   createLoadingReviewSignal,
-  createTypingReviewSignal,
   mapReviewResultToSignal
 } from "../lib/review/mappers/review-signal"
+import { normalizeGoalContract } from "../lib/goal/goal-normalizer"
+import { buildPreflightAssessment } from "../lib/preflight/preflight-risk-engine"
+import { mapPreflightAssessmentToTypingSignal } from "../lib/preflight/preflight-view-model"
 import { createReviewAnalysisRunner } from "../lib/review/services/review-analysis"
 import { buildPromptModeSessionKey } from "../lib/review/services/review-prompt-mode"
 import { createReviewTargetResolver } from "../lib/review/services/review-target"
 import type {
   ReviewPopupControllerState,
   ReviewPromptModeState,
+  ReviewPromptModeV2Question,
+  ReviewPromptModeV2State,
   ReviewPopupSurface,
   ReviewSignalState,
   ReviewTypingState
@@ -138,11 +143,11 @@ const REVIEW_SIGNAL_SETTLE_MS = 1200
 
 function logReviewDebug(message: string, details?: Record<string, unknown>) {
   if (details) {
-    console.debug("[NoRetry][Review]", message, details)
+    console.debug("[reeva AI][Review]", message, details)
     return
   }
 
-  console.debug("[NoRetry][Review]", message)
+  console.debug("[reeva AI][Review]", message)
 }
 
 export default function PromptOptimizerApp() {
@@ -192,7 +197,9 @@ export default function PromptOptimizerApp() {
   const [reviewTypingState, setReviewTypingState] = useState<ReviewTypingState>({
     active: false,
     promptText: "",
-    sessionKey: null
+    sessionKey: null,
+    goalContract: null,
+    preflight: null
   })
   const [reviewPopupViewModel, setReviewPopupViewModel] = useState<ReviewPopupViewModel>(
     buildReviewLoadingViewModel("deep")
@@ -212,6 +219,8 @@ export default function PromptOptimizerApp() {
     sessionKey: null,
     sourcePrompt: "",
     planningGoal: "",
+    goalContract: null,
+    promptContract: null,
     planningAttempt: null,
     analysisSeed: null,
     localAnalysis: null,
@@ -226,6 +235,32 @@ export default function PromptOptimizerApp() {
     isGeneratingPrompt: false,
     promptDraft: "",
     promptReady: false,
+    errorMessage: null
+  })
+  const [reviewPromptModeV2State, setReviewPromptModeV2State] = useState<ReviewPromptModeV2State>({
+    popupState: "idle",
+    sessionKey: null,
+    sourcePrompt: "",
+    goalContract: null,
+    localAnalysis: null,
+    intentConfidence: "medium",
+    likelyTaskTypes: [],
+    selectedTaskType: null,
+    selectedTemplateKind: null,
+    clarifyingQuestion: null,
+    clarifyingAnswer: "",
+    sections: [],
+    additionalNotes: [],
+    isGeneratingPrompt: false,
+    promptDraft: "",
+    promptReady: false,
+    validation: null,
+    progress: null,
+    assemblyErrorMessage: null,
+    questionHistory: [],
+    activeQuestionIndex: 0,
+    answerState: {},
+    otherAnswerState: {},
     errorMessage: null
   })
   const [isEvaluatingAfterResponse, setIsEvaluatingAfterResponse] = useState(false)
@@ -300,6 +335,7 @@ export default function PromptOptimizerApp() {
   const afterReviewCacheRef = useRef<CachedAfterReviews | null>(null)
   const reviewPopupOrchestratorRef = useRef<ReturnType<typeof createReviewPopupOrchestrator> | null>(null)
   const reviewPromptModeOrchestratorRef = useRef<ReturnType<typeof createReviewPromptModeOrchestrator> | null>(null)
+  const reviewPromptModeV2OrchestratorRef = useRef<ReturnType<typeof createReviewPromptModeV2Orchestrator> | null>(null)
   const reviewPopupOpenStateRef = useRef(false)
   const reviewPopupTargetKeyRef = useRef<string | null>(null)
   const reviewTypingTimeoutRef = useRef<number | null>(null)
@@ -443,7 +479,7 @@ export default function PromptOptimizerApp() {
     stopAfterLoadingProgress()
     setAfterVerdict(
       buildAfterPlaceholder(
-        "Project context received. NoRetry is grounding the review with your newly added information.",
+        "Project context received. reeva AI is grounding the review with your newly added information.",
         [
           "This gives the next analysis more signal from your architecture, current bug, and latest findings before it judges the earlier answer."
         ],
@@ -613,16 +649,28 @@ export default function PromptOptimizerApp() {
       setReviewTypingState({
         active: false,
         promptText: "",
-        sessionKey: null
+        sessionKey: null,
+        goalContract: null,
+        preflight: null
       })
       return
     }
 
     const sessionKey = buildPromptModeSessionKey(trimmedPrompt)
+    const goalContract = normalizeGoalContract({
+      promptText: trimmedPrompt,
+      taskFamily: mapPromptIntentToTaskType(beforeResult?.intent ?? "OTHER")
+    })
+    const preflight = buildPreflightAssessment({
+      goalContract,
+      promptText: trimmedPrompt
+    })
     setReviewTypingState({
       active: true,
       promptText: trimmedPrompt,
-      sessionKey
+      sessionKey,
+      goalContract,
+      preflight
     })
 
     if (reviewTypingTimeoutRef.current) {
@@ -635,7 +683,9 @@ export default function PromptOptimizerApp() {
         setReviewTypingState({
           active: false,
           promptText: "",
-          sessionKey: null
+          sessionKey: null,
+          goalContract: null,
+          preflight: null
         })
         reviewTypingTimeoutRef.current = null
         return
@@ -651,6 +701,29 @@ export default function PromptOptimizerApp() {
 
   function getCurrentAssistantSnapshot() {
     return getActiveSurfaceAdapter().getLatestAssistantResponse()
+  }
+
+  function getCurrentReviewPromptSnapshot() {
+    const liveSnapshot = getCurrentUserSnapshot()
+    const liveText = liveSnapshot.text.trim()
+    if (liveText) {
+      return {
+        ...liveSnapshot,
+        text: liveText
+      }
+    }
+
+    const fallbackText =
+      pendingPromptRef.current?.prompt.trim() ||
+      lastSubmittedOrAppliedPromptRef.current.trim() ||
+      lastStablePromptValueRef.current.trim() ||
+      ""
+
+    return {
+      exists: Boolean(fallbackText),
+      text: fallbackText,
+      node: liveSnapshot.node ?? null
+    }
   }
 
   function getCurrentUserSnapshot() {
@@ -749,7 +822,7 @@ export default function PromptOptimizerApp() {
             identity: snapshot.identity
           }
         },
-        getLatestUserPrompt: () => getCurrentUserSnapshot(),
+        getLatestUserPrompt: () => getCurrentReviewPromptSnapshot(),
         getThread: () => getCurrentThreadSnapshot(),
         getLatestSubmittedAttempt: () => getLatestSubmittedAttempt(),
         getReviewableAttempts: () => getRecentReviewableAttempts(),
@@ -770,7 +843,8 @@ export default function PromptOptimizerApp() {
         preprocessResponse,
         getProjectMemoryContext: () => getCompactProjectMemory(),
         collectChangedFilesSummary,
-        collectVisibleErrorSummary
+        collectVisibleErrorSummary,
+        refinePrompt: (request) => refinePrompt(request)
       })
     }
 
@@ -870,8 +944,19 @@ export default function PromptOptimizerApp() {
     }
   }
 
-  async function copyReviewPopupPrompt(prompt: string) {
-    await navigator.clipboard.writeText(prompt)
+  async function submitReviewPopupPrompt(prompt: string) {
+    const normalizedPrompt = prompt.trim()
+    if (!normalizedPrompt) return
+
+    const draftSnapshot = getCurrentDraftSnapshot()
+    const sourcePrompt = draftSnapshot.text.trim() || promptPreview.trim() || normalizedPrompt
+
+    lastStablePromptValueRef.current = normalizedPrompt
+    getActiveSurfaceAdapter().writeDraftPrompt(normalizedPrompt)
+    setPromptPreview(normalizedPrompt.slice(0, 220))
+    updateReviewTypingState(normalizedPrompt)
+    await saveDraftAttempt(sourcePrompt, normalizedPrompt)
+    setReviewPopupOpen(false)
   }
 
   async function runReviewSignalAnalysis(reason: string) {
@@ -1468,6 +1553,8 @@ export default function PromptOptimizerApp() {
         sessionKey: null,
         sourcePrompt: "",
         planningGoal: "",
+        goalContract: null,
+        promptContract: null,
         planningAttempt: null,
         analysisSeed: null,
         localAnalysis: null,
@@ -1488,7 +1575,9 @@ export default function PromptOptimizerApp() {
       setReviewTypingState({
         active: false,
         promptText: "",
-        sessionKey: null
+        sessionKey: null,
+        goalContract: null,
+        preflight: null
       })
       setIsEvaluatingAfterResponse(false)
       setIsDeepAnalyzingAfterResponse(false)
@@ -1556,7 +1645,7 @@ export default function PromptOptimizerApp() {
         buildAfterPlaceholder(
           "Your project memory is saved and ready.",
           [
-            "Continue with Replit and come back after the next real project answer. NoRetry will start reviewing from that point forward."
+            "Continue with Replit and come back after the next real project answer. reeva AI will start reviewing from that point forward."
           ],
           ""
         )
@@ -1590,7 +1679,7 @@ export default function PromptOptimizerApp() {
         buildAfterPlaceholder(
           "Before I review this, I need project context so I don’t judge your work out of context.",
           [
-            "Paste the Replit handoff below. After you save it, NoRetry will return to your latest project answer and review it automatically."
+            "Paste the Replit handoff below. After you save it, reeva AI will return to your latest project answer and review it automatically."
           ],
           ""
         )
@@ -1691,7 +1780,7 @@ export default function PromptOptimizerApp() {
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
-            "NoRetry could not capture the latest AI answer yet.",
+            "reeva AI could not capture the latest AI answer yet.",
             ["Wait for the answer to finish, then click the thunder again."],
             "Please restate your final result, list the concrete changes you made, and verify whether the original request is now fully satisfied."
           )
@@ -1700,7 +1789,7 @@ export default function PromptOptimizerApp() {
     } catch (error) {
       setAfterVerdict(
         buildAfterPlaceholder(
-          error instanceof Error ? error.message : "NoRetry hit a problem while analyzing the latest answer.",
+          error instanceof Error ? error.message : "reeva AI hit a problem while analyzing the latest answer.",
           ["Try clicking the thunder again after the response fully settles."],
           "Analyze your last answer again. Tell me exactly what you changed, what remains missing, and give me the next focused prompt to continue."
         )
@@ -1741,7 +1830,7 @@ export default function PromptOptimizerApp() {
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
-            "NoRetry could not re-open the latest AI answer for a deeper review.",
+            "reeva AI could not re-open the latest AI answer for a deeper review.",
             ["Wait for the answer to finish, then try Deep Analyze again."],
             afterVerdict.next_prompt
           )
@@ -1750,7 +1839,7 @@ export default function PromptOptimizerApp() {
     } catch (error) {
       setAfterVerdict(
         buildAfterPlaceholder(
-          error instanceof Error ? error.message : "NoRetry could not complete a deeper review.",
+          error instanceof Error ? error.message : "reeva AI could not complete a deeper review.",
           ["Try Deep Analyze again after the response fully settles."],
           afterVerdict.next_prompt
         )
@@ -1803,7 +1892,7 @@ export default function PromptOptimizerApp() {
       if (!opened) {
         setAfterVerdict(
           buildAfterPlaceholder(
-            "NoRetry could not reopen the latest AI answer for a quick review.",
+            "reeva AI could not reopen the latest AI answer for a quick review.",
             ["Try switching analysis mode again after the answer fully settles."],
             afterVerdict.next_prompt
           )
@@ -1812,7 +1901,7 @@ export default function PromptOptimizerApp() {
     } catch (error) {
       setAfterVerdict(
         buildAfterPlaceholder(
-          error instanceof Error ? error.message : "NoRetry could not switch back to quick review.",
+          error instanceof Error ? error.message : "reeva AI could not switch back to quick review.",
           ["Try switching analysis mode again after the answer fully settles."],
           afterVerdict.next_prompt
         )
@@ -1834,7 +1923,7 @@ export default function PromptOptimizerApp() {
         },
         onOpenChange: setReviewPopupOpen,
         onCopyPrompt: (prompt) => {
-          void copyReviewPopupPrompt(prompt)
+          void submitReviewPopupPrompt(prompt)
         }
       })
     }
@@ -1858,6 +1947,21 @@ export default function PromptOptimizerApp() {
     }
 
     return reviewPromptModeOrchestratorRef.current
+  }
+
+  function getReviewPromptModeV2Orchestrator() {
+    if (!reviewPromptModeV2OrchestratorRef.current) {
+      reviewPromptModeV2OrchestratorRef.current = createReviewPromptModeV2Orchestrator({
+        getSurface: () => getPromptSurface(),
+        getSessionSummary: () => summarizeSessionMemory(currentSession) ?? null,
+        extendQuestions: (request) => extendQuestions(request),
+        onStateChange: (nextState) => {
+          setReviewPromptModeV2State(nextState)
+        }
+      })
+    }
+
+    return reviewPromptModeV2OrchestratorRef.current
   }
 
   async function handleOpenReviewPopup() {
@@ -1885,6 +1989,18 @@ export default function PromptOptimizerApp() {
       setReviewPopupSurface("prompt_mode")
       setReviewPopupOpen(true)
       await getReviewPromptModeOrchestrator().open({
+        promptText: currentDraft,
+        beforeIntent: beforeResult?.intent
+      })
+      return
+    }
+
+    if (surface === "prompt_mode_v2") {
+      const currentDraft = getCurrentDraftSnapshot().text.trim()
+      if (!currentDraft) return
+      setReviewPopupSurface("prompt_mode_v2")
+      setReviewPopupOpen(true)
+      await getReviewPromptModeV2Orchestrator().open({
         promptText: currentDraft,
         beforeIntent: beforeResult?.intent
       })
@@ -2274,6 +2390,22 @@ export default function PromptOptimizerApp() {
     }
     await saveDraftAttempt(sourcePrompt, afterNextPromptDraft.trim())
     setAfterPanelOpen(false)
+  }
+
+  async function handleSubmitReviewPromptModeDraft() {
+    const draftSnapshot = getCurrentDraftSnapshot()
+    if (!draftSnapshot.exists || !reviewPromptModeState.promptReady || !reviewPromptModeState.promptDraft.trim()) return
+
+    const normalizedPrompt = reviewPromptModeState.promptDraft.trim()
+    const sourcePrompt =
+      reviewPromptModeState.sourcePrompt.trim() || draftSnapshot.text.trim() || promptPreview.trim() || normalizedPrompt
+
+    lastStablePromptValueRef.current = normalizedPrompt
+    getActiveSurfaceAdapter().writeDraftPrompt(normalizedPrompt)
+    setPromptPreview(normalizedPrompt.slice(0, 220))
+    updateReviewTypingState(normalizedPrompt)
+    await saveDraftAttempt(sourcePrompt, normalizedPrompt)
+    setReviewPopupOpen(false)
   }
 
   async function handleSaveProjectMemory() {
@@ -2667,7 +2799,15 @@ export default function PromptOptimizerApp() {
   }
 
   const displayedReviewSignal = reviewTypingState.active
-    ? createTypingReviewSignal(reviewTypingState.sessionKey)
+    ? mapPreflightAssessmentToTypingSignal({
+        assessment: reviewTypingState.preflight ?? {
+          riskLevel: "low",
+          signals: [],
+          topSignal: null,
+          summary: "Shape this prompt before sending"
+        },
+        promptKey: reviewTypingState.sessionKey
+      })
     : reviewSignal
 
   const reviewPopupSurfaceActions: {
@@ -2694,10 +2834,10 @@ export default function PromptOptimizerApp() {
     reviewPromptModeState.promptReady && reviewPromptModeState.promptDraft.trim()
       ? [
           {
-            id: "copy-prompt-mode-draft",
-            label: "Copy prompt",
+            id: "submit-prompt-mode-draft",
+            label: "Submit prompt",
             kind: "primary" as const,
-            onClick: () => void copyReviewPopupPrompt(reviewPromptModeState.promptDraft)
+            onClick: () => void handleSubmitReviewPromptModeDraft()
           }
         ]
       : []
@@ -2705,6 +2845,7 @@ export default function PromptOptimizerApp() {
   const reviewPromptQuestions = reviewPromptModeState.questionHistory.length
     ? reviewPromptModeState.questionHistory
     : reviewPromptModeState.currentLevelQuestions
+  const reviewPromptModeV2Questions = reviewPromptModeV2State.questionHistory
 
   async function syncPromptFromPage() {
     const latestInput = findPromptInput()
@@ -3077,6 +3218,7 @@ export default function PromptOptimizerApp() {
         surface={reviewPopupSurface}
         viewModel={reviewPopupViewModel}
         promptModeState={reviewPromptModeState}
+        promptModeV2State={reviewPromptModeV2State}
         surfaceActions={reviewPopupSurfaceActions}
         promptActions={reviewPromptActions}
         onPromptQuestionIndexChange={(index) => getReviewPromptModeOrchestrator().setActiveQuestionIndex(index)}
@@ -3085,6 +3227,17 @@ export default function PromptOptimizerApp() {
           if (!question) return
           void getReviewPromptModeOrchestrator().setAnswer(question, value)
         }}
+        onPromptToggleMultiAnswer={(questionId, value) => {
+          const question = reviewPromptQuestions.find((item) => item.id === questionId)
+          if (!question) return
+          const existing = reviewPromptModeState.answerState[questionId]
+          const next = Array.isArray(existing)
+            ? existing.includes(value)
+              ? existing.filter((item) => item !== value)
+              : [...existing, value]
+            : [value]
+          getReviewPromptModeOrchestrator().setAnswerDraft(question, next)
+        }}
         onPromptOtherAnswerChange={(questionId, value) => {
           const question = reviewPromptQuestions.find((item) => item.id === questionId)
           if (!question) return
@@ -3092,6 +3245,27 @@ export default function PromptOptimizerApp() {
         }}
         onPromptAdvanceOther={() => void getReviewPromptModeOrchestrator().advanceOther()}
         onPromptGenerate={() => void getReviewPromptModeOrchestrator().generatePrompt()}
+        onPromptV2TaskTypeSelect={(taskType) => getReviewPromptModeV2Orchestrator().selectTaskType(taskType)}
+        onPromptV2ContinueFromEntry={() => getReviewPromptModeV2Orchestrator().continueFromEntry()}
+        onPromptV2QuestionIndexChange={(index) => getReviewPromptModeV2Orchestrator().setActiveQuestionIndex(index)}
+        onPromptV2QuestionAnswerChange={(questionId, value) => {
+          const question = reviewPromptModeV2Questions.find((item) => item.id === questionId)
+          if (!question) return
+          void getReviewPromptModeV2Orchestrator().setAnswer(question, value)
+        }}
+        onPromptV2QuestionMultiToggle={(questionId, value) => {
+          const question = reviewPromptModeV2Questions.find((item) => item.id === questionId)
+          if (!question) return
+          const existing = reviewPromptModeV2State.answerState[questionId]
+          const next = Array.isArray(existing)
+            ? existing.includes(value)
+              ? existing.filter((item) => item !== value)
+              : [...existing, value]
+            : [value]
+          getReviewPromptModeV2Orchestrator().setAnswerDraft(question, next)
+        }}
+        onPromptV2ContinueQuestion={() => getReviewPromptModeV2Orchestrator().continueQuestion()}
+        onPromptV2Generate={() => getReviewPromptModeV2Orchestrator().generatePrompt()}
         onClose={() => {
           reviewPopupOrchestratorRef.current?.close()
           setReviewPopupSurface("answer_mode")

@@ -35,7 +35,7 @@ export const mockReviewStates: Record<ReviewPopupMockState, ReviewPopupViewModel
     state: "quick_review",
     eyebrow: "Review popup",
     title: "After response",
-    statusBadge: { label: "Not clear yet", tone: "info" },
+    statusBadge: { label: "Needs review", tone: "info" },
     decision: "Validate this before proceeding",
     recommendedAction: "Ask for visible proof before you keep building on this answer.",
     promptLabel: "Recommended next prompt",

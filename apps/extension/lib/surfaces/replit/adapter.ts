@@ -348,7 +348,7 @@ function buildDomObservationArtifacts(reviewContract: ReviewContract | null): Ar
       : "Prompt textarea did not show enough visible prompt text to confirm replacement."
   )
 
-  const popup = findVisibleElementByText(/\b(auth state|usage|strengthen|prompt optimizer|noretry)\b/i, ["dialog", "aside", "section", "[role='dialog']", "[class*='popup' i]"])
+  const popup = findVisibleElementByText(/\b(auth state|usage|strengthen|prompt optimizer|noretry|reeva ai)\b/i, ["dialog", "aside", "section", "[role='dialog']", "[class*='popup' i]"])
   pushObservation(
     "popup_visible",
     "extension_popup",

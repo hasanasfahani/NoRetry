@@ -1,0 +1,33 @@
+{
+  "id": "prompt-optimization-improve",
+  "label": "Prompt optimization - clarify coding prompt",
+  "taskType": "prompt_optimization",
+  "promptText": "Optimize this coding prompt so it preserves constraints better and returns a cleaner final answer.",
+  "beforeIntent": "BUILD",
+  "legacy": {
+    "questions": [
+      {
+        "id": "legacy-prompt-1",
+        "label": "What should the next prompt lock down first?",
+        "helper": "Pick the first thing the next prompt should make explicit.",
+        "options": ["Exact output", "Key constraint", "Success criteria", "Scope limit", "Other"],
+        "answer": "Exact output"
+      },
+      {
+        "id": "legacy-prompt-2",
+        "label": "What should the next answer optimize first?",
+        "helper": "Pick the strongest improvement target.",
+        "options": ["Clearer constraints", "Stronger structure", "Shorter answer", "Other"],
+        "answer": "Clearer constraints"
+      }
+    ]
+  },
+  "v2": {
+    "answers": [
+      { "sectionId": "purpose", "answer": "Generate something new" },
+      { "sectionId": "current_failure", "answer": ["Misses constraints", "Wrong output shape"] },
+      { "sectionId": "desired_improvement", "answer": ["Clearer constraints", "Better output structure"] },
+      { "sectionId": "output_format", "answer": "Prompt plus rationale" }
+    ]
+  }
+}

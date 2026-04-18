@@ -33,7 +33,7 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    color: "#4338ca",
+    color: "#0766fe",
     fontSize: 16,
     fontWeight: 800,
     cursor: "pointer"
