@@ -1,5 +1,4 @@
 import type { NextApiRequest, NextApiResponse } from "next"
-import { createClient } from "@supabase/supabase-js"
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseKey =
@@ -8,15 +7,10 @@ const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
   ""
 
-const supabase =
-  supabaseUrl && supabaseKey
-    ? createClient(supabaseUrl, supabaseKey, {
-        auth: {
-          persistSession: false,
-          autoRefreshToken: false
-        }
-      })
-    : null
+type SupabaseRestError = {
+  code?: string
+  message?: string
+}
 
 export default async function handler(request: NextApiRequest, response: NextApiResponse) {
   if (request.method !== "POST") {
@@ -31,34 +25,46 @@ export default async function handler(request: NextApiRequest, response: NextApi
     return response.status(400).json({ error: "Enter a valid name and email." })
   }
 
-  if (!supabase) {
+  if (!supabaseUrl || !supabaseKey) {
     return response.status(500).json({ error: "Supabase is not configured correctly." })
   }
 
   const normalizedEmail = email.toLowerCase()
-
-  const { error } = await supabase.from("waitlist_signups").insert({
-    name,
-    email: normalizedEmail,
-    source: "reeva-ai-demo-web"
+  const restResponse = await fetch(`${supabaseUrl}/rest/v1/waitlist_signups`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+      Prefer: "return=minimal"
+    },
+    body: JSON.stringify({
+      name,
+      email: normalizedEmail,
+      source: "reeva-ai-demo-web"
+    })
   })
 
-  if (error) {
-    if (error.code === "23505") {
+  if (!restResponse.ok) {
+    const error = (await restResponse.json().catch(() => null)) as SupabaseRestError | null
+    const errorCode = error?.code || ""
+    const errorMessage = error?.message || ""
+
+    if (restResponse.status === 409 || errorCode === "23505" || /duplicate key/i.test(errorMessage)) {
       return response.status(200).json({
         success: true,
         message: "You’re already on the list."
       })
     }
 
-    if (error.code === "42501") {
+    if (restResponse.status === 401 || restResponse.status === 403 || errorCode === "42501") {
       return response.status(500).json({
         error: "Supabase blocked the insert. Add an INSERT policy for waitlist_signups or use SUPABASE_SERVICE_ROLE_KEY."
       })
     }
 
     return response.status(500).json({
-      error: `Unable to join the waitlist right now. (${error.message})`
+      error: `Unable to join the waitlist right now. (${errorMessage || `HTTP ${restResponse.status}`})`
     })
   }
 
