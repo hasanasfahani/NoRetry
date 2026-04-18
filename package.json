@@ -12,8 +12,5 @@
     "build": "npm run build --workspaces",
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.103.3"
   }
 }
