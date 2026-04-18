@@ -4,15 +4,9 @@ import { ActionBar } from "../shared/ActionBar"
 import { ErrorState } from "../shared/ErrorState"
 import { LoadingState } from "../shared/LoadingState"
 import { PromptCard } from "../shared/PromptCard"
-import { ReviewChecklistSection } from "./ReviewChecklistSection"
-import { ReviewDecisionSummary } from "./ReviewDecisionSummary"
-import { ReviewFeedbackRow } from "./ReviewFeedbackRow"
-import { ReviewMissingItems } from "./ReviewMissingItems"
 import { ReviewPromptMode } from "./ReviewPromptMode"
 import { ReviewPopupHeader } from "./ReviewPopupHeader"
-import { ReviewProofSection } from "./ReviewProofSection"
 import type { ReviewPopupViewModel } from "./review-types"
-import { ReviewWhySection } from "./ReviewWhySection"
 import type { PopupAction } from "../shared/types"
 import type { ReviewPopupSurface, ReviewPromptModeState } from "@prompt-optimizer/shared"
 
@@ -77,7 +71,7 @@ export function ReviewPopup(props: ReviewPopupProps) {
       open={props.open}
       onClose={props.onClose}
       eyebrow={isPromptMode ? "Prompt mode" : props.viewModel.eyebrow}
-      title={isPromptMode ? "Prompt planner" : props.viewModel.title}
+      title={isPromptMode ? "Prompt planner" : ""}
     >
       {props.modeActions.length ? <ActionBar actions={props.modeActions} /> : null}
       {loadingOverlay.visible ? (
@@ -111,16 +105,6 @@ export function ReviewPopup(props: ReviewPopupProps) {
                 prompt={props.viewModel.prompt}
                 note={props.viewModel.promptNote}
               />
-              <ReviewMissingItems items={props.viewModel.missingItems} />
-              <ReviewDecisionSummary viewModel={props.viewModel} />
-              <ReviewWhySection items={props.viewModel.whyItems} />
-              <ReviewProofSection
-                summary={props.viewModel.proofSummary}
-                checked={props.viewModel.checkedArtifacts}
-                missing={props.viewModel.uncheckedArtifacts}
-              />
-              <ReviewChecklistSection items={props.viewModel.checklistRows} />
-              <ReviewFeedbackRow prompt={props.viewModel.feedbackPrompt} />
             </>
           ) : null}
         </>

@@ -22,13 +22,14 @@ import {
 } from "../../core/after-orchestration"
 import type { ReviewPromptModeState } from "../types"
 import {
-  buildPromptModeFallbackQuestions,
+  buildPromptModePromptContract,
   buildPromptModePromptPlan,
   buildPromptModeQuestionRequest,
   buildPromptModeSeedAnalysis,
   buildPromptModeSessionKey,
-  formatPromptModeStructuredDraft
+  selectPromptModeQuestions
 } from "../services/review-prompt-mode"
+import { normalizeGoalContract } from "../../goal/goal-normalizer"
 
 type PromptModeOpenInput = {
   promptText: string
@@ -73,6 +74,8 @@ function buildInitialState(): ReviewPromptModeState {
     sessionKey: null,
     sourcePrompt: "",
     planningGoal: "",
+    goalContract: null,
+    promptContract: null,
     planningAttempt: null,
     analysisSeed: null,
     localAnalysis: null,
@@ -128,7 +131,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     promptText: string
     localAnalysis: AnalyzePromptResponse
     existingQuestions: ClarificationQuestion[]
-    answerState: Record<string, string>
+    answerState: Record<string, string | string[]>
     otherAnswerState: Record<string, string>
   }) {
     return input.extendQuestions(
@@ -150,7 +153,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       emit({
         ...buildInitialState(),
         popupState: "error",
-        errorMessage: "Type a prompt first so NoRetry can shape the next-step questions."
+        errorMessage: "Type a prompt first so reeva AI can shape the next-step questions."
       })
       return
     }
@@ -162,7 +165,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     }
 
     const request = ++requestId
-    console.debug("[NoRetry][ReviewPromptMode]", "open", {
+    console.debug("[reeva AI][ReviewPromptMode]", "open", {
       promptLength: promptText.length
     })
     const seed = buildPromptModeSeedAnalysis({
@@ -171,6 +174,10 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       beforeIntent: params.beforeIntent,
       sessionSummary: input.getSessionSummary()
     })
+    const goalContract = normalizeGoalContract({
+      promptText,
+      taskFamily: mapTaskTypeToPromptIntent(seed.planningAttempt.intent.task_type).toLowerCase()
+    })
 
     emit({
       ...buildInitialState(),
@@ -178,6 +185,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       sessionKey,
       sourcePrompt: promptText,
       planningGoal: promptText,
+      goalContract,
       planningAttempt: seed.planningAttempt,
       analysisSeed: seed.seedAnalysis,
       localAnalysis: seed.localAnalysis,
@@ -196,13 +204,13 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       if (request !== requestId) return
 
       const returnedQuestions = getReturnedQuestions(result)
-      const nextState =
-        returnedQuestions.length
-          ? buildInitialPlannerState(returnedQuestions, 1)
-          : buildPromptModeFallbackQuestions({
-              promptText,
-              localAnalysis: seed.localAnalysis
-            })
+      const selectedQuestions = selectPromptModeQuestions({
+        goalContract,
+        localAnalysis: seed.localAnalysis,
+        questions: returnedQuestions,
+        promptText
+      })
+      const nextState = buildInitialPlannerState(selectedQuestions, 1)
 
       emit({
         ...buildInitialState(),
@@ -210,6 +218,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         sessionKey,
         sourcePrompt: promptText,
         planningGoal: promptText,
+        goalContract,
         planningAttempt: seed.planningAttempt,
         analysisSeed: seed.seedAnalysis,
         localAnalysis: seed.localAnalysis,
@@ -220,7 +229,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         activeQuestionIndex: nextState.activeQuestionIndex,
         isLoadingQuestions: false
       })
-      console.debug("[NoRetry][ReviewPromptMode]", "first question level ready", {
+      console.debug("[reeva AI][ReviewPromptMode]", "first question level ready", {
         sessionKey,
         questionCount: nextState.questionHistory.length,
         level: nextState.currentLevel
@@ -233,10 +242,11 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         sessionKey,
         sourcePrompt: promptText,
         planningGoal: promptText,
+        goalContract,
         planningAttempt: seed.planningAttempt,
         analysisSeed: seed.seedAnalysis,
         localAnalysis: seed.localAnalysis,
-        errorMessage: error instanceof Error ? error.message : "NoRetry couldn't start the prompt tree safely."
+        errorMessage: error instanceof Error ? error.message : "reeva AI couldn't start the prompt tree safely."
       })
     }
   }
@@ -275,6 +285,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       otherAnswerState: pruned.otherAnswerState,
       questionLevels: pruned.questionLevels,
       activeQuestionIndex: pruned.activeQuestionIndex,
+      promptContract: null,
       promptDraft: "",
       promptReady: false,
       isLoadingQuestions: false,
@@ -312,6 +323,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     patch({
       answerState: advance.mergedAnswers,
       promptReady: false,
+      promptContract: null,
       promptDraft: ""
     })
 
@@ -331,7 +343,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
 
     const request = ++requestId
     patch({ isLoadingQuestions: true })
-    console.debug("[NoRetry][ReviewPromptMode]", "requesting deeper branch", {
+    console.debug("[reeva AI][ReviewPromptMode]", "requesting deeper branch", {
       sessionKey: state.sessionKey,
       questionId,
       currentLevel: advance.currentLevel,
@@ -349,23 +361,29 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       if (request !== requestId) return
 
       const returnedQuestions = getReturnedQuestions(result)
-      if (returnedQuestions.length) {
+      const selectedQuestions = selectPromptModeQuestions({
+        goalContract: state.goalContract,
+        localAnalysis: state.localAnalysis,
+        questions: returnedQuestions,
+        promptText: state.sourcePrompt
+      })
+      if (selectedQuestions.length) {
         const nextLevel = Math.max(advance.currentLevel + 1, state.currentLevel + 1)
         patch({
-          questionHistory: mergeUniqueQuestions(state.questionHistory, returnedQuestions),
-          currentLevelQuestions: returnedQuestions,
+          questionHistory: mergeUniqueQuestions(state.questionHistory, selectedQuestions),
+          currentLevelQuestions: selectedQuestions,
           questionLevels: {
             ...state.questionLevels,
-            ...buildLevelMap(returnedQuestions, nextLevel)
+            ...buildLevelMap(selectedQuestions, nextLevel)
           },
           currentLevel: nextLevel,
           activeQuestionIndex: advance.askedQuestions.length,
           isLoadingQuestions: false
         })
-        console.debug("[NoRetry][ReviewPromptMode]", "branch advanced", {
+        console.debug("[reeva AI][ReviewPromptMode]", "branch advanced", {
           sessionKey: state.sessionKey,
           nextLevel,
-          questionCount: returnedQuestions.length
+          questionCount: selectedQuestions.length
         })
         return
       }
@@ -386,6 +404,17 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     }
   }
 
+  function setAnswerDraft(question: ClarificationQuestion, value: string | string[]) {
+    patch({
+      answerState: {
+        ...state.answerState,
+        [question.id]: value
+      },
+      promptReady: false,
+      promptDraft: ""
+    })
+  }
+
   async function setAnswer(question: ClarificationQuestion, value: string) {
     if (state.isLoadingQuestions) return
 
@@ -398,14 +427,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       questionLevels: state.questionLevels
     })
 
-    patch({
-      answerState: {
-        ...state.answerState,
-        [question.id]: value
-      },
-      promptReady: false,
-      promptDraft: ""
-    })
+    setAnswerDraft(question, value)
 
     if (
       shouldRebuildPlannerBranch({
@@ -472,7 +494,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     if (!state.planningAttempt || !state.analysisSeed || !state.planningGoal.trim()) return
 
     const request = ++requestId
-    console.debug("[NoRetry][ReviewPromptMode]", "generate prompt", {
+    console.debug("[reeva AI][ReviewPromptMode]", "generate prompt", {
       sessionKey: state.sessionKey,
       answeredCount: Object.keys(state.answerState).length
     })
@@ -524,7 +546,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         sessionSummary: input.getSessionSummary() ?? undefined
       })
 
-      const structuredPrompt = formatPromptModeStructuredDraft({
+      const promptContract = buildPromptModePromptContract({
         sourcePrompt: state.sourcePrompt,
         planningGoal: state.planningGoal,
         refinedPrompt: result.improved_prompt,
@@ -532,20 +554,23 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         answeredPath,
         constraints: (state.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
       })
+      const structuredPrompt = promptContract.renderedPrompt
 
       if (request !== requestId) return
       patch({
+        goalContract: promptContract.goalContract,
+        promptContract,
         promptDraft: structuredPrompt,
         promptReady: true,
         isGeneratingPrompt: false
       })
-      console.debug("[NoRetry][ReviewPromptMode]", "prompt ready", {
+      console.debug("[reeva AI][ReviewPromptMode]", "prompt ready", {
         sessionKey: state.sessionKey,
         promptLength: structuredPrompt.length
       })
     } catch {
       if (request !== requestId) return
-      const structuredFallback = formatPromptModeStructuredDraft({
+      const promptContract = buildPromptModePromptContract({
         sourcePrompt: state.sourcePrompt,
         planningGoal: state.planningGoal,
         refinedPrompt: localFallback,
@@ -553,12 +578,15 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         answeredPath,
         constraints: (state.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
       })
+      const structuredFallback = promptContract.renderedPrompt
       patch({
+        goalContract: promptContract.goalContract,
+        promptContract,
         promptDraft: structuredFallback,
         promptReady: true,
         isGeneratingPrompt: false
       })
-      console.debug("[NoRetry][ReviewPromptMode]", "prompt ready from fallback", {
+      console.debug("[reeva AI][ReviewPromptMode]", "prompt ready from fallback", {
         sessionKey: state.sessionKey,
         promptLength: structuredFallback.length
       })
@@ -579,6 +607,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     getState,
     reset,
     setActiveQuestionIndex,
+    setAnswerDraft,
     setAnswer,
     setOtherAnswer,
     advanceOther,

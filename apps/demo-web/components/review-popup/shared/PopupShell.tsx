@@ -19,7 +19,7 @@ export function PopupShell(props: PopupShellProps) {
           <div style={styles.titleWrap}>
             <ReviewPopupBrand />
             {props.eyebrow ? <p style={styles.eyebrow}>{props.eyebrow}</p> : null}
-            <h3 style={styles.title}>{props.title}</h3>
+            {props.title.trim() ? <h3 style={styles.title}>{props.title}</h3> : null}
           </div>
           <button type="button" style={styles.closeButton} onClick={props.onClose} aria-label="Close">
             ×
@@ -35,11 +35,11 @@ function ReviewPopupBrand() {
   return (
     <div style={styles.brandRow} aria-label="reeva AI">
       <svg viewBox="0 0 1024 1024" style={styles.brandIcon} aria-hidden="true">
-        <circle cx="512" cy="512" r="305" fill="none" stroke="#1E6DEB" strokeWidth="38" />
-        <circle cx="512" cy="512" r="228" fill="none" stroke="#1E6DEB" strokeWidth="34" />
-        <circle cx="512" cy="512" r="153" fill="none" stroke="#1E6DEB" strokeWidth="30" />
-        <circle cx="512" cy="512" r="85" fill="none" stroke="#1E6DEB" strokeWidth="26" />
-        <circle cx="512" cy="512" r="28" fill="#1E6DEB" />
+        <circle cx="512" cy="512" r="305" fill="none" stroke="#0766fe" strokeWidth="38" />
+        <circle cx="512" cy="512" r="228" fill="none" stroke="#0766fe" strokeWidth="34" />
+        <circle cx="512" cy="512" r="153" fill="none" stroke="#0766fe" strokeWidth="30" />
+        <circle cx="512" cy="512" r="85" fill="none" stroke="#0766fe" strokeWidth="26" />
+        <circle cx="512" cy="512" r="28" fill="#0766fe" />
         <path d="M452 186L512 154L572 186L540 236H484L452 186Z" fill="#ffffff" />
       </svg>
       <span style={styles.brandWordmark}>reeva AI</span>

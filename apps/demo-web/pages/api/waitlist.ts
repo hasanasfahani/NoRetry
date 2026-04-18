@@ -1,4 +1,22 @@
 import type { NextApiRequest, NextApiResponse } from "next"
+import { createClient } from "@supabase/supabase-js"
+
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const supabaseKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  ""
+
+const supabase =
+  supabaseUrl && supabaseKey
+    ? createClient(supabaseUrl, supabaseKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false
+        }
+      })
+    : null
 
 export default async function handler(request: NextApiRequest, response: NextApiResponse) {
   if (request.method !== "POST") {
@@ -13,20 +31,35 @@ export default async function handler(request: NextApiRequest, response: NextApi
     return response.status(400).json({ error: "Enter a valid name and email." })
   }
 
-  const webhook = process.env.REEVA_WAITLIST_WEBHOOK_URL
+  if (!supabase) {
+    return response.status(500).json({ error: "Supabase is not configured correctly." })
+  }
 
-  if (webhook) {
-    await fetch(webhook, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        name,
-        email,
-        source: "reeva-ai-demo-web"
+  const normalizedEmail = email.toLowerCase()
+
+  const { error } = await supabase.from("waitlist_signups").insert({
+    name,
+    email: normalizedEmail,
+    source: "reeva-ai-demo-web"
+  })
+
+  if (error) {
+    if (error.code === "23505") {
+      return response.status(200).json({
+        success: true,
+        message: "You’re already on the list."
       })
-    }).catch(() => null)
+    }
+
+    if (error.code === "42501") {
+      return response.status(500).json({
+        error: "Supabase blocked the insert. Add an INSERT policy for waitlist_signups or use SUPABASE_SERVICE_ROLE_KEY."
+      })
+    }
+
+    return response.status(500).json({
+      error: `Unable to join the waitlist right now. (${error.message})`
+    })
   }
 
   return response.status(200).json({

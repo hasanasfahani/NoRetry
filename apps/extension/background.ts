@@ -32,7 +32,7 @@ type AfterPipelineMessage = {
 const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
 const REQUEST_TIMEOUT_MS = 8000
 const KIMI_API_KEY = process.env.PLASMO_PUBLIC_KIMI_API_KEY || ""
-const KIMI_MODEL = process.env.PLASMO_PUBLIC_KIMI_MODEL || "kimi-k2-turbo-preview"
+const KIMI_MODEL = process.env.PLASMO_PUBLIC_KIMI_MODEL || "kimi-k2.5"
 const DEEPSEEK_API_KEY = process.env.PLASMO_PUBLIC_DEEPSEEK_API_KEY || ""
 const DEEPSEEK_MODEL = process.env.PLASMO_PUBLIC_DEEPSEEK_MODEL || "deepseek-chat"
 

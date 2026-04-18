@@ -31,6 +31,12 @@ function normalizePromptText(value: string) {
   return value.replace(/\s+/g, " ").trim()
 }
 
+function normalizeAttemptResponseText(normalizeResponseText: (value: string) => string, attempt: Attempt) {
+  const responseText = attempt.response_text?.trim() ?? ""
+  if (!responseText) return ""
+  return normalizePromptText(normalizeResponseText(responseText))
+}
+
 function matchesSubmittedAttempt(latestUserPrompt: string, attempt: Attempt) {
   if (!latestUserPrompt) return true
 
@@ -42,13 +48,52 @@ function matchesSubmittedAttempt(latestUserPrompt: string, attempt: Attempt) {
   return candidates.includes(normalizedPrompt)
 }
 
+function buildPromptCandidates(latestUserPrompt: string, attempt: Attempt | null) {
+  const candidates = new Set<string>()
+
+  if (latestUserPrompt) {
+    const normalizedLatestPrompt = normalizePromptText(latestUserPrompt)
+    if (normalizedLatestPrompt) candidates.add(normalizedLatestPrompt)
+  }
+
+  if (!attempt) return candidates
+
+  for (const value of [attempt.raw_prompt, attempt.optimized_prompt]) {
+    const normalizedValue = normalizePromptText(value)
+    if (normalizedValue) candidates.add(normalizedValue)
+  }
+
+  return candidates
+}
+
+function matchesResolvedAssistantResponse(params: {
+  attempt: Attempt
+  responseIdentity: string
+  responseText: string
+  normalizeResponseText: (value: string) => string
+}) {
+  const { attempt, responseIdentity, responseText, normalizeResponseText } = params
+  const normalizedCurrentResponse = normalizePromptText(normalizeResponseText(responseText))
+  const normalizedAttemptResponse = normalizeAttemptResponseText(normalizeResponseText, attempt)
+
+  if (responseIdentity && attempt.response_message_id && attempt.response_message_id === responseIdentity) {
+    return true
+  }
+
+  if (normalizedCurrentResponse && normalizedAttemptResponse && normalizedAttemptResponse === normalizedCurrentResponse) {
+    return true
+  }
+
+  return false
+}
+
 function logReviewTarget(message: string, details?: Record<string, unknown>) {
   if (details) {
-    console.debug("[NoRetry][ReviewTarget]", message, details)
+    console.debug("[reeva AI][ReviewTarget]", message, details)
     return
   }
 
-  console.debug("[NoRetry][ReviewTarget]", message)
+  console.debug("[reeva AI][ReviewTarget]", message)
 }
 
 export function createReviewTargetResolver(input: CreateReviewTargetResolverInput) {
@@ -64,20 +109,31 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
     }
 
     const latestUserPrompt = input.getLatestUserPrompt().text.trim()
+    const responseIdentity = assistant.identity || input.readAssistantMessageIdentity(assistant.node, assistant.text)
     const latestSubmittedAttempt = await input.getLatestSubmittedAttempt()
     const reviewableAttempts =
       (await input.getReviewableAttempts?.()) ??
       (latestSubmittedAttempt ? [latestSubmittedAttempt] : [])
 
     const latestAttempt = reviewableAttempts[0] ?? null
+    const responseMatchedAttempt =
+      reviewableAttempts.find((candidate) =>
+        matchesResolvedAssistantResponse({
+          attempt: candidate,
+          responseIdentity,
+          responseText: assistant.text,
+          normalizeResponseText: input.normalizeResponseText
+        })
+      ) ?? null
     let attempt =
       latestUserPrompt
         ? reviewableAttempts.find((candidate) => matchesSubmittedAttempt(latestUserPrompt, candidate)) ?? null
-        : latestAttempt
+        : responseMatchedAttempt ?? latestAttempt
 
     logReviewTarget("latest submitted attempt read", {
       attemptId: attempt?.attempt_id ?? null,
       latestAttemptId: latestAttempt?.attempt_id ?? null,
+      responseMatchedAttemptId: responseMatchedAttempt?.attempt_id ?? null,
       candidateCount: reviewableAttempts.length,
       latestUserPromptLength: latestUserPrompt.length,
       rawPromptLength: attempt?.raw_prompt?.length ?? 0,
@@ -85,10 +141,13 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
       responseLength: responseText.length
     })
 
-    if (!attempt && input.ensureSubmittedAttempt) {
-      attempt = await input.ensureSubmittedAttempt()
+    if ((!attempt || (!latestUserPrompt && !responseMatchedAttempt)) && input.ensureSubmittedAttempt) {
+      const ensuredAttempt = await input.ensureSubmittedAttempt()
+      if (ensuredAttempt) {
+        attempt = ensuredAttempt
+      }
       logReviewTarget("ensure submitted attempt fallback used", {
-        attemptId: attempt?.attempt_id ?? null,
+        attemptId: ensuredAttempt?.attempt_id ?? null,
         latestUserPromptLength: latestUserPrompt.length
       })
     }
@@ -118,8 +177,24 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
       }
     }
 
+    if (!latestUserPrompt && responseMatchedAttempt) {
+      attempt = responseMatchedAttempt
+    }
+
+    const normalizedResponseText = normalizePromptText(responseText)
+    const promptCandidates = buildPromptCandidates(latestUserPrompt, attempt)
+    if (normalizedResponseText && promptCandidates.has(normalizedResponseText)) {
+      logReviewTarget("target resolution failed", {
+        reason: "no_response",
+        echoedPrompt: true,
+        attemptId: attempt.attempt_id,
+        latestUserPromptLength: latestUserPrompt.length,
+        responseLength: responseText.length
+      })
+      return { ok: false, reason: "no_response" }
+    }
+
     const threadIdentity = input.getThread().identity
-    const responseIdentity = assistant.identity || input.readAssistantMessageIdentity(assistant.node, assistant.text)
 
     logReviewTarget("target resolution succeeded", {
       attemptId: attempt.attempt_id,

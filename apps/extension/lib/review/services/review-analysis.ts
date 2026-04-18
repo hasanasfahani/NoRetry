@@ -1,4 +1,9 @@
 import type { AfterAnalysisResult, ResponsePreprocessorOutput, Stage1Output, Stage2Output, VerdictOutput } from "@prompt-optimizer/shared/src/schemas"
+import type { GoalContract } from "../../goal/types"
+import { normalizeGoalContract } from "../../goal/goal-normalizer"
+import type { ReviewContract as NormalizedReviewContract } from "../contracts"
+import { buildAnalysisPromptSection } from "../analysis-prompt-section"
+import { buildReviewContract } from "../review-contract-builder"
 import type { ReviewTarget } from "../types"
 import { isAnswerQualityTask, looksLikeAdviceRequestPrompt, looksLikeCreationRequestPrompt } from "./review-task-type"
 
@@ -9,6 +14,13 @@ export type ReviewAnalysisInput = {
 }
 
 export type ReviewAnalysisRunner = (input: ReviewAnalysisInput) => Promise<AfterAnalysisResult>
+
+export type ReviewAnalysisContext = {
+  goalContract: GoalContract | null
+  reviewContract: NormalizedReviewContract | null
+  chosenChecklistSource: "decomposed" | "prompt_artifact" | "informational_generic" | "fallback_structured" | "backend"
+  sanitizationChanges: string[]
+}
 
 type CreateReviewAnalysisRunnerInput = {
   analyzeAfterAttempt: (input: {
@@ -34,6 +46,11 @@ type CreateReviewAnalysisRunnerInput = {
   }
   collectChangedFilesSummary: () => string[]
   collectVisibleErrorSummary: () => string
+  refinePrompt?: (input: {
+    prompt: string
+    intent: "DEBUG" | "BUILD" | "REFACTOR" | "EXPLAIN" | "DESIGN_UI" | "OTHER"
+    answers: Record<string, string | string[]>
+  }) => Promise<{ improved_prompt: string }>
 }
 
 type RuntimeSignal = {
@@ -46,6 +63,9 @@ type DecomposedChecklistEntry = {
   label: string
   status: "met" | "not_sure" | "missed"
 }
+
+const REVIEW_ANALYSIS_CONTEXT_SYMBOL = Symbol("review-analysis-context")
+const REVIEW_NEXT_MOVE_REFINE_TIMEOUT_MS = 2500
 
 const GOAL_STOPWORDS = new Set([
   "the",
@@ -2071,12 +2091,17 @@ function buildDebugContinuationResult(
   }
 }
 
-function buildInformationalReviewResult(input: {
+async function buildInformationalReviewResult(input: {
   target: ReviewTarget
   mode: "quick" | "deep"
   responseSummary: ResponsePreprocessorOutput
-}): AfterAnalysisResult {
-  const { target, mode, responseSummary } = input
+  refineNextMovePrompt?: (input: {
+    prompt: string
+    answers: Record<string, string>
+    taskType: ReviewTarget["taskType"]
+  }) => Promise<string | null>
+}): Promise<AfterAnalysisResult> {
+  const { target, mode, responseSummary, refineNextMovePrompt } = input
   const isPromptArtifact = isGeneratedPromptArtifact({
     promptText: target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || "",
     responseText: target.responseText,
@@ -2096,6 +2121,38 @@ function buildInformationalReviewResult(input: {
         responseSummary
       })
     : null
+  const goalContract = !isPromptArtifact
+    ? normalizeGoalContract({
+        promptText,
+        taskFamily: target.taskType
+      })
+    : null
+  const normalizedReviewContract =
+    !isPromptArtifact && goalContract
+      ? await buildReviewContract({
+          goalContract,
+          responseText: target.responseText,
+          responseSummary,
+          taskFamily: target.taskType
+        })
+      : null
+  const softwareLikePrompt = /\breact\b|\bnext\.?js\b|\btypescript\b|\bjavascript\b|\bpython\b|\bapi\b|\bendpoint\b|\bcomponent\b|\bpage\b|\broute\b|\bfile\b|\bfiles\b|\btest\b|\bverify\b|\bprompt\b|\breplit\b|\bcursor\b|\bclaude\b|\bvibe coding\b/i.test(promptText)
+  const broadExplanatoryPrompt = target.taskType === "explanatory" && promptText.trim().length <= 160
+  const useNormalizedReviewContract =
+    Boolean(normalizedReviewContract) &&
+    ((normalizedReviewContract?.requirements.length ?? 0) >= 3 || softwareLikePrompt || broadExplanatoryPrompt)
+
+  if (useNormalizedReviewContract && normalizedReviewContract) {
+    return buildInformationalReviewResultFromContract({
+      target,
+      mode,
+      responseSummary,
+      reviewContract: normalizedReviewContract,
+      goalContract,
+      refineNextMovePrompt
+    })
+  }
+
   const decomposedChecklist = !isPromptArtifact
     ? buildDecomposedChecklist({
         taskType: target.taskType,
@@ -2464,19 +2521,16 @@ function buildInformationalReviewResult(input: {
     issues
   }
 
-  const followUpPrompt = success
-    ? "No retry needed. The answer already addresses the question clearly enough."
-    : isPromptArtifact
-      ? `Rewrite the generated prompt, but fix only these gaps:\n${missingItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
-      : isCreation
-      ? `Generate this again, but fix only these gaps:\n${missingItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
-      : isWriting
-        ? `Rewrite this again, but fix only these gaps:\n${missingItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
-    : isInstructional
-      ? `Answer this again as a concise step-by-step guide. Fix these gaps only:\n${missingItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
-      : isAdvice || isIdeation
-        ? `Answer this again with more useful, practical suggestions. Fix these gaps only:\n${missingItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
-      : `Answer this again more clearly and completely. Fix these gaps only:\n${missingItems.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
+  const analysisPromptSection = await buildAnalysisPromptSection({
+    promptText,
+    responseText: target.responseText,
+    taskFamily: target.taskType,
+    goalContract,
+    reviewContract: normalizedReviewContract,
+    attemptAcceptanceCriteria: target.attempt.intent.acceptance_criteria ?? [],
+    refineNextMovePrompt
+  })
+  const followUpPrompt = analysisPromptSection.promptText
 
   return {
     status,
@@ -2491,7 +2545,7 @@ function buildInformationalReviewResult(input: {
     stage_2: stage2,
     verdict,
     next_prompt_output: {
-      next_prompt: followUpPrompt,
+      next_prompt: analysisPromptSection.copyPromptText,
       prompt_strategy: success ? "validate" : "retry_cleanly"
     },
     acceptance_checklist: checklist,
@@ -2499,6 +2553,180 @@ function buildInformationalReviewResult(input: {
     used_fallback_intent: false,
     token_usage_total: 0
   }
+}
+
+function mapReviewRequirementStatusToChecklistStatus(status: NormalizedReviewContract["requirements"][number]["status"]) {
+  switch (status) {
+    case "pass":
+      return "met" as const
+    case "fail":
+    case "contradicted":
+      return "missed" as const
+    default:
+      return "not_sure" as const
+  }
+}
+
+function attachReviewAnalysisContext(result: AfterAnalysisResult, context: ReviewAnalysisContext) {
+  Object.defineProperty(result, REVIEW_ANALYSIS_CONTEXT_SYMBOL, {
+    value: context,
+    enumerable: false,
+    configurable: true
+  })
+  return result
+}
+
+export function getReviewAnalysisContext(result: AfterAnalysisResult): ReviewAnalysisContext | null {
+  const context = (result as AfterAnalysisResult & {
+    [REVIEW_ANALYSIS_CONTEXT_SYMBOL]?: ReviewAnalysisContext
+  })[REVIEW_ANALYSIS_CONTEXT_SYMBOL]
+  return context ?? null
+}
+
+async function buildInformationalReviewResultFromContract(input: {
+  target: ReviewTarget
+  mode: "quick" | "deep"
+  responseSummary: ResponsePreprocessorOutput
+  reviewContract: NormalizedReviewContract
+  goalContract: GoalContract
+  refineNextMovePrompt?: (input: {
+    prompt: string
+    answers: Record<string, string>
+    taskType: ReviewTarget["taskType"]
+  }) => Promise<string | null>
+}): Promise<AfterAnalysisResult> {
+  const { target, mode, responseSummary, reviewContract, goalContract, refineNextMovePrompt } = input
+  const topFailures = reviewContract.topFailures.slice(0, 8)
+  const topPasses = reviewContract.topPasses.slice(0, 3)
+  const success = topFailures.length === 0
+  const contradictionCount = topFailures.filter((item) => item.status === "contradicted").length
+  const status: AfterAnalysisResult["status"] =
+    success ? "SUCCESS" : contradictionCount > 0 && topPasses.length === 0 ? "FAILED" : "PARTIAL"
+
+  const findings = success
+    ? [
+        "The answer satisfies the main visible requirements for this request.",
+        ...(topPasses.length
+          ? topPasses.map((item) => item.evidence[0] || `${item.label}.`)
+          : ["Deep review did not find a major missing requirement in the visible answer."])
+      ].slice(0, 3)
+    : [
+        "The answer was judged against decomposed request requirements instead of a single goal line.",
+        ...(topPasses.length ? [topPasses[0].evidence[0] || `${topPasses[0].label}.`] : []),
+        ...(contradictionCount > 0 ? ["One or more hard constraints are directly contradicted by the answer."] : [])
+      ].slice(0, 3)
+
+  const issues = [
+    ...reviewContract.failureTypes.map((type) => type.replace(/_/g, " ")),
+    ...topFailures.map((item) => item.label)
+  ].slice(0, 5)
+  const confidenceReason = success
+    ? mode === "deep"
+      ? "Deep review confirmed the visible requirements without a major contradiction."
+      : "Quick review did not find a major visible gap."
+    : topFailures[0]?.label || "The answer still misses important visible requirements."
+  const analysisPromptSection = await buildAnalysisPromptSection({
+    promptText: target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || "",
+    responseText: target.responseText,
+    taskFamily: target.taskType,
+    goalContract,
+    reviewContract,
+    attemptAcceptanceCriteria: target.attempt.intent.acceptance_criteria ?? [],
+    refineNextMovePrompt
+  })
+  const effectiveReviewContract: NormalizedReviewContract = {
+    ...reviewContract,
+    promptLabel: analysisPromptSection.promptLabel,
+    promptText: analysisPromptSection.promptText,
+    promptNote: analysisPromptSection.promptNote,
+    copyPromptText: analysisPromptSection.copyPromptText,
+    nextMoveShort: analysisPromptSection.nextMoveShort,
+    analysisDebug: analysisPromptSection.debug
+  }
+  const followUpPrompt = success
+    ? analysisPromptSection.copyPromptText
+    : analysisPromptSection.copyPromptText
+
+  const stage1: Stage1Output = {
+    assistant_action_summary:
+      target.taskType === "creation"
+        ? "Provided a generated deliverable for the request."
+        : target.taskType === "writing"
+          ? "Provided a rewritten version of the text."
+          : target.taskType === "advice"
+            ? "Provided an advice-oriented answer."
+            : target.taskType === "instructional"
+              ? "Provided a step-by-step answer."
+              : "Provided an answer for the request.",
+    claimed_evidence: topPasses.map((item) => item.evidence[0] || item.label).slice(0, 3),
+    response_mode: "explained",
+    scope_assessment: "narrow"
+  }
+
+  const stage2: Stage2Output = {
+    addressed_criteria: topPasses.map((item) => item.label),
+    missing_criteria: topFailures.map((item) => item.label),
+    constraint_risks: contradictionCount > 0 ? ["At least one hard requirement is directly contradicted."] : [],
+    problem_fit: success ? "correct" : "partial",
+    analysis_notes: [
+      target.taskType === "creation"
+        ? "This was reviewed as a generated deliverable, not as a proof-of-fix task."
+        : target.taskType === "writing"
+          ? "This was reviewed as a rewrite/quality task, not as a proof-of-fix task."
+          : target.taskType === "advice"
+            ? "This was reviewed as an advice/usability task, not as an implementation proof task."
+            : target.taskType === "instructional"
+              ? "This was reviewed as an instructions/usability task, not as an implementation proof task."
+              : "This was reviewed as an answer-quality task, not as an implementation proof task.",
+      contradictionCount > 0
+        ? "Deep prioritized hard contradictions before softer quality gaps."
+        : "Deep decomposed the request into concrete requirements and judged them separately.",
+      ...(reviewContract.attemptMemory?.repeatedFailureTypes.length
+        ? [`Repeated failure pattern: ${reviewContract.attemptMemory.repeatedFailureTypes[0].replace(/_/g, " ")}.`]
+        : []),
+      ...(reviewContract.evidenceSummary.counts.claimed > 0 && reviewContract.evidenceSummary.counts.evidenced === 0
+        ? ["Some passing-looking claims are still weakly evidenced."]
+        : [])
+    ]
+  }
+
+  const verdict: VerdictOutput = {
+    status,
+    confidence: reviewContract.confidence,
+    confidence_reason: confidenceReason,
+    findings,
+    issues
+  }
+
+  return attachReviewAnalysisContext({
+    status,
+    confidence: reviewContract.confidence,
+    confidence_reason: confidenceReason,
+    inspection_depth: mode === "deep" ? "targeted_text" : "summary_only",
+    findings,
+    issues,
+    next_prompt: followUpPrompt,
+    prompt_strategy: success ? "validate" : "retry_cleanly",
+    stage_1: stage1,
+    stage_2: stage2,
+    verdict,
+    next_prompt_output: {
+      next_prompt: analysisPromptSection.copyPromptText,
+      prompt_strategy: success ? "validate" : "retry_cleanly"
+    },
+    acceptance_checklist: effectiveReviewContract.requirements.map((item) => ({
+      label: item.label,
+      status: mapReviewRequirementStatusToChecklistStatus(item.status)
+    })),
+    response_summary: responseSummary,
+    used_fallback_intent: false,
+    token_usage_total: 0
+  }, {
+    goalContract,
+    reviewContract: effectiveReviewContract,
+    chosenChecklistSource: effectiveReviewContract.checklistSource,
+    sanitizationChanges: effectiveReviewContract.sanitizationChanges
+  })
 }
 
 export function buildReviewTargetKey(target: ReviewTarget) {
@@ -2524,6 +2752,44 @@ export function buildUserSafeReviewErrorMessage(
       return "We couldn’t complete the review this time."
     default:
       return "We couldn’t prepare the review right now."
+  }
+}
+
+async function refineNextMoveWithTimeout(
+  refinePrompt: NonNullable<CreateReviewAnalysisRunnerInput["refinePrompt"]>,
+  input: {
+    prompt: string
+    answers: Record<string, string>
+    taskType: ReviewTarget["taskType"]
+  }
+) {
+  const intent =
+    input.taskType === "debug" || input.taskType === "verification"
+      ? "DEBUG"
+      : input.taskType === "creation" || input.taskType === "instructional" || input.taskType === "advice" || input.taskType === "ideation"
+        ? "BUILD"
+        : input.taskType === "writing"
+          ? "REFACTOR"
+          : input.taskType === "explanatory"
+            ? "EXPLAIN"
+            : "OTHER"
+
+  const timeoutPromise = new Promise<null>((resolve) => {
+    globalThis.setTimeout(() => resolve(null), REVIEW_NEXT_MOVE_REFINE_TIMEOUT_MS)
+  })
+
+  try {
+    const result = await Promise.race([
+      refinePrompt({
+        prompt: input.prompt,
+        intent,
+        answers: input.answers
+      }).then((value) => value?.improved_prompt ?? null),
+      timeoutPromise
+    ])
+    return result
+  } catch {
+    return null
   }
 }
 
@@ -2564,10 +2830,14 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
     })
 
     if (promptArtifactReview || isAnswerQualityTask(effectiveTarget.taskType)) {
-      const informationalResult = buildInformationalReviewResult({
+      const informationalResult = await buildInformationalReviewResult({
         target: effectiveTarget,
         mode,
-        responseSummary
+        responseSummary,
+        refineNextMovePrompt:
+          mode === "deep" && input.refinePrompt
+            ? ({ prompt, answers, taskType }) => refineNextMoveWithTimeout(input.refinePrompt!, { prompt, answers, taskType })
+            : undefined
       })
 
       await input.attachAnalysisResult(
@@ -2615,10 +2885,14 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
         intermediateResult.acceptance_checklist.some((item) => /rewrite|tone and clarity|polished enough to use/i.test(item.label)))
 
     if (forcedPromptArtifactReview || forcedAdviceReview || forcedCreationReview) {
-      const informationalResult = buildInformationalReviewResult({
+      const informationalResult = await buildInformationalReviewResult({
         target: effectiveTarget,
         mode,
-        responseSummary
+        responseSummary,
+        refineNextMovePrompt:
+          mode === "deep" && input.refinePrompt
+            ? ({ prompt, answers, taskType }) => refineNextMoveWithTimeout(input.refinePrompt!, { prompt, answers, taskType })
+            : undefined
       })
 
       await input.attachAnalysisResult(

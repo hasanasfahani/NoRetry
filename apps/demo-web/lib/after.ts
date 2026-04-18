@@ -9,14 +9,26 @@ export function buildLevelMap(questions: ClarificationQuestion[], level: number)
   return Object.fromEntries(questions.map((question) => [question.id, level] as const))
 }
 
-function resolvePlannerAnswer(rawValue: string | undefined, otherValue: string | undefined, otherOption: string) {
+function resolvePlannerAnswer(rawValue: string | string[] | undefined, otherValue: string | undefined, otherOption: string) {
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .flatMap((value) => {
+        if (value === otherOption) {
+          const typedOther = otherValue?.trim() ?? ""
+          return typedOther ? [typedOther] : []
+        }
+        const trimmed = value.trim()
+        return trimmed ? [trimmed] : []
+      })
+      .join(", ")
+  }
   if (rawValue === otherOption) return otherValue?.trim() ?? ""
   return rawValue?.trim() ?? ""
 }
 
 export function findNextUnansweredQuestionIndex(params: {
   currentLevelQuestions: ClarificationQuestion[]
-  answerState: Record<string, string>
+  answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
   otherOption: string
 }) {
@@ -24,12 +36,15 @@ export function findNextUnansweredQuestionIndex(params: {
   return currentLevelQuestions.findIndex((question) => {
     const rawValue = answerState[question.id]
     const resolvedValue = resolvePlannerAnswer(rawValue, otherAnswerState[question.id], otherOption)
+    if (Array.isArray(rawValue)) {
+      return rawValue.length === 0 || (rawValue.includes(otherOption) && !resolvedValue)
+    }
     return !rawValue || (rawValue === otherOption && !resolvedValue)
   })
 }
 
 export function normalizePlannerAnswers(params: {
-  answerState: Record<string, string>
+  answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
   otherOption: string
 }) {

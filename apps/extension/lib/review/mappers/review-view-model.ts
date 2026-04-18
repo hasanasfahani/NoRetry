@@ -1,6 +1,8 @@
 import type { AfterAnalysisResult } from "@prompt-optimizer/shared/src/schemas"
 import type { ReviewPopupViewModel } from "../../../components/review-popup/review/review-types"
 import type { PopupAction, PopupTone } from "../../../components/review-popup/shared/types"
+import type { ReviewContract } from "../contracts"
+import { guardrailList, guardrailText } from "../guardrails"
 import type { ReviewPopupMode } from "../types"
 import type { ReviewTaskType } from "../services/review-task-type"
 import { isAnswerQualityTask } from "../services/review-task-type"
@@ -12,10 +14,26 @@ const PROMPT_QUALITY_CHECKLIST_LABELS = new Set([
   "The generated prompt is usable as a send-ready prompt"
 ])
 
+const PROMPT_ARTIFACT_ANALYSIS_NOTES = [
+  "This was reviewed as a generated prompt artifact, not as a proof-of-fix task.",
+  "The generated prompt should be judged on goal preservation, constraint coverage, structure, and send-ready quality."
+]
+
+function hasAnswerQualityAnalysisNote(result: AfterAnalysisResult) {
+  return result.stage_2.analysis_notes.some(
+    (item) =>
+      PROMPT_ARTIFACT_ANALYSIS_NOTES.includes(item) ||
+      /reviewed as an?.*(?:usability|quality|generated deliverable).*not as an implementation proof task/i.test(item) ||
+      /reviewed as an?.*not as a proof-of-fix task/i.test(item) ||
+      /judged on .* not on implementation artifacts/i.test(item)
+  )
+}
+
 function usesAnswerQualityWording(result: AfterAnalysisResult, taskType: ReviewTaskType) {
   return (
     isAnswerQualityTask(taskType) ||
-    result.acceptance_checklist.some((item) => PROMPT_QUALITY_CHECKLIST_LABELS.has(item.label))
+    result.acceptance_checklist.some((item) => PROMPT_QUALITY_CHECKLIST_LABELS.has(item.label)) ||
+    hasAnswerQualityAnalysisNote(result)
   )
 }
 
@@ -39,7 +57,7 @@ function quickStatusLabel(status: AfterAnalysisResult["status"], qualityTask: bo
       case "SUCCESS":
         return "Looks good"
       case "PARTIAL":
-        return "Needs polish"
+        return "Needs review"
       case "FAILED":
       case "WRONG_DIRECTION":
         return "Not usable yet"
@@ -50,13 +68,13 @@ function quickStatusLabel(status: AfterAnalysisResult["status"], qualityTask: bo
 
   switch (status) {
     case "SUCCESS":
-      return "Probably good"
+      return "Looks good"
     case "PARTIAL":
-      return "Not clear yet"
+      return "Needs review"
     case "FAILED":
-      return "Needs work"
+      return "Not usable yet"
     case "WRONG_DIRECTION":
-      return "Off track"
+      return "Not usable yet"
     default:
       return "Needs review"
   }
@@ -66,28 +84,28 @@ function deepStatusLabel(status: AfterAnalysisResult["status"], qualityTask: boo
   if (qualityTask) {
     switch (status) {
       case "SUCCESS":
-        return "Clear and usable"
+        return "Looks good"
       case "PARTIAL":
-        return "Missing critical clarity"
+        return "Needs review"
       case "FAILED":
       case "WRONG_DIRECTION":
-        return "Misleading or incomplete"
+        return "Not usable yet"
       default:
-        return "Unclear — verify before using"
+        return "Needs review"
     }
   }
 
   switch (status) {
     case "SUCCESS":
-      return "Safe enough to rely on"
+      return "Looks good"
     case "PARTIAL":
-      return "Looks correct, but not proven"
+      return "Needs review"
     case "FAILED":
-      return "Breaks under scrutiny"
+      return "Not usable yet"
     case "WRONG_DIRECTION":
-      return "Solves the wrong problem"
+      return "Not usable yet"
     default:
-      return "Unclear — don’t trust yet"
+      return "Needs review"
   }
 }
 
@@ -192,7 +210,6 @@ function buildDecision(result: AfterAnalysisResult, mode: ReviewPopupMode, taskT
   }
   if (strategy === "fix_missing") return "Missing a key piece — don’t proceed yet"
   if (strategy === "narrow_scope") return "Too broad — focus on what actually matters"
-  if (strategy === "retry_cleanly") return "Current path is weak — restart with a clearer step"
   return mode === "deep" ? "This may be wrong — don’t trust it yet" : "Validate this before proceeding"
 }
 
@@ -236,12 +253,8 @@ function buildRecommendation(result: AfterAnalysisResult, mode: ReviewPopupMode,
       return "Ask for the missing piece — not a full rewrite"
     case "narrow_scope":
       return "Focus only on what’s still unresolved"
-    case "retry_cleanly":
-      return "Start fresh — this path isn’t reliable"
     default:
-      return mode === "deep"
-        ? "Don’t trust this yet — ask for real proof"
-        : "Use a lighter validation step before building further."
+      return "Use a lighter validation step before building further."
   }
 }
 
@@ -364,8 +377,64 @@ function buildQuickToDeepDelta(quick: AfterAnalysisResult | null, deep: AfterAna
     : "Deep review kept the same checklist but judged it with stronger proof standards."
 }
 
-function buildPromptActions(onCopyPrompt: () => void): PopupAction[] {
-  return [{ id: "copy", label: "Copy prompt", kind: "primary", onClick: onCopyPrompt }]
+function buildPromptActions(onSubmitPrompt: () => void): PopupAction[] {
+  return [{ id: "submit", label: "Submit prompt", kind: "primary", onClick: onSubmitPrompt }]
+}
+
+function isNoRetryPrompt(prompt: string) {
+  return /^no retry needed\./i.test(prompt.trim())
+}
+
+function deriveSmartStatusBadge(params: {
+  promptText: string
+  fallbackStatus: AfterAnalysisResult["status"]
+  contract?: ReviewContract | null
+}) {
+  if (isNoRetryPrompt(params.promptText)) {
+    return { label: "Looks good", tone: "success" as const }
+  }
+
+  const smartJudgments = params.contract?.analysisDebug?.smart.judgments ?? []
+  const unresolved = smartJudgments.filter((item) => item.status !== "met")
+  const hardFailures = unresolved.filter(
+    (item) =>
+      item.status === "contradicted" ||
+      (item.status === "missing" && item.confidence === "high" && item.usefulness >= 78)
+  )
+
+  if (hardFailures.length > 0) {
+    return { label: "Not usable yet", tone: "danger" as const }
+  }
+
+  if (unresolved.length > 0) {
+    return { label: "Needs review", tone: "warning" as const }
+  }
+
+  return {
+    label:
+      params.fallbackStatus === "SUCCESS"
+        ? "Looks good"
+        : params.fallbackStatus === "PARTIAL"
+          ? "Needs review"
+          : "Not usable yet",
+    tone:
+      params.fallbackStatus === "SUCCESS"
+        ? ("success" as const)
+        : params.fallbackStatus === "PARTIAL"
+          ? ("warning" as const)
+          : ("danger" as const)
+  }
+}
+
+function mapContractChecklistStatus(status: ReviewContract["requirements"][number]["status"]): ReviewPopupViewModel["checklistRows"][number]["status"] {
+  switch (status) {
+    case "pass":
+      return "verified"
+    case "unclear":
+      return "blocked"
+    default:
+      return "missing"
+  }
 }
 
 function normalizePromptText(value: string) {
@@ -401,15 +470,67 @@ function buildPromptCardText(result: AfterAnalysisResult) {
 
 export function mapAfterAnalysisToReviewViewModel(input: {
   result: AfterAnalysisResult
+  reviewContract?: ReviewContract | null
   mode: ReviewPopupMode
   taskType: ReviewTaskType
   quickBaseline: AfterAnalysisResult | null
   onCopyPrompt: () => void
 }): ReviewPopupViewModel {
-  const { result, mode, taskType, quickBaseline, onCopyPrompt } = input
+  const { result, reviewContract, mode, taskType, quickBaseline, onCopyPrompt } = input
   const isDeep = mode === "deep"
+  const contract = reviewContract && isAnswerQualityTask(taskType) ? reviewContract : null
+
+  if (contract) {
+    const guardedDecision = guardrailText(contract.overallDecision, contract.taskFamily) || contract.overallDecision
+    const guardedRecommendation = guardrailText(contract.recommendation, contract.taskFamily) || contract.recommendation
+    const guardedPromptText =
+      guardrailText(contract.copyPromptText || contract.promptText, contract.taskFamily) ||
+      guardrailText(contract.promptText, contract.taskFamily) ||
+      contract.nextMoveShort
+    const statusBadge = deriveSmartStatusBadge({
+      promptText: guardedPromptText,
+      fallbackStatus: result.status,
+      contract
+    })
+    const hidePromptAction = isNoRetryPrompt(guardedPromptText)
+    return {
+      state: isDeep ? "deep_review" : "quick_review",
+      mode,
+      eyebrow: isDeep ? "Reality check" : "Quick review",
+      title: "AI Answer Check",
+      statusBadge,
+      decision: guardedDecision,
+      recommendedAction: guardedRecommendation,
+      promptLabel: guardrailText(contract.promptLabel, contract.taskFamily) || "Next best move",
+      prompt: guardedPromptText,
+      promptNote: guardrailText(contract.promptNote, contract.taskFamily) || "",
+      promptActions: hidePromptAction ? [] : buildPromptActions(onCopyPrompt),
+      confidenceLabel: `Confidence: ${contract.confidence === "high" ? "Usable" : contract.confidence === "medium" ? "Needs review" : "Weak"}`,
+      confidenceNote: guardrailText(contract.confidenceNote, contract.taskFamily) || contract.confidenceNote,
+      confidenceReasons: guardrailList(contract.confidenceReasons, contract.taskFamily),
+      missingItems: guardrailList(contract.missingItems, contract.taskFamily),
+      whyItems: guardrailList(contract.whyItems, contract.taskFamily),
+      proofSummary: guardrailText(contract.proofSummary, contract.taskFamily) || contract.proofSummary,
+      checkedArtifacts: guardrailList(contract.checkedItems, contract.taskFamily),
+      uncheckedArtifacts: guardrailList(contract.uncheckedItems, contract.taskFamily),
+      checklistRows: contract.requirements.map((item) => ({
+        id: `${mode}-${item.id}`,
+        label: `${item.label} (${item.status === "pass" ? "Confirmed" : item.status === "unclear" ? "Unclear" : "Missing"})`,
+        status: mapContractChecklistStatus(item.status)
+      })),
+      quickToDeepDelta: isDeep ? buildQuickToDeepDelta(quickBaseline, result, true) : "",
+      feedbackPrompt: guardrailText(contract.feedbackPrompt, contract.taskFamily) || contract.feedbackPrompt
+    }
+  }
+
   const informationalTask = usesAnswerQualityWording(result, taskType)
   const noFollowUpNeeded = informationalTask && result.status === "SUCCESS"
+  const guardTaskFamily = informationalTask ? taskType : "debug"
+  const copyAlignedPrompt = (result.next_prompt_output?.next_prompt || result.next_prompt || "").trim()
+  const informationalPrompt = informationalTask
+    ? guardrailText(noFollowUpNeeded ? "Nothing critical missing — safe to proceed." : copyAlignedPrompt, guardTaskFamily) || ""
+    : noFollowUpNeeded ? "Nothing critical missing — safe to proceed." : copyAlignedPrompt
+  const hidePromptAction = noFollowUpNeeded || isNoRetryPrompt(informationalPrompt)
 
   return {
     state: isDeep ? "deep_review" : "quick_review",
@@ -420,10 +541,16 @@ export function mapAfterAnalysisToReviewViewModel(input: {
       label: isDeep ? deepStatusLabel(result.status, informationalTask) : quickStatusLabel(result.status, informationalTask),
       tone: toneForStatus(result.status)
     },
-    decision: buildDecision(result, mode, taskType, informationalTask),
-    recommendedAction: buildRecommendation(result, mode, taskType, informationalTask),
-    promptLabel: noFollowUpNeeded ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action",
-    prompt: noFollowUpNeeded ? "Nothing critical missing — safe to proceed." : buildPromptCardText(result),
+    decision: informationalTask
+      ? guardrailText(buildDecision(result, mode, taskType, informationalTask), guardTaskFamily) || buildDecision(result, mode, taskType, informationalTask)
+      : buildDecision(result, mode, taskType, informationalTask),
+    recommendedAction: informationalTask
+      ? guardrailText(buildRecommendation(result, mode, taskType, informationalTask), guardTaskFamily) || buildRecommendation(result, mode, taskType, informationalTask)
+      : buildRecommendation(result, mode, taskType, informationalTask),
+    promptLabel: informationalTask
+      ? guardrailText(noFollowUpNeeded ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action", guardTaskFamily) || "Next best move"
+      : noFollowUpNeeded ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action",
+    prompt: informationalPrompt,
     promptNote: informationalTask
       ? isDeep
         ? "Deep checks for missing steps, ambiguity, and major omissions."
@@ -431,7 +558,7 @@ export function mapAfterAnalysisToReviewViewModel(input: {
       : isDeep
         ? "Deep uses the same checklist with stronger proof expectations."
         : "Quick is a fast directional read.",
-    promptActions: noFollowUpNeeded ? [] : buildPromptActions(onCopyPrompt),
+    promptActions: hidePromptAction ? [] : buildPromptActions(onCopyPrompt),
     confidenceLabel: `Confidence: ${confidenceLabel(result.confidence, informationalTask)}`,
     confidenceNote: result.confidence_reason || (
       informationalTask
@@ -442,9 +569,11 @@ export function mapAfterAnalysisToReviewViewModel(input: {
           ? "Deep checks what’s actually proven, not just explained"
           : "Quick review stays directional instead of overconfident."
     ),
-    confidenceReasons: result.confidence_reason ? [result.confidence_reason] : [],
-    missingItems: buildMissingItems(result, mode, taskType),
-    whyItems: buildWhyItems(result),
+    confidenceReasons: informationalTask
+      ? guardrailList(result.confidence_reason ? [result.confidence_reason] : [], guardTaskFamily)
+      : result.confidence_reason ? [result.confidence_reason] : [],
+    missingItems: informationalTask ? guardrailList(buildMissingItems(result, mode, taskType), guardTaskFamily) : buildMissingItems(result, mode, taskType),
+    whyItems: informationalTask ? guardrailList(buildWhyItems(result), guardTaskFamily) : buildWhyItems(result),
     proofSummary: taskType === "debug"
       ? "Code was changed, but real results aren’t shown"
       : informationalTask
@@ -454,11 +583,15 @@ export function mapAfterAnalysisToReviewViewModel(input: {
       : isDeep
         ? "What’s explained vs what’s actually proven"
         : "Based on what the answer claims, not what’s proven",
-    checkedArtifacts: buildProofChecked(result, mode, taskType, informationalTask),
-    uncheckedArtifacts: buildProofMissing(result, mode, taskType, informationalTask),
-    checklistRows: result.acceptance_checklist.map((item, index) => ({
+    checkedArtifacts: informationalTask ? guardrailList(buildProofChecked(result, mode, taskType, informationalTask), guardTaskFamily) : buildProofChecked(result, mode, taskType, informationalTask),
+    uncheckedArtifacts: informationalTask ? guardrailList(buildProofMissing(result, mode, taskType, informationalTask), guardTaskFamily) : buildProofMissing(result, mode, taskType, informationalTask),
+    checklistRows: result.acceptance_checklist
+      .filter((item) => !informationalTask || Boolean(guardrailText(item.label, guardTaskFamily)))
+      .map((item, index) => ({
       id: `${mode}-${index}-${item.label}`,
-      label: checklistLabel(item, mode, taskType),
+      label: informationalTask
+        ? `${guardrailText(item.label, guardTaskFamily) || item.label} (${item.status === "met" ? "Confirmed" : item.status === "not_sure" ? "Not proven" : "Missing"})`
+        : checklistLabel(item, mode, taskType),
       status: markerForChecklist(item.status, mode, taskType)
     })),
     quickToDeepDelta: isDeep ? buildQuickToDeepDelta(quickBaseline, result, informationalTask) : "",

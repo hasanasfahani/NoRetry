@@ -38,7 +38,7 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 800,
     letterSpacing: "0.14em",
     textTransform: "uppercase",
-    color: "#93c5fd"
+    color: "#76b2ff"
   },
   prompt: {
     margin: 0,

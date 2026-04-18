@@ -14,6 +14,11 @@ import {
   buildInitialPlannerState
 } from "../../core/after-orchestration"
 import { buildPlanningAttemptIntentFromPrompt } from "../../core/attempt-orchestration"
+import { createGoalContract } from "../../goal/goal-contract"
+import { normalizeGoalContract } from "../../goal/goal-normalizer"
+import type { GoalContract, GoalConstraint } from "../../goal/types"
+import { type PromptContract } from "../../prompt/contracts"
+import { buildPromptContractFromGoalContract } from "../../prompt/prompt-renderer"
 
 function buildFallbackChecklist(intent: AnalyzePromptResponse["intent"]) {
   switch (intent) {
@@ -97,6 +102,129 @@ function buildFallbackQuestionOptions(intent: AnalyzePromptResponse["intent"]) {
   }
 }
 
+function goalHasConstraintType(goalContract: GoalContract | null | undefined, types: GoalConstraint["type"][]) {
+  if (!goalContract) return false
+  return goalContract.hardConstraints.some((item) => types.includes(item.type))
+}
+
+function outputRequirementPresent(goalContract: GoalContract | null | undefined, pattern: RegExp) {
+  if (!goalContract) return false
+  return goalContract.outputRequirements.some((item) => pattern.test(item))
+}
+
+function isPriorityStylePreference(goalContract: GoalContract | null | undefined) {
+  if (!goalContract) return false
+  return goalContract.softPreferences.some((item) => /professional|concise|friendly|clean|practical|tone|audience/i.test(`${item.label} ${item.value ?? ""}`))
+}
+
+function topConstraintOptions(goalContract: GoalContract | null | undefined, limit = 4) {
+  if (!goalContract) return []
+  return uniqueItems(
+    goalContract.hardConstraints
+      .filter((item) => !["generic", "scope"].includes(item.type))
+      .map((item) => toSentenceCase(item.label))
+  ).slice(0, limit)
+}
+
+function deriveGoalAwareFallbackQuestion(params: {
+  promptText: string
+  localAnalysis: AnalyzePromptResponse
+  goalContract?: GoalContract | null
+}) {
+  const { promptText, localAnalysis, goalContract } = params
+  const promptSnippet = promptText.trim().slice(0, 72)
+  const deliverableType = goalContract?.deliverableType ?? ""
+
+  if (!deliverableType) {
+    return {
+      label: "What kind of result should the next prompt ask for?",
+      helper: `Lock down the exact deliverable before sending the next prompt. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["Recipe", "Rewrite", "HTML/CSS output", "Recommendation", "Other"]
+    }
+  }
+
+  if (!goalHasConstraintType(goalContract, ["servings", "count"])) {
+    return {
+      label: "What serving or count should the next prompt lock down?",
+      helper: `Make the requested amount explicit before sending the next prompt. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["Single serving", "2 servings", "4 servings", "Exact count matters", "Other"]
+    }
+  }
+
+  if (!goalHasConstraintType(goalContract, ["time"])) {
+    return {
+      label: "What time limit should the next prompt enforce?",
+      helper: `Clarify the time budget so the next answer stays within it. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["5 minutes or less", "15 minutes or less", "30 minutes or less", "Time does not matter", "Other"]
+    }
+  }
+
+  if (deliverableType === "recipe" && !goalHasConstraintType(goalContract, ["calories", "protein", "diet", "exclusion", "method"])) {
+    return {
+      label: "Which hard recipe constraint matters most to lock down next?",
+      helper: `Pick the next non-negotiable recipe requirement. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["Calorie target", "Protein target", "Diet restriction", "Cooking method", "Other"]
+    }
+  }
+
+  if (deliverableType === "recipe" && (!outputRequirementPresent(goalContract, /\bingredients?\b/i) || !outputRequirementPresent(goalContract, /\bstep[-\s]?by[-\s]?step\b|\binstructions?\b/i))) {
+    return {
+      label: "Which recipe output sections must the next answer include?",
+      helper: `Lock down the recipe output format before sending the next prompt. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["Ingredients + steps", "Ingredients + steps + calories", "Ingredients + steps + macros", "Full recipe card", "Other"]
+    }
+  }
+
+  if ((deliverableType === "html_file" || goalHasConstraintType(goalContract, ["technology", "method"])) && !outputRequirementPresent(goalContract, /\bhtml\b|\bcss\b/i)) {
+    return {
+      label: "What code artifact should the next prompt make explicit?",
+      helper: `Clarify the output artifact so the next answer returns the right code shape. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["Full HTML file", "HTML + CSS", "One component only", "JSON/data output", "Other"]
+    }
+  }
+
+  if (deliverableType === "rewrite" && !isPriorityStylePreference(goalContract)) {
+    return {
+      label: "Which rewrite quality should the next prompt pin down?",
+      helper: `Clarify the rewrite bar before sending the next prompt. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: ["Tone", "Audience", "Length", "Keep meaning exactly", "Other"]
+    }
+  }
+
+  const prioritizedConstraints = topConstraintOptions(goalContract)
+  if (prioritizedConstraints.length >= 2) {
+    return {
+      label: "Which current requirement is least negotiable?",
+      helper: `The goal is already detailed. Pick the highest-value requirement to protect first. Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+      options: [...prioritizedConstraints, "Other"].slice(0, 5)
+    }
+  }
+
+  return buildFallbackQuestionOptions(localAnalysis.intent)
+}
+
+function questionMentionsResolvedDimension(question: ClarificationQuestion, goalContract: GoalContract | null | undefined) {
+  const text = `${question.label} ${question.helper ?? ""} ${(question.options ?? []).join(" ")}`.toLowerCase()
+  if (/\bwhich ai\b|\bchatgpt\b|\bclaude\b|\bgemini\b|\bcopilot\b|\bmodel\b/.test(text)) return true
+  if (goalHasConstraintType(goalContract, ["servings", "count"]) && /\bservings?\b|\bhow many people\b|\bhow many meals\b|\bportion\b/.test(text)) return true
+  if (goalHasConstraintType(goalContract, ["time"]) && /\bminutes?\b|\btime limit\b|\bhow long\b/.test(text)) return true
+  if (goalHasConstraintType(goalContract, ["calories"]) && /\bcalories?\b|\bkcal\b/.test(text)) return true
+  if (goalHasConstraintType(goalContract, ["protein"]) && /\bprotein\b/.test(text)) return true
+  if (goalHasConstraintType(goalContract, ["diet", "exclusion"]) && /\bdiet\b|\bdairy\b|\bvegan\b|\bvegetarian\b|\bavoid\b|\bexclude\b/.test(text)) return true
+  if (goalHasConstraintType(goalContract, ["method", "technology"]) && /\bmicrowave\b|\boven\b|\bstovetop\b|\bgrill\b|\bhtml\b|\bcss\b|\bjavascript\b|\btypescript\b|\breact\b/.test(text)) return true
+  if (goalContract?.deliverableType && /\bwhat kind of result\b|\bwhat output\b|\bdeliverable\b/.test(text)) return true
+  if (goalContract && goalContract.outputRequirements.length > 0 && /\bingredients?\b|\binstructions?\b|\bsteps?\b|\bmacros?\b|\bformat\b|\bsection\b/.test(text)) return true
+  return false
+}
+
+function filterGoalAwareQuestions(params: {
+  goalContract?: GoalContract | null
+  questions: ClarificationQuestion[]
+}) {
+  const { goalContract, questions } = params
+  return questions.filter((question) => !questionMentionsResolvedDimension(question, goalContract))
+}
+
 export function buildPromptModeSessionKey(promptText: string) {
   return promptText.replace(/\s+/g, " ").trim().toLowerCase()
 }
@@ -106,7 +234,7 @@ function mapIntentToPromptIntent(intent: AnalyzePromptResponse["intent"]) {
 }
 
 function normalizePromptModeAnswers(params: {
-  answerState: Record<string, string>
+  answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
 }) {
   const { answerState, otherAnswerState } = params
@@ -114,7 +242,20 @@ function normalizePromptModeAnswers(params: {
     Object.entries(answerState)
       .map(([questionId, rawValue]) => [
         questionId,
-        rawValue === "Other" ? otherAnswerState[questionId]?.trim() ?? "" : rawValue.trim()
+        Array.isArray(rawValue)
+          ? rawValue
+              .flatMap((value) => {
+                if (value === "Other") {
+                  const typedOther = otherAnswerState[questionId]?.trim() ?? ""
+                  return typedOther ? [typedOther] : []
+                }
+                const trimmed = value.trim()
+                return trimmed ? [trimmed] : []
+              })
+              .join(", ")
+          : rawValue === "Other"
+            ? otherAnswerState[questionId]?.trim() ?? ""
+            : rawValue.trim()
       ])
       .filter(([, value]) => value)
   ) as Record<string, string>
@@ -134,6 +275,96 @@ function stripTrailingPunctuation(value: string) {
   return value.trim().replace(/[.:;\s]+$/, "")
 }
 
+function singularizeConstraintTarget(value: string) {
+  const trimmed = value.trim().toLowerCase()
+  if (!trimmed) return ""
+  if (trimmed.endsWith("ies") && trimmed.length > 4) return `${trimmed.slice(0, -3)}y`
+  if (trimmed.endsWith("oes") && trimmed.length > 4) return trimmed.slice(0, -2)
+  if (trimmed.endsWith("s") && !trimmed.endsWith("ss") && trimmed.length > 3) return trimmed.slice(0, -1)
+  return trimmed
+}
+
+function pluralizeConstraintTarget(value: string) {
+  const trimmed = value.trim().toLowerCase()
+  if (!trimmed) return ""
+  if (trimmed.endsWith("ies") || trimmed.endsWith("oes")) return trimmed
+  if (trimmed.endsWith("y") && !/[aeiou]y$/.test(trimmed)) return `${trimmed.slice(0, -1)}ies`
+  if (trimmed.endsWith("o")) return `${trimmed}es`
+  if (trimmed.endsWith("s")) return trimmed
+  return `${trimmed}s`
+}
+
+function normalizeExclusionTarget(value: string) {
+  const trimmed = value
+    .toLowerCase()
+    .replace(/\b(?:and|or|but|while|that|which|keep|with|for|to|so|because)\b.*$/i, "")
+    .replace(/\b(?:ingredient|ingredients|item|items)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (!trimmed) return ""
+
+  return trimmed
+}
+
+function preferredExclusionTarget(value: string) {
+  const normalizedTarget = normalizeExclusionTarget(value)
+  if (!normalizedTarget) return ""
+  if (/\b(?:dairy|gluten|soy)\b/.test(normalizedTarget) && !normalizedTarget.includes(" ")) return normalizedTarget
+  if (!normalizedTarget.includes(" ")) return pluralizeConstraintTarget(normalizedTarget)
+  return normalizedTarget
+}
+
+function splitIngredientList(value: string) {
+  return value
+    .split(/,|\/|\band\b/gi)
+    .map((item) => normalizeExclusionTarget(item))
+    .filter(Boolean)
+}
+
+function extractExclusionTargets(text: string) {
+  const extracted = new Set<string>()
+  const source = text.replace(/[()\n]/g, " ")
+  const patterns = [
+    /\b(?:without|no|exclude|excluding|avoid)\s+([a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,3})/gi,
+    /\bdo not use\s+([a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,3})/gi,
+    /\b([a-z][a-z-]*)-free\b/gi
+  ]
+
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const target = normalizeExclusionTarget(match[1] ?? "")
+      if (!target) continue
+      extracted.add(target)
+    }
+  }
+
+  const dislikePatterns = [
+    /\b(?:any\s+ingredients\s+you\s+dislike\??|ingredients\s+you\s+dislike\??|disliked\s+ingredients?\??|ingredients\s+to\s+avoid\??|avoid(?:ing)?\s+ingredients?\??)\s*[:\-]\s*([^\n.]+)/gi
+  ]
+
+  for (const pattern of dislikePatterns) {
+    for (const match of source.matchAll(pattern)) {
+      for (const item of splitIngredientList(match[1] ?? "")) {
+        extracted.add(item)
+      }
+    }
+  }
+
+  return [...extracted]
+}
+
+function formatExplicitExclusionConstraint(target: string) {
+  const normalizedTarget = preferredExclusionTarget(target)
+  if (!normalizedTarget) return ""
+
+  if (/\b(?:dairy|nut|egg|gluten|soy)\b/.test(normalizedTarget) && !normalizedTarget.includes(" ")) {
+    return `Keep it ${normalizedTarget}-free.`
+  }
+
+  return `Do not use ${normalizedTarget}.`
+}
+
 function looksLikeOutputFormatHint(value: string) {
   const normalized = value.toLowerCase()
   return /step-by-step|steps|ingredients|quantities|html|css|javascript|json|table|bullets|outline|calories|per serving|format|output|list only/.test(
@@ -146,9 +377,19 @@ function looksLikeStyleHint(value: string) {
   return /clean|polished|professional|readable|realistic|natural|home kitchen|weekday|usable|starter|clear|concise/.test(normalized)
 }
 
+function isGenericStyleGuardrail(value: string) {
+  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim()
+  return (
+    normalized === "keep the request clear, specific, and easy for the ai assistant to follow." ||
+    normalized === "keep the request clear, specific, and easy for the ai assistant to follow"
+  )
+}
+
 function looksLikeConstraint(value: string) {
   const normalized = value.toLowerCase()
-  return /no |without |exclude|only|under |less|stovetop|minutes?|servings?|for \d+|limit|keep|must|do not|avoid/.test(normalized)
+  return /no |without |exclude|only|under |less|stovetop|minutes?|servings?|for \d+|limit|keep|must|do not|avoid|[a-z-]+-free/.test(
+    normalized
+  )
 }
 
 function dedupeCaseInsensitive(items: string[]) {
@@ -161,92 +402,6 @@ function dedupeCaseInsensitive(items: string[]) {
     output.push(item)
   }
   return output
-}
-
-function extractPromptSignals(prompt: string) {
-  const normalized = prompt.trim()
-  const lower = normalized.toLowerCase()
-  const keyRequirements: string[] = []
-  const constraints: string[] = []
-  const requiredInputs: string[] = []
-  const outputFormat: string[] = []
-  const style: string[] = []
-
-  if (/\bhtml\b/i.test(normalized)) keyRequirements.push("Use HTML.")
-  if (/\bcss\b/i.test(normalized)) keyRequirements.push("Include CSS.")
-  if (/\bjavascript\b|\bjs\b/i.test(normalized)) keyRequirements.push("Include JavaScript only if needed.")
-  if (/\bcv\b|\bresume\b/i.test(normalized)) keyRequirements.push("Keep the output focused on a basic CV website starter.")
-
-  const servingMatch = normalized.match(/(\d+)[-\s]?servings?/i)
-  if (servingMatch) constraints.push(`Make it for ${servingMatch[1]} servings.`)
-
-  const minuteMatch = normalized.match(/(\d+)[-\s]?minute/i)
-  if (minuteMatch) constraints.push(`Keep it to ${minuteMatch[1]} minutes or less.`)
-
-  if (/\bstovetop\b/i.test(normalized)) constraints.push("Use stovetop only.")
-  if (/\blow[-\s]?carb\b/i.test(normalized)) constraints.push("Keep it low-carb.")
-
-  const excludeMatch = normalized.match(/(?:exclude|without|no)\s+([a-z][a-z\s-]+)/i)
-  if (excludeMatch) constraints.push(`Do not use ${stripTrailingPunctuation(excludeMatch[1])}.`)
-
-  if (/\bingredients?\b/i.test(lower)) outputFormat.push("Include ingredients with quantities.")
-  if (/step[-\s]?by[-\s]?step|instructions/i.test(lower)) outputFormat.push("Include step-by-step instructions.")
-  if (/calories?\s+per\s+serving|list only the total calories per serving/i.test(lower)) {
-    outputFormat.push("List only the total calories per serving.")
-  }
-
-  if (/\bmeal\b|\brecipe\b|\blunch\b|\bdinner\b/i.test(lower)) {
-    requiredInputs.push("Assume a normal home kitchen unless the prompt says otherwise.")
-    style.push("Keep it practical for real weekday use.")
-  }
-
-  if (/\bprofessional\b/i.test(lower)) style.push("Use a professional tone.")
-  if (/\bpolished\b/i.test(lower)) style.push("Keep the output polished and presentation-ready.")
-  if (/\bbasic\b/i.test(lower)) style.push("Keep the result simple and easy to use.")
-
-  return {
-    keyRequirements: dedupeCaseInsensitive(keyRequirements),
-    constraints: dedupeCaseInsensitive(constraints),
-    requiredInputs: dedupeCaseInsensitive(requiredInputs),
-    outputFormat: dedupeCaseInsensitive(outputFormat),
-    style: dedupeCaseInsensitive(style)
-  }
-}
-
-function buildIntentDefaults(intent: AnalyzePromptResponse["intent"]) {
-  switch (intent) {
-    case "DEBUG":
-      return {
-        outputFormat: ["Show the next diagnostic or fix path clearly."],
-        style: ["Keep the scope narrow and testable."]
-      }
-    case "BUILD":
-      return {
-        outputFormat: ["Return something directly usable as a strong first draft."],
-        style: ["Keep the result clean, practical, and easy to build from."]
-      }
-    case "EXPLAIN":
-      return {
-        outputFormat: ["Organize the answer so it is easy to follow."],
-        style: ["Use direct, natural wording instead of filler."]
-      }
-    default:
-      return {
-        outputFormat: [],
-        style: ["Keep the request clear, specific, and easy for the AI assistant to follow."]
-      }
-  }
-}
-
-function buildSection(title: string, items: string[]) {
-  if (!items.length) return ""
-  return `${title}:\n${items.map((item) => `- ${normalizeBulletText(item)}`).join("\n")}`
-}
-
-function normalizeBulletText(value: string) {
-  const trimmed = stripTrailingPunctuation(value)
-  if (!trimmed) return ""
-  return /[.!?]$/.test(value.trim()) ? value.trim() : `${trimmed}.`
 }
 
 function buildPromptModeOutputGuidance(intent: AnalyzePromptResponse["intent"]) {
@@ -297,23 +452,37 @@ export function buildPromptModePromptPlan(params: {
     currentState = ""
   } = params
 
+  const goalContract = normalizeGoalContract({
+    promptText: sourcePrompt,
+    taskFamily: mapIntentToPromptIntent(localAnalysis.intent).toLowerCase(),
+    answeredPath,
+    constraints
+  })
   const clarifiedChoices = uniqueItems(answeredPath)
-  const retainedConstraints = uniqueItems([
-    ...constraints,
-    ...localAnalysis.missing_elements.slice(0, 2).map((item) => `Resolve this clearly: ${item}`)
-  ]).slice(0, 5)
+  const retainedConstraints = uniqueItems(goalContract.hardConstraints.map((item) => item.label))
+    .concat(uniqueItems(localAnalysis.missing_elements.slice(0, 2).map((item) => `Resolve this clearly: ${item}`)))
+    .slice(0, 6)
   const outputGuidance = buildPromptModeOutputGuidance(localAnalysis.intent)
+  const outputRequirements = uniqueItems(goalContract.outputRequirements)
+  const softPreferences = uniqueItems(goalContract.softPreferences.map((item) => item.value || item.label))
 
   const basePrompt = [
     "Rewrite the user's typed draft into a strong, polished prompt they can send next.",
     "Keep the original intent, but make the final prompt feel clear, deliberate, and high quality.",
     `Original Draft\n${sourcePrompt.trim()}`,
     `Planning Goal\n${planningGoal.trim()}`,
+    goalContract.deliverableType ? `Requested Deliverable\n${goalContract.deliverableType}` : "",
     clarifiedChoices.length
       ? `Clarified Choices\n${clarifiedChoices.map((item, index) => `${index + 1}. ${toSentenceCase(item)}`).join("\n")}`
       : "",
     retainedConstraints.length
       ? `Constraints To Preserve\n${retainedConstraints.map((item, index) => `${index + 1}. ${toSentenceCase(item)}`).join("\n")}`
+      : "",
+    outputRequirements.length
+      ? `Output Requirements\n${outputRequirements.map((item, index) => `${index + 1}. ${toSentenceCase(item)}`).join("\n")}`
+      : "",
+    softPreferences.length
+      ? `Quality Targets\n${softPreferences.map((item, index) => `${index + 1}. ${toSentenceCase(item)}`).join("\n")}`
       : "",
     projectContext.trim() ? `Project Context\n${projectContext.trim()}` : "",
     currentState.trim() ? `Current State\n${currentState.trim()}` : "",
@@ -328,6 +497,9 @@ export function buildPromptModePromptPlan(params: {
     clarifiedChoices.length ? `Requirements:\n${clarifiedChoices.map((item) => `- ${toSentenceCase(item)}`).join("\n")}` : "",
     retainedConstraints.length
       ? `Keep these constraints:\n${retainedConstraints.map((item) => `- ${toSentenceCase(item)}`).join("\n")}`
+      : "",
+    outputRequirements.length
+      ? `Output requirements:\n${outputRequirements.map((item) => `- ${toSentenceCase(item)}`).join("\n")}`
       : "",
     projectContext.trim() ? `Context:\n${projectContext.trim()}` : "",
     currentState.trim() ? `Current state:\n${currentState.trim()}` : ""
@@ -349,47 +521,43 @@ export function formatPromptModeStructuredDraft(params: {
   answeredPath: string[]
   constraints: string[]
 }) {
+  return buildPromptModePromptContract(params).renderedPrompt
+}
+
+export function buildPromptModePromptContract(params: {
+  sourcePrompt: string
+  planningGoal: string
+  refinedPrompt: string
+  localAnalysis: AnalyzePromptResponse
+  answeredPath: string[]
+  constraints: string[]
+}): PromptContract {
   const { sourcePrompt, planningGoal, refinedPrompt, localAnalysis, answeredPath, constraints } = params
-  const promptSignals = extractPromptSignals(sourcePrompt)
-  const intentDefaults = buildIntentDefaults(localAnalysis.intent)
+  const renderedPrompt = refinedPrompt || planningGoal || sourcePrompt
+  const sourceGoalContract = normalizeGoalContract({
+    promptText: sourcePrompt,
+    taskFamily: mapIntentToPromptIntent(localAnalysis.intent).toLowerCase(),
+    answeredPath,
+    constraints
+  })
+  const renderedGoalContract = normalizeGoalContract({
+    promptText: renderedPrompt,
+    taskFamily: mapIntentToPromptIntent(localAnalysis.intent).toLowerCase(),
+    answeredPath,
+    constraints
+  })
+  const goalContract = createGoalContract({
+    ...sourceGoalContract,
+    userGoal: renderedGoalContract.userGoal,
+    deliverableType: renderedGoalContract.deliverableType || sourceGoalContract.deliverableType,
+    hardConstraints: [...sourceGoalContract.hardConstraints, ...renderedGoalContract.hardConstraints],
+    softPreferences: [...sourceGoalContract.softPreferences, ...renderedGoalContract.softPreferences],
+    outputRequirements: [...sourceGoalContract.outputRequirements, ...renderedGoalContract.outputRequirements],
+    assumptions: [...sourceGoalContract.assumptions, ...renderedGoalContract.assumptions],
+    riskFlags: [...sourceGoalContract.riskFlags, ...renderedGoalContract.riskFlags]
+  })
 
-  const taskLine = normalizeBulletText(refinedPrompt || planningGoal || sourcePrompt)
-
-  const keyRequirements = dedupeCaseInsensitive([
-    ...answeredPath.filter((item) => !looksLikeConstraint(item) && !looksLikeOutputFormatHint(item) && !looksLikeStyleHint(item)),
-    ...promptSignals.keyRequirements
-  ]).map(normalizeBulletText)
-
-  const preservedConstraints = dedupeCaseInsensitive([
-    ...constraints,
-    ...answeredPath.filter((item) => looksLikeConstraint(item)),
-    ...promptSignals.constraints
-  ]).map(normalizeBulletText)
-
-  const requiredInputs = dedupeCaseInsensitive(promptSignals.requiredInputs).map(normalizeBulletText)
-
-  const outputFormat = dedupeCaseInsensitive([
-    ...answeredPath.filter((item) => looksLikeOutputFormatHint(item)),
-    ...promptSignals.outputFormat,
-    ...intentDefaults.outputFormat
-  ]).map(normalizeBulletText)
-
-  const style = dedupeCaseInsensitive([
-    ...answeredPath.filter((item) => looksLikeStyleHint(item)),
-    ...promptSignals.style,
-    ...intentDefaults.style
-  ]).map(normalizeBulletText)
-
-  const sections = [
-    `Task / goal:\n${taskLine}`,
-    buildSection("Key requirements", keyRequirements),
-    buildSection("Constraints", preservedConstraints),
-    buildSection("Required inputs or ingredients", requiredInputs),
-    buildSection("Output format", outputFormat),
-    buildSection("Quality bar / style guardrails", style)
-  ].filter(Boolean)
-
-  return sections.join("\n\n")
+  return buildPromptContractFromGoalContract(goalContract)
 }
 
 export function buildPromptModeSeedAnalysis(params: {
@@ -436,7 +604,7 @@ export function buildPromptModeSeedAnalysis(params: {
     issues: checklistLabels.map((item) => `Clarify: ${item}`),
     prompt_strategy: "narrow_scope",
     stage_1: {
-      assistant_action_summary: "NoRetry is shaping the next prompt before it is sent.",
+      assistant_action_summary: "reeva AI is shaping the next prompt before it is sent.",
       claimed_evidence: checklistLabels,
       response_mode: "suggested",
       scope_assessment: "moderate"
@@ -459,7 +627,9 @@ export function buildPromptModeSeedAnalysis(params: {
     },
     next_prompt_output: {
       next_prompt: "",
-      prompt_strategy: "narrow_scope"
+      prompt_strategy: "narrow_scope",
+      next_prompt_explanation: "",
+      expected_outcome: ""
     },
     acceptance_checklist: checklistLabels.map((label) => ({
       label,
@@ -478,14 +648,18 @@ export function buildPromptModeSeedAnalysis(params: {
 export function buildPromptModeFallbackQuestions(params: {
   promptText: string
   localAnalysis: AnalyzePromptResponse
+  goalContract?: GoalContract | null
 }) {
-  const { promptText, localAnalysis } = params
-  const promptSnippet = promptText.trim().slice(0, 72)
-  const template = buildFallbackQuestionOptions(localAnalysis.intent)
+  const { promptText, localAnalysis, goalContract } = params
+  const template = deriveGoalAwareFallbackQuestion({
+    promptText,
+    localAnalysis,
+    goalContract
+  })
   const question: ClarificationQuestion = {
     id: `prompt-${crypto.randomUUID()}`,
     label: template.label,
-    helper: `${template.helper} Current direction: ${promptSnippet}${promptSnippet.length >= 72 ? "..." : ""}`,
+    helper: template.helper,
     mode: "single",
     options: template.options
   }
@@ -497,7 +671,7 @@ export function buildPromptModeQuestionRequest(params: {
   promptText: string
   localAnalysis: AnalyzePromptResponse
   existingQuestions: ClarificationQuestion[]
-  answerState: Record<string, string>
+  answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
   surface: PromptSurface
   sessionSummary?: Partial<SessionSummary> | null
@@ -519,4 +693,23 @@ export function buildPromptModeQuestionRequest(params: {
     },
     sessionSummary: sessionSummary ?? undefined
   }
+}
+
+export function selectPromptModeQuestions(params: {
+  goalContract?: GoalContract | null
+  localAnalysis: AnalyzePromptResponse
+  questions: ClarificationQuestion[]
+  promptText: string
+}) {
+  const filtered = filterGoalAwareQuestions({
+    goalContract: params.goalContract,
+    questions: params.questions
+  })
+
+  if (filtered.length) return filtered
+  return buildPromptModeFallbackQuestions({
+    promptText: params.promptText,
+    localAnalysis: params.localAnalysis,
+    goalContract: params.goalContract
+  }).questionHistory
 }

@@ -26,6 +26,8 @@ import { ReviewPopup } from "../components/review-popup/review/ReviewPopup"
 import type { ReviewPopupViewModel } from "../components/review-popup/review/review-types"
 import type { PopupAction } from "../components/review-popup/shared/types"
 import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "../lib/review-view-model"
+import { buildSmartReviewContract } from "../lib/smart-review-contract"
+import type { ReviewContract } from "../../extension/lib/review/contracts"
 
 const API_BASE = process.env.NEXT_PUBLIC_REEVA_API_URL?.replace(/\/$/, "") || "http://localhost:3000"
 const OTHER_OPTION = "Other"
@@ -110,6 +112,7 @@ function buildPromptConstraints(
 export default function DemoPage() {
   const promptSectionRef = useRef<HTMLElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const answerSectionRef = useRef<HTMLElement | null>(null)
   const [prompt, setPrompt] = useState("")
   const [activePrompt, setActivePrompt] = useState("")
   const [assistantAnswer, setAssistantAnswer] = useState("")
@@ -137,13 +140,17 @@ export default function DemoPage() {
   const [analysisLoading, setAnalysisLoading] = useState(false)
   const [analysis, setAnalysis] = useState<AfterAnalysisResult | null>(null)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [smartReviewContract, setSmartReviewContract] = useState<ReviewContract | null>(null)
+  const [smartReviewLoading, setSmartReviewLoading] = useState(false)
 
   const [waitlistName, setWaitlistName] = useState("")
   const [waitlistEmail, setWaitlistEmail] = useState("")
   const [waitlistLoading, setWaitlistLoading] = useState(false)
   const [waitlistMessage, setWaitlistMessage] = useState("")
+  const [toastMessage, setToastMessage] = useState("")
   const autoAdvanceKeyRef = useRef("")
   const answerRequestIdRef = useRef(0)
+  const toastTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (answerState !== "loading" || !assistantAnswer) return
@@ -151,7 +158,7 @@ export default function DemoPage() {
     setRenderedAnswer("")
     let index = 0
     const timer = window.setInterval(() => {
-      index += Math.max(1, Math.ceil(assistantAnswer.length / 90))
+      index += Math.max(1, Math.ceil(assistantAnswer.length / 60))
       setRenderedAnswer(assistantAnswer.slice(0, index))
 
       if (index >= assistantAnswer.length) {
@@ -159,31 +166,26 @@ export default function DemoPage() {
         setRenderedAnswer(assistantAnswer)
         setAnswerState("complete")
       }
-    }, 28)
+    }, 18)
 
     return () => window.clearInterval(timer)
   }, [answerState, assistantAnswer])
 
   const currentQuestion = questions[activeQuestionIndex] ?? null
+  const fullAnswerText = useMemo(() => assistantAnswer.trim() || renderedAnswer.trim(), [assistantAnswer, renderedAnswer])
   const visiblePrompt = improvedPrompt || prompt
-  const analysisReady = answerState === "complete" && renderedAnswer.trim().length > 0
+  const analysisReady = answerState === "complete" && fullAnswerText.length > 0
   const canSubmitPrompt = visiblePrompt.trim().length > 0 && answerState !== "loading"
   const answeredPath = useMemo(() => buildAnsweredPath(questions, answers, otherDrafts), [questions, answers, otherDrafts])
   const promptConstraints = useMemo(() => buildPromptConstraints(questions, answers, otherDrafts), [questions, answers, otherDrafts])
 
-  const primaryAction = useMemo(() => {
-    if (analysisReady) {
-      return {
-        mode: "analysis" as const,
-        label: "Analyze"
-      }
-    }
-
-    return {
+  const primaryAction = useMemo(
+    () => ({
       mode: "prompt" as const,
-      label: "reeva AI"
-    }
-  }, [analysisReady])
+      label: "AI Prompt Optimization"
+    }),
+    []
+  )
 
   useEffect(() => {
     if (!currentQuestion || promptLoading || refineLoading) return
@@ -192,7 +194,7 @@ export default function DemoPage() {
     const activeAnswer = answers[currentQuestion.id]
     const normalized = normalizeAnswerValue(currentQuestion, activeAnswer, otherDrafts[currentQuestion.id])
     if (!normalized) return
-    if (activeAnswer === OTHER_OPTION) return
+    if (activeAnswer === OTHER_OPTION || (Array.isArray(activeAnswer) && activeAnswer.includes(OTHER_OPTION))) return
 
     const key = `${currentQuestion.id}:${normalized}:${activeQuestionIndex}`
     if (autoAdvanceKeyRef.current === key) return
@@ -204,6 +206,35 @@ export default function DemoPage() {
 
     return () => window.clearTimeout(timer)
   }, [currentQuestion, answers, otherDrafts, activeQuestionIndex, questions.length, promptLoading, refineLoading])
+
+  useEffect(() => {
+    if (answerState !== "complete" || !fullAnswerText) return
+    window.requestAnimationFrame(() => {
+      answerSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      })
+    })
+  }, [answerState, fullAnswerText])
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current)
+      }
+    }
+  }, [])
+
+  function showToast(message: string) {
+    setToastMessage(message)
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current)
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage("")
+      toastTimerRef.current = null
+    }, 3200)
+  }
 
   async function fetchJson<T>(path: string, body: unknown) {
     const response = await fetch(path, {
@@ -290,17 +321,15 @@ export default function DemoPage() {
     } catch (error) {
       setPromptStatus(error instanceof Error ? error.message : "Unable to start prompt mode.")
     } finally {
-      setPromptLoading(false)
       setPromptBootLoading(false)
+      setPromptLoading(false)
     }
   }
 
   async function advanceQuestion(nextAnswers: Record<string, string | string[]>) {
     const nextUnansweredIndex = findNextUnansweredQuestionIndex({
       currentLevelQuestions,
-      answerState: Object.fromEntries(
-        Object.entries(nextAnswers).map(([key, value]) => [key, Array.isArray(value) ? value[0] ?? "" : value ?? ""])
-      ),
+      answerState: nextAnswers,
       otherAnswerState: otherDrafts,
       otherOption: OTHER_OPTION
     })
@@ -324,9 +353,7 @@ export default function DemoPage() {
         intent: promptIntent,
         existing_questions: questions,
         answers: normalizePlannerAnswers({
-          answerState: Object.fromEntries(
-            Object.entries(nextAnswers).map(([key, value]) => [key, Array.isArray(value) ? value[0] ?? "" : value ?? ""])
-          ),
+          answerState: nextAnswers,
           otherAnswerState: otherDrafts,
           otherOption: OTHER_OPTION
         })
@@ -482,6 +509,12 @@ export default function DemoPage() {
   async function submitPrompt() {
     const nextPrompt = visiblePrompt.trim()
     if (!nextPrompt) return
+
+    if (answerState !== "idle" || assistantAnswer.trim() || renderedAnswer.trim()) {
+      showToast("You can't run another prompt in this demo page. Refresh the page to run another prompt.")
+      return
+    }
+
     const requestId = ++answerRequestIdRef.current
 
     setActivePrompt(nextPrompt)
@@ -523,50 +556,69 @@ export default function DemoPage() {
     setPopupSurface("answer_mode")
     setPopupOpen(true)
 
-    if (analysis || analysisLoading) return
+    if ((analysis && smartReviewContract) || analysisLoading || smartReviewLoading) return
 
     setAnalysisLoading(true)
+    setSmartReviewLoading(true)
     setAnalysisError(null)
 
     try {
       const intent = detectIntent(activePrompt)
       const attemptIntent = buildAttemptIntentFromSubmittedPrompt(activePrompt, intent)
       const now = new Date().toISOString()
-
-      const result = await fetchJson<AfterAnalysisResult>(`${API_BASE}/api/analyze-after`, {
-        attempt: {
-          attempt_id: `demo-${Date.now()}`,
-          platform: "chatgpt",
-          raw_prompt: activePrompt,
-          optimized_prompt: activePrompt,
-          intent: attemptIntent,
-          status: "submitted",
-          created_at: now,
-          submitted_at: now,
-          response_text: renderedAnswer,
-          response_message_id: null,
-          analysis_result: null,
-          token_usage_total: 0,
-          stage_cache: {}
-        },
-        response_summary: preprocessResponse(renderedAnswer),
-        response_text_fallback: renderedAnswer,
-        deep_analysis: true,
-        baseline_acceptance_criteria: [],
-        baseline_acceptance_checklist: [],
-        baseline_review_contract: null,
-        project_context: "reeva AI event demo web app",
-        current_state: "Visitor is testing a prompt and answer flow inside the standalone demo.",
-        error_summary: null,
-        changed_file_paths_summary: []
+      const responseText = fullAnswerText
+      const taskType = classifyReviewTaskType({
+        raw_prompt: activePrompt,
+        optimized_prompt: activePrompt,
+        intent: attemptIntent
       })
 
+      setSmartReviewContract(null)
+
+      const [result, contract] = await Promise.all([
+        fetchJson<AfterAnalysisResult>(`${API_BASE}/api/analyze-after`, {
+          attempt: {
+            attempt_id: `demo-${Date.now()}`,
+            platform: "chatgpt",
+            raw_prompt: activePrompt,
+            optimized_prompt: activePrompt,
+            intent: attemptIntent,
+            status: "submitted",
+            created_at: now,
+            submitted_at: now,
+            response_text: responseText,
+            response_message_id: null,
+            analysis_result: null,
+            token_usage_total: 0,
+            stage_cache: {}
+          },
+          response_summary: preprocessResponse(responseText),
+          response_text_fallback: responseText,
+          deep_analysis: true,
+          baseline_acceptance_criteria: [],
+          baseline_acceptance_checklist: [],
+          baseline_review_contract: null,
+          project_context: "reeva AI event demo web app",
+          current_state: "Visitor is testing a prompt and answer flow inside the standalone demo.",
+          error_summary: null,
+          changed_file_paths_summary: []
+        }),
+        buildSmartReviewContract({
+          promptText: activePrompt,
+          responseText,
+          taskType
+        })
+      ])
+
       setAnalysis(result)
+      setSmartReviewContract(contract)
     } catch (error) {
       setAnalysis(null)
+      setSmartReviewContract(null)
       setAnalysisError(error instanceof Error ? error.message : "The analysis service is unavailable right now.")
     } finally {
       setAnalysisLoading(false)
+      setSmartReviewLoading(false)
     }
   }
 
@@ -581,6 +633,7 @@ export default function DemoPage() {
         email: waitlistEmail
       })
       setWaitlistMessage(result.message)
+      showToast(result.message)
       setWaitlistName("")
       setWaitlistEmail("")
     } catch (error) {
@@ -609,9 +662,7 @@ export default function DemoPage() {
     currentLevelQuestions,
     currentLevel,
     activeQuestionIndex,
-    answerState: Object.fromEntries(
-      Object.entries(answers).map(([key, value]) => [key, Array.isArray(value) ? value[0] ?? "" : value ?? ""])
-    ),
+    answerState: answers,
     otherAnswerState: otherDrafts,
     isLoadingQuestions: promptLoading,
     isGeneratingPrompt: refineLoading,
@@ -622,16 +673,6 @@ export default function DemoPage() {
 
   const promptActions: PopupAction[] = improvedPrompt
     ? [
-        {
-          id: "copy-improved-prompt",
-          label: "Copy prompt",
-          kind: "secondary",
-          onClick: () => {
-            if (navigator.clipboard?.writeText) {
-              void navigator.clipboard.writeText(improvedPrompt)
-            }
-          }
-        },
         {
           id: "use-improved-prompt",
           label: "Submit prompt",
@@ -670,7 +711,7 @@ export default function DemoPage() {
   ]
 
   const reviewViewModel: ReviewPopupViewModel = useMemo(() => {
-    if (analysisLoading) {
+    if (analysisLoading || smartReviewLoading) {
       return buildReviewLoadingViewModel("deep")
     }
 
@@ -682,6 +723,10 @@ export default function DemoPage() {
       return buildReviewLoadingViewModel("deep")
     }
 
+    if (!smartReviewContract) {
+      return buildReviewErrorViewModel("The smart analysis result is unavailable right now.", "deep")
+    }
+
     const taskType = classifyReviewTaskType({
       raw_prompt: activePrompt || prompt,
       optimized_prompt: activePrompt || prompt,
@@ -690,19 +735,50 @@ export default function DemoPage() {
 
     return mapAfterAnalysisToReviewViewModel({
       result: analysis,
+      reviewContract: smartReviewContract,
       mode: "deep",
       taskType,
       quickBaseline: null,
       onCopyPrompt: () => {
-        if (analysis.next_prompt && navigator.clipboard?.writeText) {
-          void navigator.clipboard.writeText(analysis.next_prompt)
-        }
+        const nextPrompt = (smartReviewContract?.copyPromptText || smartReviewContract?.promptText || analysis.next_prompt || "").trim()
+        if (!nextPrompt) return
+        setPrompt(nextPrompt)
+        setActivePrompt(nextPrompt)
+        setPopupSurface("prompt_mode")
+        setPopupOpen(false)
+        revealPromptEditor()
       }
     })
-  }, [analysis, analysisError, analysisLoading, activePrompt, prompt])
+  }, [analysis, analysisError, analysisLoading, smartReviewLoading, activePrompt, prompt, smartReviewContract])
 
   return (
     <main style={styles.page}>
+      {toastMessage ? (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1200,
+            maxWidth: "min(92vw, 720px)",
+            width: "fit-content",
+            background: "rgba(17, 24, 39, 0.96)",
+            color: "#fff",
+            border: "1px solid rgba(7, 102, 254, 0.3)",
+            boxShadow: "0 20px 48px rgba(15, 23, 42, 0.22)",
+            borderRadius: 16,
+            padding: "14px 18px",
+            fontSize: 14,
+            lineHeight: 1.45,
+            fontWeight: 600
+          }}
+        >
+          {toastMessage}
+        </div>
+      ) : null}
       <section style={styles.shell}>
         <div style={styles.hero}>
           <div style={styles.brandRow}>
@@ -733,14 +809,13 @@ export default function DemoPage() {
 
             <button
               type="button"
-              onClick={primaryAction.mode === "analysis" ? openAnalysisMode : openPromptMode}
+              onClick={openPromptMode}
               className="pressable pressable-strong"
               style={{
-                ...styles.reevaButton,
-                ...(primaryAction.mode === "analysis" ? styles.reevaButtonActive : {})
+                ...styles.reevaButton
               }}
             >
-              <span style={styles.reevaButtonBadge}>{primaryAction.mode === "analysis" ? "Analyze" : "reeva AI"}</span>
+              <span style={styles.reevaButtonBadge}>{primaryAction.label}</span>
             </button>
           </div>
 
@@ -750,20 +825,36 @@ export default function DemoPage() {
             </button>
             <span style={styles.helperCopy}>
               {analysisReady
-                ? "Now tap Analyze to see what reeva AI trusts, questions, or would tighten."
+                ? "Your answer is ready below. Review it and run Analyze from that section."
                 : "While you’re typing, the floating button acts like the extension’s prompt mode."}
             </span>
           </div>
         </section>
 
-        <section style={styles.card}>
+        <section ref={answerSectionRef} style={styles.card}>
           <div style={styles.cardHeader}>
             <span style={styles.kicker}>Assistant answer</span>
-            <span style={styles.modeChip}>{answerState === "complete" ? "Analysis available" : "Demo response"}</span>
+            {analysisReady ? (
+              <button
+                type="button"
+                onClick={() => void openAnalysisMode()}
+                className="pressable pressable-strong"
+                style={styles.analysisHeaderButton}
+              >
+                AI Analysis
+              </button>
+            ) : (
+              <span style={styles.modeChip}>{answerState === "complete" ? "Analysis available" : "Demo response"}</span>
+            )}
           </div>
           <div style={styles.answerBox}>
             {renderedAnswer || "Your demo answer will appear here after you submit the prompt."}
           </div>
+          {analysisReady ? (
+            <div style={styles.answerActionRow}>
+              <span style={styles.helperCopy}>Check whether reeva AI trusts the answer or would tighten the next move.</span>
+            </div>
+          ) : null}
         </section>
 
         <section style={styles.card}>
@@ -920,14 +1011,11 @@ const styles: Record<string, CSSProperties> = {
     position: "absolute",
     top: 12,
     right: 12,
-    background: "linear-gradient(135deg, #2f6efb 0%, #5d45ff 100%)",
+    background: "#0766fe",
     color: "#fff",
     borderRadius: 999,
     padding: "10px 14px",
-    boxShadow: "0 16px 28px rgba(49, 73, 181, 0.28)"
-  },
-  reevaButtonActive: {
-    background: "linear-gradient(135deg, #0d7d53 0%, #2daa6c 100%)"
+    boxShadow: "0 16px 28px rgba(7, 102, 254, 0.28)"
   },
   reevaButtonBadge: {
     fontSize: 13,
@@ -983,6 +1071,19 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(255,255,255,0.96)",
     whiteSpace: "pre-wrap",
     lineHeight: 1.65
+  },
+  answerActionRow: {
+    display: "grid",
+    gap: 10,
+    marginTop: 14
+  },
+  analysisHeaderButton: {
+    background: "#0766fe",
+    color: "#fff",
+    borderRadius: 999,
+    padding: "10px 14px",
+    fontWeight: 700,
+    boxShadow: "0 16px 28px rgba(7, 102, 254, 0.22)"
   },
   waitlistForm: {
     display: "grid",

@@ -17,7 +17,7 @@ export type ReviewPromptModeState = {
   currentLevelQuestions: ClarificationQuestion[]
   currentLevel: number
   activeQuestionIndex: number
-  answerState: Record<string, string>
+  answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
   isLoadingQuestions: boolean
   isGeneratingPrompt: boolean

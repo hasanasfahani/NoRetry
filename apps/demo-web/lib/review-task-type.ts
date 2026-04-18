@@ -12,7 +12,7 @@ export type ReviewTaskType =
   | "ideation"
 
 const INSTRUCTIONAL_PATTERNS = [/\bhow to\b/i, /\binstructions?\b/i, /\bsteps?\b/i, /\binstall\b/i, /\bsetup\b/i, /\bset up\b/i, /\bconfigure\b/i, /\bload unpacked\b/i]
-const EXPLANATORY_PATTERNS = [/\bexplain\b/i, /\bwhy\b/i, /\bwhat is\b/i, /\bhow does\b/i, /\bwalk me through\b/i, /\bteach me\b/i, /\bdescribe\b/i]
+const EXPLANATORY_PATTERNS = [/\bexplain\b/i, /\bwhy\b/i, /\bwhat is\b/i, /\bhow does\b/i, /\bwalk me through\b/i, /\bteach me\b/i, /\bdescribe\b/i, /\bclarify\b/i]
 const ADVICE_PATTERNS = [/\bideas?\b/i, /\bsuggestions?\b/i, /\bsuggest\b/i, /\brecommend\b/i, /\brecommend(?:ation|ations)?\b/i, /\bwhat should i\b/i, /\bwhat can i\b/i, /\bbest way\b/i, /\bbest match\b/i, /\bexact product\b/i, /\bbuy online\b/i, /\bonline today\b/i, /\bhealthy meal\b/i, /\bmeal ideas?\b/i, /\bweekday meals?\b/i, /\bbusy weekdays?\b/i]
 const IDEATION_PATTERNS = [/\bbrainstorm\b/i, /\bconcepts?\b/i, /\boptions?\b/i, /\bthemes?\b/i, /\bangles?\b/i, /\bname ideas?\b/i, /\btaglines?\b/i]
 const CREATION_PATTERNS = [/\bcreate\b/i, /\bgenerate\b/i, /\bbuild\b/i, /\bmake\b/i, /\bdesign\b/i, /\bwebsite code\b/i, /\bhtml\b/i, /\bcss\b/i, /\bjavascript\b/i, /\blanding page\b/i, /\bportfolio\b/i, /\bcv\b/i, /\bresume\b/i, /\bcomponent\b/i, /\btemplate\b/i]

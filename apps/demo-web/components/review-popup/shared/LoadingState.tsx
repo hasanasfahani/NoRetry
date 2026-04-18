@@ -91,16 +91,20 @@ const PROMPT_STAGES: LoadingStage[] = [
 ]
 
 function getProgress(elapsedMs: number) {
-  if (elapsedMs <= 900) {
-    return 25 * (elapsedMs / 900)
+  if (elapsedMs <= 520) {
+    return 34 * (elapsedMs / 520)
   }
 
-  if (elapsedMs <= 4100) {
-    return 25 + 55 * ((elapsedMs - 900) / 3200)
+  if (elapsedMs <= 2200) {
+    return 34 + 46 * ((elapsedMs - 520) / 1680)
   }
 
-  const tailElapsed = elapsedMs - 4100
-  return Math.min(94.8, 80 + 15 * (1 - Math.exp(-tailElapsed / 2200)))
+  if (elapsedMs <= 4200) {
+    return 80 + 12 * ((elapsedMs - 2200) / 2000)
+  }
+
+  const tailElapsed = elapsedMs - 4200
+  return Math.min(97.2, 92 + 5.2 * (1 - Math.exp(-tailElapsed / 900)))
 }
 
 function stageForProgress(stages: LoadingStage[], progress: number, complete: boolean) {
@@ -143,7 +147,7 @@ export function LoadingState(props: LoadingStateProps) {
       setProgress(100)
       completionTimerRef.current = window.setTimeout(() => {
         props.onComplete?.()
-      }, 420)
+      }, 180)
       return
     }
 
@@ -151,7 +155,7 @@ export function LoadingState(props: LoadingStateProps) {
     const tick = () => {
       const nextProgress = getProgress(performance.now() - startTimeRef.current)
       setProgress((current) => (nextProgress > current ? nextProgress : current))
-      frame = window.setTimeout(tick, 90)
+      frame = window.setTimeout(tick, 70)
     }
 
     tick()

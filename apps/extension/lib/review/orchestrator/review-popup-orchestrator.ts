@@ -1,6 +1,6 @@
 import type { AfterAnalysisResult } from "@prompt-optimizer/shared/src/schemas"
 import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "../mappers/review-view-model"
-import { buildReviewTargetKey, buildUserSafeReviewErrorMessage, type ReviewAnalysisRunner } from "../services/review-analysis"
+import { buildReviewTargetKey, buildUserSafeReviewErrorMessage, getReviewAnalysisContext, type ReviewAnalysisRunner } from "../services/review-analysis"
 import type {
   ReviewPopupControllerState,
   ReviewPopupMode,
@@ -53,7 +53,7 @@ export function createReviewPopupOrchestrator(input: CreateReviewPopupOrchestrat
 
   function invalidate() {
     cache = null
-    console.debug("[NoRetry][ReviewPopup]", "cache invalidated")
+    console.debug("[reeva AI][ReviewPopup]", "cache invalidated")
   }
 
   function shouldRetryTargetResolution(result: ReviewTargetResolution) {
@@ -72,7 +72,7 @@ export function createReviewPopupOrchestrator(input: CreateReviewPopupOrchestrat
 
     for (const delayMs of TARGET_RESOLUTION_RETRY_DELAYS_MS) {
       if (requestId !== activeRequestId) return lastResolution
-      console.debug("[NoRetry][ReviewPopup]", "retrying target resolution", {
+      console.debug("[reeva AI][ReviewPopup]", "retrying target resolution", {
         reason: lastResolution.ok ? "resolved" : lastResolution.reason,
         delayMs
       })
@@ -145,11 +145,17 @@ export function createReviewPopupOrchestrator(input: CreateReviewPopupOrchestrat
           analysisFinished: true
         }),
         viewModel: mapAfterAnalysisToReviewViewModel({
-          result: cachedResult,
+          result: cachedResult.result,
+          reviewContract: cachedResult.reviewContract,
           mode,
           taskType: target.taskType,
-          quickBaseline: cache.quick,
-          onCopyPrompt: () => input.onCopyPrompt(cachedResult.next_prompt)
+          quickBaseline: cache.quick?.result ?? null,
+          onCopyPrompt: () => input.onCopyPrompt(
+            cachedResult.reviewContract?.copyPromptText ||
+            cachedResult.result.next_prompt_output?.next_prompt ||
+            cachedResult.reviewContract?.promptText ||
+            cachedResult.result.next_prompt
+          )
         })
       })
       return
@@ -172,15 +178,18 @@ export function createReviewPopupOrchestrator(input: CreateReviewPopupOrchestrat
       const result = await input.runAnalysis({
         target,
         mode,
-        quickBaseline: cache.quick
+        quickBaseline: cache.quick?.result ?? null
       })
       if (requestId !== activeRequestId) return
 
-      if (mode === "deep") {
-        cache.deep = result
-      } else {
-        cache.quick = result
+      const context = getReviewAnalysisContext(result)
+      const cachedPayload = {
+        result,
+        reviewContract: context?.reviewContract ?? null,
+        goalContract: context?.goalContract ?? null
       }
+      if (mode === "deep") cache.deep = cachedPayload
+      else cache.quick = cachedPayload
 
       emit({
         controller: buildControllerState({
@@ -194,10 +203,16 @@ export function createReviewPopupOrchestrator(input: CreateReviewPopupOrchestrat
         }),
         viewModel: mapAfterAnalysisToReviewViewModel({
           result,
+          reviewContract: context?.reviewContract ?? null,
           mode,
           taskType: target.taskType,
-          quickBaseline: cache.quick,
-          onCopyPrompt: () => input.onCopyPrompt(result.next_prompt)
+          quickBaseline: cache.quick?.result ?? null,
+          onCopyPrompt: () => input.onCopyPrompt(
+            context?.reviewContract?.copyPromptText ||
+            result.next_prompt_output?.next_prompt ||
+            context?.reviewContract?.promptText ||
+            result.next_prompt
+          )
         })
       })
     } catch {
