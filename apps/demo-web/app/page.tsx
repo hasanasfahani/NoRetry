@@ -18,8 +18,6 @@ import {
   type ExtendQuestionsResponse,
   type PromptIntent,
   type RefinePromptResponse,
-  type ReviewPromptModeState,
-  type ReviewPopupSurface,
   classifyReviewTaskType
 } from "@prompt-optimizer/shared"
 import { ReviewPopup } from "../components/review-popup/review/ReviewPopup"
@@ -27,6 +25,7 @@ import type { ReviewPopupViewModel } from "../components/review-popup/review/rev
 import type { PopupAction } from "../components/review-popup/shared/types"
 import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "../lib/review-view-model"
 import { buildSmartReviewContract } from "../lib/smart-review-contract"
+import type { ReviewPromptModeState, ReviewPopupSurface } from "../lib/review-types"
 import type { ReviewContract } from "../../extension/lib/review/contracts"
 
 const API_BASE = process.env.NEXT_PUBLIC_REEVA_API_URL?.replace(/\/$/, "") || "http://localhost:3000"

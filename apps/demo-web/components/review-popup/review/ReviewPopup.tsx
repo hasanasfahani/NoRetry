@@ -8,7 +8,7 @@ import { ReviewPromptMode } from "./ReviewPromptMode"
 import { ReviewPopupHeader } from "./ReviewPopupHeader"
 import type { ReviewPopupViewModel } from "./review-types"
 import type { PopupAction } from "../shared/types"
-import type { ReviewPopupSurface, ReviewPromptModeState } from "@prompt-optimizer/shared"
+import type { ReviewPopupSurface, ReviewPromptModeState } from "../../../lib/review-types"
 
 type ReviewPopupProps = {
   open: boolean

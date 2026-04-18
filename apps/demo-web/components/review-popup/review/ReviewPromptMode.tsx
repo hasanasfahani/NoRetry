@@ -3,7 +3,7 @@ import { ActionBar } from "../shared/ActionBar"
 import { PromptCard } from "../shared/PromptCard"
 import { SectionCard } from "../shared/SectionCard"
 import type { PopupAction } from "../shared/types"
-import type { ReviewPromptModeState } from "@prompt-optimizer/shared"
+import type { ReviewPromptModeState } from "../../../lib/review-types"
 
 type ReviewPromptModeProps = {
   state: ReviewPromptModeState
