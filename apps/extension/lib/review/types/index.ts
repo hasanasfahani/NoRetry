@@ -1,7 +1,5 @@
 import type { AfterAnalysisResult, AnalyzePromptResponse, Attempt, ClarificationQuestion } from "@prompt-optimizer/shared/src/schemas"
 import type { GoalContract } from "../../goal/types"
-import type { PromptContract } from "../../prompt/contracts"
-import type { PreflightAssessment } from "../../preflight/preflight-risk-engine"
 import type { ReviewContract } from "../contracts"
 import type { ReviewTaskType } from "../services/review-task-type"
 import type { ReviewPromptModeV2Validation } from "../v2/prompt-mode-v2-assembly"
@@ -13,6 +11,29 @@ import type {
   ReviewPromptModeV2TemplateKind
 } from "../v2/request-types"
 import type { ReviewPromptModeV2QuestionMode, ReviewPromptModeV2SectionState } from "../v2/section-schemas"
+
+export type ReviewPromptRenderSection = {
+  title: string
+  items: string[]
+}
+
+export type ReviewPromptContract = {
+  goalContract: GoalContract
+  sections: ReviewPromptRenderSection[]
+  renderedPrompt: string
+}
+
+export type ReviewPreflightSignal = {
+  label: string
+  severity: "info" | "warning" | "critical"
+}
+
+export type ReviewPreflightAssessment = {
+  riskLevel: "low" | "medium" | "high"
+  signals: ReviewPreflightSignal[]
+  topSignal: ReviewPreflightSignal | null
+  summary: string
+}
 
 export type ReviewPopupMode = "quick" | "deep"
 
@@ -71,7 +92,7 @@ export type ReviewPromptModeState = {
   sourcePrompt: string
   planningGoal: string
   goalContract: GoalContract | null
-  promptContract: PromptContract | null
+  promptContract: ReviewPromptContract | null
   planningAttempt: Attempt | null
   analysisSeed: AfterAnalysisResult | null
   localAnalysis: AnalyzePromptResponse | null
@@ -132,7 +153,7 @@ export type ReviewTypingState = {
   promptText: string
   sessionKey: string | null
   goalContract: GoalContract | null
-  preflight: PreflightAssessment | null
+  preflight: ReviewPreflightAssessment | null
 }
 
 export type ReviewPopupControllerState = {
