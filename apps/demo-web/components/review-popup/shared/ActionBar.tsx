@@ -15,6 +15,7 @@ export function ActionBar(props: ActionBarProps) {
           key={action.id}
           type="button"
           disabled={action.disabled}
+          className={action.attention ? "cta-nudge" : undefined}
           style={buttonStyle(action.kind ?? "secondary", Boolean(action.disabled))}
           onClick={action.onClick}
         >

@@ -71,6 +71,12 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
     const other = props.state.otherAnswerState[question.id]?.trim()
     return hasAnsweredValue(raw ?? "", other)
   }).length
+  const readyPromptActions = props.state.promptReady
+    ? props.promptActions.map((action) => ({
+        ...action,
+        attention: action.id === "submit-prompt"
+      }))
+    : props.promptActions
 
   return (
     <>
@@ -197,7 +203,7 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
 
       {props.state.promptReady ? (
         <div ref={promptReadyRef} style={styles.promptReadyWrap}>
-          <ActionBar actions={props.promptActions} />
+          <ActionBar actions={readyPromptActions} />
           <PromptCard
             label="Next best prompt"
             prompt={props.state.promptDraft}
