@@ -99,6 +99,19 @@ function buildPromptConstraints(
     .filter(Boolean)
 }
 
+function sanitizeEnglishPrompt(value: string) {
+  return Array.from(value)
+    .filter((character) => {
+      const code = character.charCodeAt(0)
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 126)
+    })
+    .join("")
+}
+
+function hasEnglishLetters(value: string) {
+  return /[A-Za-z]/.test(value)
+}
+
 function renderInlineMarkdown(text: string): ReactNode[] {
   const parts = text.split(/(\*\*[^*]+\*\*)/)
   return parts.filter(Boolean).map((part, index) => {
@@ -232,6 +245,7 @@ export default function DemoPage() {
   const [activePrompt, setActivePrompt] = useState("")
   const [assistantAnswer, setAssistantAnswer] = useState("")
   const [renderedAnswer, setRenderedAnswer] = useState("")
+  const [loadingPreview, setLoadingPreview] = useState("")
   const [answerState, setAnswerState] = useState<"idle" | "loading" | "complete">("idle")
 
   const [popupOpen, setPopupOpen] = useState(false)
@@ -288,11 +302,52 @@ export default function DemoPage() {
     return () => window.clearInterval(timer)
   }, [answerState, assistantAnswer])
 
+  useEffect(() => {
+    if (answerState !== "loading" || assistantAnswer) {
+      setLoadingPreview("")
+      return
+    }
+
+    const previewWords = [
+      "Understanding",
+      "your",
+      "prompt.",
+      "Organizing",
+      "the",
+      "best",
+      "structure.",
+      "Drafting",
+      "a",
+      "clear",
+      "answer.",
+      "Checking",
+      "constraints.",
+      "Polishing",
+      "the",
+      "final",
+      "output."
+    ]
+
+    let index = 0
+    setLoadingPreview("")
+
+    const timer = window.setInterval(() => {
+      index = Math.min(index + 1, previewWords.length)
+      setLoadingPreview(previewWords.slice(0, index).join(" "))
+      if (index >= previewWords.length) {
+        index = 0
+        window.setTimeout(() => setLoadingPreview(""), 180)
+      }
+    }, 110)
+
+    return () => window.clearInterval(timer)
+  }, [answerState, assistantAnswer])
+
   const currentQuestion = questions[activeQuestionIndex] ?? null
   const fullAnswerText = useMemo(() => assistantAnswer.trim() || renderedAnswer.trim(), [assistantAnswer, renderedAnswer])
   const visiblePrompt = improvedPrompt || prompt
   const analysisReady = answerState === "complete" && fullAnswerText.length > 0
-  const canSubmitPrompt = visiblePrompt.trim().length > 0 && answerState !== "loading"
+  const canSubmitPrompt = visiblePrompt.trim().length > 0 && hasEnglishLetters(visiblePrompt) && answerState !== "loading"
   const showPromptOptimizeNudge =
     prompt.trim().length > 0 && answerState === "idle" && !promptBootLoading && !promptLoading && !popupOpen
   const showAnalysisNudge = analysisReady && !analysisLoading && !popupOpen
@@ -383,6 +438,14 @@ export default function DemoPage() {
       setToastMessage("")
       toastTimerRef.current = null
     }, 3200)
+  }
+
+  function handlePromptInput(nextValue: string) {
+    const sanitized = sanitizeEnglishPrompt(nextValue)
+    if (sanitized !== nextValue) {
+      showToast("English text only. Non-English characters were removed.")
+    }
+    setPrompt(sanitized)
   }
 
   async function fetchJson<T>(path: string, body: unknown) {
@@ -674,6 +737,12 @@ export default function DemoPage() {
     setAnalysisError(null)
     setAnalysisLoading(false)
     setPopupOpen(false)
+    window.requestAnimationFrame(() => {
+      answerSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      })
+    })
 
     try {
       const result = await fetchJson<{ answer: string }>("/api/demo-answer", { prompt: nextPrompt })
@@ -963,25 +1032,39 @@ export default function DemoPage() {
         <section ref={promptSectionRef} style={styles.card}>
           <div style={styles.promptHeader}>
             <span style={styles.kicker}>Prompt playground</span>
-            <button
-              ref={promptOptimizeButtonRef}
-              type="button"
-              onClick={openPromptMode}
-              className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
-              style={styles.promptHeaderButton}
-            >
-              AI Prompt Optimization
-            </button>
           </div>
 
           <div ref={promptPlaygroundRef} style={styles.promptWrap}>
             <textarea
               ref={promptInputRef}
               value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Ask for a product recommendation, rewrite, HTML file, recipe, or explanation..."
+              onChange={(event) => handlePromptInput(event.target.value)}
+              placeholder="English text only. Example: Build a landing page for a SaaS product..."
               style={styles.promptInput}
+              dir="ltr"
+              lang="en"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
             />
+          </div>
+
+          <div style={styles.promptGuardrailRow}>
+            <span style={styles.promptGuardrailChip}>English only</span>
+            <span style={styles.promptGuardrailCopy}>Non-English characters are removed automatically.</span>
+          </div>
+
+          <div style={styles.promptOptimizeRow}>
+            <button
+              ref={promptOptimizeButtonRef}
+              type="button"
+              onClick={openPromptMode}
+              className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
+              style={styles.promptOptimizeButton}
+            >
+              AI Prompt Optimization
+            </button>
+            <span style={styles.promptOptimizeHint}>Recommended before you run the prompt.</span>
           </div>
 
           <div style={styles.runRow}>
@@ -1007,7 +1090,25 @@ export default function DemoPage() {
           <div style={styles.cardHeader}>
             <span style={styles.kicker}>Assistant answer</span>
           </div>
-          <div style={styles.answerHeaderActionRow}>
+          <div style={styles.answerBox}>
+            {answerState === "loading" && !assistantAnswer ? (
+              <div style={styles.answerLoadingState}>
+                <div style={styles.answerLoadingBadge}>
+                  <span style={styles.answerLoadingDot} />
+                  <span>Generating your answer</span>
+                </div>
+                <div style={styles.answerLoadingPreview}>
+                  {loadingPreview || "Preparing the first draft"}
+                  <span style={styles.answerLoadingCursor}>|</span>
+                </div>
+              </div>
+            ) : renderedAnswer ? (
+              <div style={styles.answerRichText}>{renderAnswerRichText(renderedAnswer)}</div>
+            ) : (
+              "Your demo answer will appear here after you submit the prompt."
+            )}
+          </div>
+          <div style={styles.answerActionRow}>
             <button
               ref={analysisButtonRef}
               type="button"
@@ -1015,21 +1116,14 @@ export default function DemoPage() {
               className={`pressable pressable-strong${showAnalysisNudge ? " cta-nudge" : ""}`}
               style={styles.analysisHeaderButton}
             >
-              AI Analysis
+              AI Answer Analysis
             </button>
+            <span style={styles.helperCopy}>
+              {analysisReady
+                ? "Review the answer above, then analyze it to see whether reeva AI trusts it or suggests a better next prompt."
+                : "Once an answer appears here, analyze it as the next step."}
+            </span>
           </div>
-          <div style={styles.answerBox}>
-            {renderedAnswer ? (
-              <div style={styles.answerRichText}>{renderAnswerRichText(renderedAnswer)}</div>
-            ) : (
-              "Your demo answer will appear here after you submit the prompt."
-            )}
-          </div>
-          {analysisReady ? (
-            <div style={styles.answerActionRow}>
-              <span style={styles.helperCopy}>Check whether reeva AI trusts the answer or would tighten the next move.</span>
-            </div>
-          ) : null}
         </section>
 
         <section ref={waitlistSectionRef} style={styles.card}>
@@ -1160,8 +1254,6 @@ const styles: Record<string, CSSProperties> = {
   promptHeader: {
     display: "flex",
     alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 12,
     marginBottom: 14
   },
   kicker: {
@@ -1192,25 +1284,56 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(8, 15, 32, 0.82)",
     color: "var(--ink)",
     lineHeight: 1.55,
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)"
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)",
+    direction: "ltr",
+    textAlign: "left"
   },
-  promptHeaderButton: {
-    flexShrink: 0,
+  promptGuardrailRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap",
+    marginTop: 12
+  },
+  promptGuardrailChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 999,
+    padding: "6px 10px",
+    background: "rgba(7, 102, 254, 0.14)",
+    border: "1px solid rgba(120, 181, 255, 0.14)",
+    color: "#dcebff",
+    fontSize: 12,
+    fontWeight: 800,
+    letterSpacing: "0.04em",
+    textTransform: "uppercase"
+  },
+  promptGuardrailCopy: {
+    color: "rgba(226, 235, 255, 0.72)",
+    fontSize: 13,
+    lineHeight: 1.5
+  },
+  promptOptimizeRow: {
+    display: "grid",
+    gap: 10,
+    marginTop: 16
+  },
+  promptOptimizeButton: {
     background: "#0766fe",
     color: "#fff",
-    borderRadius: 999,
-    padding: "10px 14px",
-    boxShadow: "0 16px 28px rgba(7, 102, 254, 0.28)",
-    fontSize: 13,
+    borderRadius: 18,
+    padding: "14px 16px",
+    boxShadow: "0 18px 32px rgba(7, 102, 254, 0.28)",
+    fontSize: 15,
     fontWeight: 700,
     lineHeight: 1.1,
-    whiteSpace: "nowrap",
-    alignSelf: "flex-start"
+    width: "100%"
   },
-  answerHeaderActionRow: {
-    display: "flex",
-    justifyContent: "flex-end",
-    marginBottom: 12
+  promptOptimizeHint: {
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: "rgba(226, 235, 255, 0.68)"
   },
   improvedPromptBox: {
     marginTop: 14,
@@ -1256,12 +1379,54 @@ const styles: Record<string, CSSProperties> = {
     color: "var(--muted)"
   },
   answerBox: {
-    minHeight: 220,
+    height: 280,
     borderRadius: 22,
     border: "1px solid rgba(255,255,255,0.12)",
     padding: 18,
     background: "rgba(8, 15, 32, 0.82)",
-    lineHeight: 1.65
+    lineHeight: 1.65,
+    overflowY: "auto"
+  },
+  answerLoadingState: {
+    display: "grid",
+    alignContent: "start",
+    gap: 14,
+    minHeight: "100%"
+  },
+  answerLoadingBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 10,
+    alignSelf: "flex-start",
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(7,102,254,0.18)",
+    background: "rgba(7,102,254,0.08)",
+    color: "#8bc4ff",
+    fontSize: 13,
+    lineHeight: 1.4,
+    fontWeight: 700
+  },
+  answerLoadingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    background: "#57c9ff",
+    boxShadow: "0 0 18px rgba(87, 201, 255, 0.8)"
+  },
+  answerLoadingPreview: {
+    margin: 0,
+    color: "rgba(236, 243, 255, 0.88)",
+    fontSize: 20,
+    lineHeight: 1.7,
+    fontWeight: 650
+  },
+  answerLoadingCursor: {
+    display: "inline-block",
+    marginLeft: 4,
+    color: "#8bc4ff",
+    fontWeight: 800,
+    animation: "reeva-caret 1s step-end infinite"
   },
   answerRichText: {
     display: "grid",
