@@ -176,6 +176,17 @@ button:active:not(:disabled) {
   }
 }
 
+@keyframes reeva-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cta-nudge,
   .cta-nudge::before,

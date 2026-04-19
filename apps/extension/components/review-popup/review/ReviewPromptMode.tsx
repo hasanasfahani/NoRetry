@@ -68,9 +68,6 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
     <>
       <SectionCard title="Planning goal" subtitle="Your current unsent prompt now anchors the next-step tree.">
         <p style={styles.goal}>{props.state.planningGoal}</p>
-        <p style={styles.copy}>
-          reeva AI starts the branch from this typed prompt, so you do not need to re-enter the direction inside the popup.
-        </p>
       </SectionCard>
 
       {visibleQuestions.length ? (
