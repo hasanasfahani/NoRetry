@@ -80,7 +80,21 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
 
       {visibleQuestions.length ? (
         <div ref={questionSectionRef}>
-        <SectionCard title="Prompt tree" subtitle={`${answeredCount} answered · level ${props.state.currentLevel}`}>
+        <SectionCard
+          title="Prompt tree"
+          subtitle={`${answeredCount} answered · level ${props.state.currentLevel}`}
+          headerAction={
+            <button
+              type="button"
+              style={styles.secondaryButton(answeredCount < 1)}
+              className={props.state.isGeneratingPrompt ? "cta-loading" : undefined}
+              onClick={props.onGeneratePrompt}
+              disabled={props.state.isGeneratingPrompt || props.state.isLoadingQuestions || answeredCount < 1}
+            >
+              {props.state.isGeneratingPrompt ? "Generating..." : "Generate prompt now"}
+            </button>
+          }
+        >
           <div style={styles.tabHeader}>
             <div style={styles.tabRow}>
             {visibleQuestions.map((question, index) => {
@@ -176,15 +190,6 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
             <p style={styles.copy}>
               You can stop partway through this tree and still generate an improved prompt from the answered path so far.
             </p>
-            <button
-              type="button"
-              style={styles.secondaryButton}
-              className={props.state.isGeneratingPrompt ? "cta-loading" : undefined}
-              onClick={props.onGeneratePrompt}
-              disabled={props.state.isGeneratingPrompt || props.state.isLoadingQuestions}
-            >
-              {props.state.isGeneratingPrompt ? "Generating..." : "Generate prompt now"}
-            </button>
           </div>
         </SectionCard>
         </div>
@@ -336,14 +341,15 @@ const styles = {
     cursor: "pointer",
     boxShadow: "0 18px 34px rgba(7, 102, 254, 0.24)"
   } satisfies CSSProperties,
-  secondaryButton: {
+  secondaryButton: (disabled?: boolean) => ({
     justifySelf: "flex-start",
     border: "1px solid rgba(255,255,255,0.14)",
     borderRadius: 999,
-    background: "rgba(255,255,255,0.08)",
-    color: "#f7fbff",
+    background: disabled ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.08)",
+    color: disabled ? "rgba(247,251,255,0.46)" : "#f7fbff",
     padding: "12px 18px",
     fontWeight: 800,
-    cursor: "pointer"
-  } satisfies CSSProperties
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.72 : 1
+  }) satisfies CSSProperties
 }

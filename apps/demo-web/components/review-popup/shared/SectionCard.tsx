@@ -3,14 +3,23 @@ import type { CSSProperties, ReactNode } from "react"
 type SectionCardProps = {
   title?: string
   subtitle?: string
+  headerAction?: ReactNode
   children: ReactNode
 }
 
 export function SectionCard(props: SectionCardProps) {
   return (
     <section style={styles.card}>
-      {props.title ? <p style={styles.title}>{props.title}</p> : null}
-      {props.subtitle ? <p style={styles.subtitle}>{props.subtitle}</p> : null}
+      {props.title || props.headerAction ? (
+        <div style={styles.headerRow}>
+          <div style={styles.headerCopy}>
+            {props.title ? <p style={styles.title}>{props.title}</p> : null}
+            {props.subtitle ? <p style={styles.subtitle}>{props.subtitle}</p> : null}
+          </div>
+          {props.headerAction ? <div style={styles.headerAction}>{props.headerAction}</div> : null}
+        </div>
+      ) : null}
+      {!props.title && props.subtitle ? <p style={styles.subtitle}>{props.subtitle}</p> : null}
       <div style={styles.content}>{props.children}</div>
     </section>
   )
@@ -23,6 +32,21 @@ const styles: Record<string, CSSProperties> = {
     background: "rgba(8, 15, 32, 0.56)",
     padding: 16,
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)"
+  },
+  headerRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12
+  },
+  headerCopy: {
+    minWidth: 0,
+    display: "grid"
+  },
+  headerAction: {
+    flexShrink: 0,
+    display: "flex",
+    justifyContent: "flex-end"
   },
   title: {
     margin: 0,
