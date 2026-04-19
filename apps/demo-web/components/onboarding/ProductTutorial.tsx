@@ -61,12 +61,15 @@ export function ProductTutorial({ open, steps, onClose }: ProductTutorialProps) 
       const node = activeStep.targetRef.current
       if (!node) return
       const bounds = node.getBoundingClientRect()
-      const padding = 10
+      const padding =
+        activeStep.id === "ai-analysis"
+          ? { top: 4, right: 10, bottom: 10, left: 10 }
+          : { top: 10, right: 10, bottom: 10, left: 10 }
       setRect({
-        top: Math.max(12, bounds.top - padding),
-        left: Math.max(12, bounds.left - padding),
-        width: Math.min(window.innerWidth - 24, bounds.width + padding * 2),
-        height: bounds.height + padding * 2
+        top: Math.max(12, bounds.top - padding.top),
+        left: Math.max(12, bounds.left - padding.left),
+        width: Math.min(window.innerWidth - 24, bounds.width + padding.left + padding.right),
+        height: bounds.height + padding.top + padding.bottom
       })
 
       const reservedBottomSpace = 290
@@ -99,6 +102,7 @@ export function ProductTutorial({ open, steps, onClose }: ProductTutorialProps) 
   }, [open, activeIndex, activeStep])
 
   const progress = useMemo(() => ((activeIndex + 1) / Math.max(1, steps.length)) * 100, [activeIndex, steps.length])
+  const hideTopBrand = activeStep?.id === "ai-analysis"
 
   if (!open || !activeStep) return null
 
@@ -160,7 +164,7 @@ export function ProductTutorial({ open, steps, onClose }: ProductTutorialProps) 
         <div style={{ ...styles.scrimBand, inset: 0 }} />
       )}
 
-      <div style={styles.topBar}>
+      <div style={{ ...styles.topBar, ...(hideTopBrand ? styles.topBarHidden : null) }}>
         <div style={styles.brandWrap}>
           <ReevaLogo width={124} height={32} />
         </div>
@@ -223,6 +227,10 @@ const styles: Record<string, CSSProperties> = {
     alignItems: "center",
     justifyContent: "flex-end",
     gap: 12
+  },
+  topBarHidden: {
+    opacity: 0,
+    pointerEvents: "none"
   },
   brandWrap: {
     display: "flex",
