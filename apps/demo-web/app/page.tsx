@@ -294,18 +294,10 @@ export default function DemoPage() {
   const analysisReady = answerState === "complete" && fullAnswerText.length > 0
   const canSubmitPrompt = visiblePrompt.trim().length > 0 && answerState !== "loading"
   const showPromptOptimizeNudge =
-    prompt.trim().length > 0 && answerState !== "complete" && !promptBootLoading && !promptLoading && !popupOpen
+    prompt.trim().length > 0 && answerState === "idle" && !promptBootLoading && !promptLoading && !popupOpen
   const showAnalysisNudge = analysisReady && !analysisLoading && !popupOpen
   const answeredPath = useMemo(() => buildAnsweredPath(questions, answers, otherDrafts), [questions, answers, otherDrafts])
   const promptConstraints = useMemo(() => buildPromptConstraints(questions, answers, otherDrafts), [questions, answers, otherDrafts])
-
-  const primaryAction = useMemo(
-    () => ({
-      mode: "prompt" as const,
-      label: "AI Prompt Optimization"
-    }),
-    []
-  )
 
   const productTutorialSteps = useMemo(
     () => [
@@ -969,9 +961,17 @@ export default function DemoPage() {
         </div>
 
         <section ref={promptSectionRef} style={styles.card}>
+          <button
+            ref={promptOptimizeButtonRef}
+            type="button"
+            onClick={openPromptMode}
+            className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
+            style={styles.promptCornerButton}
+          >
+            AI Prompt Optimization
+          </button>
           <div style={styles.cardHeader}>
             <span style={styles.kicker}>Prompt playground</span>
-            <span style={styles.modeChip}>{analysisReady ? "Answer ready" : "Prompt mode"}</span>
           </div>
 
           <div ref={promptPlaygroundRef} style={styles.promptWrap}>
@@ -982,18 +982,6 @@ export default function DemoPage() {
               placeholder="Ask for a product recommendation, rewrite, HTML file, recipe, or explanation..."
               style={styles.promptInput}
             />
-
-            <button
-              ref={promptOptimizeButtonRef}
-              type="button"
-              onClick={openPromptMode}
-              className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
-              style={{
-                ...styles.reevaButton
-              }}
-            >
-              <span style={styles.reevaButtonBadge}>{primaryAction.label}</span>
-            </button>
           </div>
 
           <div style={styles.runRow}>
@@ -1018,6 +1006,8 @@ export default function DemoPage() {
         <section ref={answerSectionRef} style={styles.card}>
           <div style={styles.cardHeader}>
             <span style={styles.kicker}>Assistant answer</span>
+          </div>
+          <div style={styles.answerHeaderActionRow}>
             <button
               ref={analysisButtonRef}
               type="button"
@@ -1152,6 +1142,7 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.5
   },
   card: {
+    position: "relative",
     background: "var(--panel)",
     border: "1px solid var(--line)",
     borderRadius: 28,
@@ -1190,26 +1181,28 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: 22,
     border: "1px solid rgba(255,255,255,0.12)",
     padding: "20px 18px 18px",
-    paddingRight: 120,
     resize: "vertical",
     background: "rgba(8, 15, 32, 0.82)",
     color: "var(--ink)",
     lineHeight: 1.55,
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)"
   },
-  reevaButton: {
+  promptCornerButton: {
     position: "absolute",
-    top: 12,
-    right: 12,
+    top: 18,
+    right: 18,
     background: "#0766fe",
     color: "#fff",
     borderRadius: 999,
-    padding: "10px 14px",
-    boxShadow: "0 16px 28px rgba(7, 102, 254, 0.28)"
-  },
-  reevaButtonBadge: {
+    padding: "10px 16px",
+    boxShadow: "0 16px 28px rgba(7, 102, 254, 0.28)",
     fontSize: 13,
     fontWeight: 700
+  },
+  answerHeaderActionRow: {
+    display: "flex",
+    justifyContent: "flex-end",
+    marginBottom: 12
   },
   improvedPromptBox: {
     marginTop: 14,
