@@ -38,8 +38,8 @@ function buttonStyle(kind: PopupAction["kind"], disabled: boolean): CSSPropertie
   if (kind === "primary") {
     return {
       ...shared,
-      border: "1px solid rgba(7, 102, 254, 0.2)",
-      background: "#0766fe",
+      border: "1px solid rgba(120, 181, 255, 0.18)",
+      background: "linear-gradient(135deg, #0766fe 0%, #2d8cff 100%)",
       color: "#ffffff"
     }
   }
@@ -49,16 +49,16 @@ function buttonStyle(kind: PopupAction["kind"], disabled: boolean): CSSPropertie
       ...shared,
       border: "none",
       background: "transparent",
-      color: "#475569",
+      color: "rgba(226, 235, 255, 0.72)",
       paddingInline: 4
     }
   }
 
   return {
     ...shared,
-    border: "1px solid rgba(148, 163, 184, 0.28)",
-    background: "#ffffff",
-    color: "#0f172a"
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.08)",
+    color: "#f7fbff"
   }
 }
 

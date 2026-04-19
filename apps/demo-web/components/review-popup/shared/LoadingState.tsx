@@ -218,14 +218,14 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.2,
     letterSpacing: "0.12em",
     textTransform: "uppercase",
-    color: "#64748b",
+    color: "rgba(219, 232, 255, 0.74)",
     fontWeight: 700
   },
   percent: {
     margin: 0,
     fontSize: 13,
     lineHeight: 1.2,
-    color: "#4338ca",
+    color: "#8bc4ff",
     fontWeight: 800,
     fontVariantNumeric: "tabular-nums"
   },
@@ -233,17 +233,17 @@ const styles: Record<string, CSSProperties> = {
     position: "relative",
     height: 12,
     borderRadius: 999,
-    background: "rgba(226,232,240,0.9)",
+    background: "rgba(255,255,255,0.1)",
     overflow: "hidden",
-    boxShadow: "inset 0 1px 1px rgba(255,255,255,0.6)"
+    boxShadow: "inset 0 1px 1px rgba(255,255,255,0.08)"
   },
   barFill: {
     position: "relative",
     height: "100%",
     borderRadius: 999,
-    background: "linear-gradient(90deg, #60a5fa 0%, #4f46e5 58%, #4338ca 100%)",
+    background: "linear-gradient(90deg, #57c9ff 0%, #0766fe 58%, #2d8cff 100%)",
     overflow: "hidden",
-    boxShadow: "0 6px 18px rgba(79,70,229,0.22)"
+    boxShadow: "0 10px 24px rgba(7,102,254,0.28)"
   },
   barGlow: {
     position: "absolute",
@@ -254,14 +254,14 @@ const styles: Record<string, CSSProperties> = {
   },
   status: {
     margin: 0,
-    color: "#0f172a",
+    color: "#f7fbff",
     fontSize: 15,
     lineHeight: 1.45,
     fontWeight: 700
   },
   support: {
     margin: 0,
-    color: "#64748b",
+    color: "rgba(226, 235, 255, 0.76)",
     fontSize: 13,
     lineHeight: 1.55,
     animation: "reevaLoadingPulse 1.6s ease-in-out infinite"

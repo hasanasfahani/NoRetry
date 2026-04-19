@@ -76,9 +76,6 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
     <>
       <SectionCard title="Planning goal" subtitle="Your current unsent prompt now anchors the next-step tree.">
         <p style={styles.goal}>{props.state.planningGoal}</p>
-        <p style={styles.copy}>
-          reeva AI starts the branch from this typed prompt, so you do not need to re-enter the direction inside the popup.
-        </p>
       </SectionCard>
 
       {visibleQuestions.length ? (
@@ -182,6 +179,7 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
             <button
               type="button"
               style={styles.secondaryButton}
+              className={props.state.isGeneratingPrompt ? "cta-loading" : undefined}
               onClick={props.onGeneratePrompt}
               disabled={props.state.isGeneratingPrompt || props.state.isLoadingQuestions}
             >
@@ -211,14 +209,14 @@ const styles = {
     margin: 0,
     fontSize: 16,
     lineHeight: 1.55,
-    color: "#0f172a",
+    color: "#f7fbff",
     fontWeight: 700
   } satisfies CSSProperties,
   copy: {
     margin: 0,
     fontSize: 14,
     lineHeight: 1.55,
-    color: "#475569"
+    color: "rgba(226, 235, 255, 0.76)"
   } satisfies CSSProperties,
   tabHeader: {
     display: "grid",
@@ -232,8 +230,8 @@ const styles = {
   tab: (active: boolean, answered: boolean) =>
     ({
       border: active ? "1px solid rgba(7,102,254,0.28)" : "1px solid rgba(148,163,184,0.2)",
-      background: active ? "rgba(7,102,254,0.12)" : answered ? "rgba(220,252,231,0.82)" : "#ffffff",
-      color: active ? "#0766fe" : "#1e293b",
+      background: active ? "rgba(7,102,254,0.18)" : answered ? "rgba(121,216,168,0.16)" : "rgba(255,255,255,0.08)",
+      color: active ? "#8bc4ff" : "#eef4ff",
       width: 34,
       height: 34,
       borderRadius: 999,
@@ -250,7 +248,7 @@ const styles = {
     borderRadius: 999,
     border: "1px solid rgba(7,102,254,0.16)",
     background: "rgba(7,102,254,0.08)",
-    color: "#0766fe",
+    color: "#8bc4ff",
     fontSize: 13,
     lineHeight: 1.4,
     fontWeight: 700
@@ -276,14 +274,14 @@ const styles = {
     margin: 0,
     fontSize: 20,
     lineHeight: 1.2,
-    color: "#0f172a",
+    color: "#f7fbff",
     fontWeight: 800
   } satisfies CSSProperties,
   questionHelper: {
     margin: 0,
     fontSize: 14,
     lineHeight: 1.55,
-    color: "#64748b"
+    color: "rgba(226, 235, 255, 0.72)"
   } satisfies CSSProperties,
   optionList: {
     display: "grid",
@@ -291,9 +289,9 @@ const styles = {
   } satisfies CSSProperties,
   optionButton: (selected: boolean, disabled: boolean) =>
     ({
-      border: selected ? "1px solid rgba(7,102,254,0.26)" : "1px solid rgba(148,163,184,0.2)",
-      background: selected ? "rgba(7,102,254,0.12)" : "#ffffff",
-      color: selected ? "#0766fe" : "#1e293b",
+      border: selected ? "1px solid rgba(7,102,254,0.26)" : "1px solid rgba(255,255,255,0.12)",
+      background: selected ? "rgba(7,102,254,0.16)" : "rgba(255,255,255,0.08)",
+      color: selected ? "#8bc4ff" : "#eef4ff",
       padding: "13px 14px",
       borderRadius: 18,
       textAlign: "left",
@@ -312,12 +310,12 @@ const styles = {
     minHeight: 100,
     resize: "vertical",
     borderRadius: 16,
-    border: "1px solid rgba(148,163,184,0.24)",
+    border: "1px solid rgba(255,255,255,0.12)",
     padding: "12px 14px",
     fontSize: 14,
     lineHeight: 1.5,
-    color: "#0f172a",
-    background: "#ffffff"
+    color: "#f7fbff",
+    background: "rgba(8, 15, 32, 0.82)"
   } satisfies CSSProperties,
   footerRow: {
     display: "grid",
@@ -331,18 +329,19 @@ const styles = {
     justifySelf: "flex-start",
     border: "none",
     borderRadius: 999,
-    background: "#0f172a",
+    background: "linear-gradient(135deg, #0766fe 0%, #2d8cff 100%)",
     color: "#ffffff",
     padding: "12px 18px",
     fontWeight: 800,
-    cursor: "pointer"
+    cursor: "pointer",
+    boxShadow: "0 18px 34px rgba(7, 102, 254, 0.24)"
   } satisfies CSSProperties,
   secondaryButton: {
     justifySelf: "flex-start",
-    border: "1px solid rgba(7,102,254,0.2)",
+    border: "1px solid rgba(255,255,255,0.14)",
     borderRadius: 999,
-    background: "rgba(7,102,254,0.08)",
-    color: "#0766fe",
+    background: "rgba(255,255,255,0.08)",
+    color: "#f7fbff",
     padding: "12px 18px",
     fontWeight: 800,
     cursor: "pointer"

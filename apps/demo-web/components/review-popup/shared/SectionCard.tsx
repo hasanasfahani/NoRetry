@@ -19,9 +19,10 @@ export function SectionCard(props: SectionCardProps) {
 const styles: Record<string, CSSProperties> = {
   card: {
     borderRadius: 22,
-    border: "1px solid rgba(148, 163, 184, 0.18)",
-    background: "rgba(255,255,255,0.88)",
-    padding: 16
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(8, 15, 32, 0.56)",
+    padding: 16,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)"
   },
   title: {
     margin: 0,
@@ -29,13 +30,13 @@ const styles: Record<string, CSSProperties> = {
     letterSpacing: "0.14em",
     textTransform: "uppercase",
     fontWeight: 800,
-    color: "#64748b"
+    color: "rgba(219, 232, 255, 0.74)"
   },
   subtitle: {
     margin: "8px 0 0",
     fontSize: 14,
     lineHeight: 1.45,
-    color: "#475569"
+    color: "rgba(226, 235, 255, 0.72)"
   },
   content: {
     display: "grid",

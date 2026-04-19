@@ -1,3 +1,4 @@
+import { ReevaLogo } from "../../brand/ReevaLogo"
 import type { CSSProperties, ReactNode } from "react"
 
 type PopupShellProps = {
@@ -34,15 +35,7 @@ export function PopupShell(props: PopupShellProps) {
 function ReviewPopupBrand() {
   return (
     <div style={styles.brandRow} aria-label="reeva AI">
-      <svg viewBox="0 0 1024 1024" style={styles.brandIcon} aria-hidden="true">
-        <circle cx="512" cy="512" r="305" fill="none" stroke="#0766fe" strokeWidth="38" />
-        <circle cx="512" cy="512" r="228" fill="none" stroke="#0766fe" strokeWidth="34" />
-        <circle cx="512" cy="512" r="153" fill="none" stroke="#0766fe" strokeWidth="30" />
-        <circle cx="512" cy="512" r="85" fill="none" stroke="#0766fe" strokeWidth="26" />
-        <circle cx="512" cy="512" r="28" fill="#0766fe" />
-        <path d="M452 186L512 154L572 186L540 236H484L452 186Z" fill="#ffffff" />
-      </svg>
-      <span style={styles.brandWordmark}>reeva AI</span>
+      <ReevaLogo width={148} height={38} />
     </div>
   )
 }
@@ -52,8 +45,8 @@ const styles: Record<string, CSSProperties> = {
     position: "fixed",
     inset: 0,
     border: "none",
-    background: "rgba(15, 23, 42, 0.14)",
-    backdropFilter: "blur(2px)",
+    background: "rgba(4, 10, 24, 0.56)",
+    backdropFilter: "blur(10px)",
     zIndex: 2147483644,
     cursor: "default"
   },
@@ -66,12 +59,14 @@ const styles: Record<string, CSSProperties> = {
     maxWidth: "calc(100vw - 32px)",
     maxHeight: "calc(100vh - 112px)",
     overflow: "auto",
-    borderRadius: 28,
-    border: "1px solid rgba(148, 163, 184, 0.22)",
-    background: "linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.98))",
-    boxShadow: "0 32px 80px rgba(15, 23, 42, 0.18)",
+    borderRadius: 32,
+    border: "1px solid rgba(255, 255, 255, 0.14)",
+    background:
+      "linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.07) 100%)",
+    boxShadow: "0 32px 80px rgba(0, 0, 0, 0.34)",
     padding: 22,
-    zIndex: 2147483645
+    zIndex: 2147483645,
+    backdropFilter: "blur(20px)"
   },
   header: {
     display: "flex",
@@ -87,39 +82,26 @@ const styles: Record<string, CSSProperties> = {
   brandRow: {
     display: "inline-flex",
     alignItems: "center",
-    gap: 10
-  },
-  brandIcon: {
-    width: 34,
-    height: 34,
-    display: "block",
-    flex: "0 0 auto"
-  },
-  brandWordmark: {
-    fontSize: 20,
-    lineHeight: 1,
-    fontWeight: 700,
-    letterSpacing: "-0.02em",
-    color: "#0f172a"
+    marginBottom: 2
   },
   eyebrow: {
     margin: 0,
     fontSize: 12,
     letterSpacing: "0.18em",
     textTransform: "uppercase",
-    color: "#64748b",
+    color: "rgba(219, 232, 255, 0.76)",
     fontWeight: 700
   },
   title: {
     margin: "6px 0 0",
     fontSize: 28,
     lineHeight: 1.05,
-    color: "#0f172a"
+    color: "#f7fbff"
   },
   closeButton: {
     border: "none",
     background: "transparent",
-    color: "#64748b",
+    color: "rgba(226, 235, 255, 0.76)",
     fontSize: 32,
     lineHeight: 1,
     padding: 0,

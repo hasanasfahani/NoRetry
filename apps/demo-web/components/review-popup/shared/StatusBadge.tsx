@@ -7,11 +7,11 @@ type StatusBadgeProps = {
 }
 
 const toneMap: Record<PopupTone, { bg: string; fg: string; border: string }> = {
-  neutral: { bg: "#e2e8f0", fg: "#475569", border: "rgba(71,85,105,0.16)" },
-  success: { bg: "#dcfce7", fg: "#166534", border: "rgba(22,101,52,0.16)" },
-  warning: { bg: "#fef3c7", fg: "#b45309", border: "rgba(180,83,9,0.16)" },
-  danger: { bg: "#fee2e2", fg: "#b91c1c", border: "rgba(185,28,28,0.16)" },
-  info: { bg: "rgba(7, 102, 254, 0.12)", fg: "#0766fe", border: "rgba(7,102,254,0.18)" }
+  neutral: { bg: "rgba(255,255,255,0.08)", fg: "#dbe8ff", border: "rgba(255,255,255,0.12)" },
+  success: { bg: "rgba(121,216,168,0.16)", fg: "#9ff0be", border: "rgba(121,216,168,0.22)" },
+  warning: { bg: "rgba(255,211,108,0.14)", fg: "#ffd36c", border: "rgba(255,211,108,0.22)" },
+  danger: { bg: "rgba(255,120,120,0.14)", fg: "#ff9f9f", border: "rgba(255,120,120,0.22)" },
+  info: { bg: "rgba(7, 102, 254, 0.16)", fg: "#8bc4ff", border: "rgba(7,102,254,0.22)" }
 }
 
 export function StatusBadge({ label, tone = "neutral" }: StatusBadgeProps) {

@@ -1,6 +1,7 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react"
+import { ReevaLogo } from "../components/brand/ReevaLogo"
 import {
   type AfterAnalysisResult,
   analyzePromptLocally,
@@ -21,6 +22,8 @@ import {
   classifyReviewTaskType
 } from "@prompt-optimizer/shared"
 import { ReviewPopup } from "../components/review-popup/review/ReviewPopup"
+import { ProductTutorial } from "../components/onboarding/ProductTutorial"
+import { StoryTutorial } from "../components/onboarding/StoryTutorial"
 import type { ReviewPopupViewModel } from "../components/review-popup/review/review-types"
 import type { PopupAction } from "../components/review-popup/shared/types"
 import { buildReviewErrorViewModel, buildReviewLoadingViewModel, mapAfterAnalysisToReviewViewModel } from "../lib/review-view-model"
@@ -30,18 +33,6 @@ import type { ReviewContract } from "../../extension/lib/review/contracts"
 
 const API_BASE = process.env.NEXT_PUBLIC_REEVA_API_URL?.replace(/\/$/, "") || "http://localhost:3000"
 const OTHER_OPTION = "Other"
-
-function LogoMark() {
-  return (
-    <svg width="26" height="26" viewBox="0 0 100 100" aria-hidden="true">
-      <rect width="100" height="100" rx="24" fill="#2f6efb" />
-      <circle cx="50" cy="50" r="33" fill="none" stroke="#fff" strokeWidth="7" />
-      <circle cx="50" cy="50" r="22" fill="none" stroke="#fff" strokeWidth="7" />
-      <circle cx="50" cy="50" r="11" fill="none" stroke="#fff" strokeWidth="7" />
-      <circle cx="50" cy="50" r="3" fill="#fff" />
-    </svg>
-  )
-}
 
 function formatChecklistStatus(status: string) {
   if (status === "met") return "Confirmed"
@@ -108,10 +99,135 @@ function buildPromptConstraints(
     .filter(Boolean)
 }
 
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*)/)
+  return parts.filter(Boolean).map((part, index) => {
+    const boldMatch = /^\*\*([^*]+)\*\*$/.exec(part)
+    if (boldMatch) {
+      return (
+        <strong key={`inline-${index}`} style={styles.answerStrong}>
+          {boldMatch[1]}
+        </strong>
+      )
+    }
+    return <Fragment key={`inline-${index}`}>{part}</Fragment>
+  })
+}
+
+function renderAnswerRichText(text: string): ReactNode {
+  const normalized = text.replace(/\r\n/g, "\n").trim()
+  if (!normalized) return null
+
+  const lines = normalized.split("\n")
+  const blocks: ReactNode[] = []
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index]?.trim()
+    if (!line) {
+      index += 1
+      continue
+    }
+
+    if (line.startsWith("```")) {
+      const codeLines: string[] = []
+      index += 1
+      while (index < lines.length && !lines[index]?.trim().startsWith("```")) {
+        codeLines.push(lines[index] ?? "")
+        index += 1
+      }
+      if (index < lines.length) index += 1
+      blocks.push(
+        <pre key={`code-${index}`} style={styles.answerCodeBlock}>
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      )
+      continue
+    }
+
+    const headingMatch = /^(#{1,3})\s+(.+)$/.exec(line)
+    if (headingMatch) {
+      const level = headingMatch[1].length
+      const content = headingMatch[2]
+      const headingStyle =
+        level === 1 ? styles.answerH1 : level === 2 ? styles.answerH2 : styles.answerH3
+      blocks.push(
+        <div key={`heading-${index}`} style={headingStyle}>
+          {renderInlineMarkdown(content)}
+        </div>
+      )
+      index += 1
+      continue
+    }
+
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index] ?? "")) {
+        items.push((lines[index] ?? "").replace(/^\s*[-*]\s+/, "").trim())
+        index += 1
+      }
+      blocks.push(
+        <ul key={`ul-${index}`} style={styles.answerList}>
+          {items.map((item, itemIndex) => (
+            <li key={`ul-item-${itemIndex}`} style={styles.answerListItem}>
+              {renderInlineMarkdown(item)}
+            </li>
+          ))}
+        </ul>
+      )
+      continue
+    }
+
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^\s*\d+\.\s+/.test(lines[index] ?? "")) {
+        items.push((lines[index] ?? "").replace(/^\s*\d+\.\s+/, "").trim())
+        index += 1
+      }
+      blocks.push(
+        <ol key={`ol-${index}`} style={styles.answerOrderedList}>
+          {items.map((item, itemIndex) => (
+            <li key={`ol-item-${itemIndex}`} style={styles.answerListItem}>
+              {renderInlineMarkdown(item)}
+            </li>
+          ))}
+        </ol>
+      )
+      continue
+    }
+
+    const paragraphLines: string[] = []
+    while (
+      index < lines.length &&
+      lines[index]?.trim() &&
+      !/^(#{1,3})\s+/.test(lines[index] ?? "") &&
+      !/^\s*[-*]\s+/.test(lines[index] ?? "") &&
+      !/^\s*\d+\.\s+/.test(lines[index] ?? "") &&
+      !(lines[index]?.trim().startsWith("```"))
+    ) {
+      paragraphLines.push((lines[index] ?? "").trim())
+      index += 1
+    }
+
+    blocks.push(
+      <p key={`p-${index}`} style={styles.answerParagraph}>
+        {renderInlineMarkdown(paragraphLines.join(" "))}
+      </p>
+    )
+  }
+
+  return blocks
+}
+
 export default function DemoPage() {
   const promptSectionRef = useRef<HTMLElement | null>(null)
+  const promptPlaygroundRef = useRef<HTMLDivElement | null>(null)
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const promptOptimizeButtonRef = useRef<HTMLButtonElement | null>(null)
+  const runPromptButtonRef = useRef<HTMLButtonElement | null>(null)
   const answerSectionRef = useRef<HTMLElement | null>(null)
+  const analysisButtonRef = useRef<HTMLButtonElement | null>(null)
+  const waitlistSectionRef = useRef<HTMLElement | null>(null)
   const [prompt, setPrompt] = useState("")
   const [activePrompt, setActivePrompt] = useState("")
   const [assistantAnswer, setAssistantAnswer] = useState("")
@@ -120,6 +236,8 @@ export default function DemoPage() {
 
   const [popupOpen, setPopupOpen] = useState(false)
   const [popupSurface, setPopupSurface] = useState<ReviewPopupSurface>("prompt_mode")
+  const [storyTutorialOpen, setStoryTutorialOpen] = useState(true)
+  const [productTutorialOpen, setProductTutorialOpen] = useState(false)
   const [promptBootLoading, setPromptBootLoading] = useState(false)
   const [promptLoading, setPromptLoading] = useState(false)
   const [promptStatus, setPromptStatus] = useState("Reading your prompt...")
@@ -175,6 +293,9 @@ export default function DemoPage() {
   const visiblePrompt = improvedPrompt || prompt
   const analysisReady = answerState === "complete" && fullAnswerText.length > 0
   const canSubmitPrompt = visiblePrompt.trim().length > 0 && answerState !== "loading"
+  const showPromptOptimizeNudge =
+    prompt.trim().length > 0 && answerState !== "complete" && !promptBootLoading && !promptLoading && !popupOpen
+  const showAnalysisNudge = analysisReady && !analysisLoading && !popupOpen
   const answeredPath = useMemo(() => buildAnsweredPath(questions, answers, otherDrafts), [questions, answers, otherDrafts])
   const promptConstraints = useMemo(() => buildPromptConstraints(questions, answers, otherDrafts), [questions, answers, otherDrafts])
 
@@ -183,6 +304,43 @@ export default function DemoPage() {
       mode: "prompt" as const,
       label: "AI Prompt Optimization"
     }),
+    []
+  )
+
+  const productTutorialSteps = useMemo(
+    () => [
+      {
+        id: "prompt-box",
+        text: "اكتب برومبت قصير",
+        targetRef: promptPlaygroundRef
+      },
+      {
+        id: "prompt-optimize",
+        text: "اكبس هنا واجب على اي عدد تريده من الاسئلة ثم اكبس Generate Prompt Now",
+        targetRef: promptOptimizeButtonRef
+      },
+      {
+        id: "run-prompt",
+        text: "اكبس هنا بعد اضافة البرمبت",
+        targetRef: runPromptButtonRef
+      },
+      {
+        id: "ai-analysis",
+        text: "اكبس هنا لتحليل الجواب واقتراح برومبت لتحسينه اذا كان غير مناسب",
+        targetRef: analysisButtonRef
+      },
+      {
+        id: "join-waitlist",
+        text: (
+          <>
+            أضيفوا اسمكم وايميلكم لدعمنا و لتكونوا من اوائل الأشخاص يلي بيحصلوا على{" "}
+            <span style={{ direction: "ltr", unicodeBidi: "isolate", display: "inline-block" }}>reeva AI</span>{" "}
+            عند الإطلاق
+          </>
+        ),
+        targetRef: waitlistSectionRef
+      }
+    ],
     []
   )
 
@@ -550,7 +708,10 @@ export default function DemoPage() {
   }
 
   async function openAnalysisMode() {
-    if (!analysisReady || !activePrompt.trim()) return
+    if (!analysisReady || !activePrompt.trim()) {
+      showToast("No answer to analyze yet")
+      return
+    }
 
     setPopupSurface("answer_mode")
     setPopupOpen(true)
@@ -752,6 +913,25 @@ export default function DemoPage() {
 
   return (
     <main style={styles.page}>
+      <StoryTutorial
+        open={storyTutorialOpen}
+        onClose={(reason) => {
+          setStoryTutorialOpen(false)
+          if (reason === "complete") {
+            window.setTimeout(() => setProductTutorialOpen(true), 180)
+          }
+        }}
+      />
+      <ProductTutorial
+        open={productTutorialOpen}
+        steps={productTutorialSteps}
+        onClose={() => {
+          setProductTutorialOpen(false)
+          window.requestAnimationFrame(() => {
+            window.scrollTo({ top: 0, behavior: "smooth" })
+          })
+        }}
+      />
       {toastMessage ? (
         <div
           role="status"
@@ -781,14 +961,11 @@ export default function DemoPage() {
       <section style={styles.shell}>
         <div style={styles.hero}>
           <div style={styles.brandRow}>
-            <LogoMark />
-            <div>
-              <div style={styles.brandName}>reeva AI</div>
-              <div style={styles.brandLine}>The trust layer for AI.</div>
+            <div style={styles.brandStack}>
+              <ReevaLogo width={220} height={56} priority />
+              <div style={styles.brandLine}>Demo only</div>
             </div>
           </div>
-          <h1 style={styles.headline}>Try reeva AI in seconds</h1>
-          <p style={styles.subheadline}>Enter a prompt and then click the reeva AI button.</p>
         </div>
 
         <section ref={promptSectionRef} style={styles.card}>
@@ -797,7 +974,7 @@ export default function DemoPage() {
             <span style={styles.modeChip}>{analysisReady ? "Answer ready" : "Prompt mode"}</span>
           </div>
 
-          <div style={styles.promptWrap}>
+          <div ref={promptPlaygroundRef} style={styles.promptWrap}>
             <textarea
               ref={promptInputRef}
               value={prompt}
@@ -807,9 +984,10 @@ export default function DemoPage() {
             />
 
             <button
+              ref={promptOptimizeButtonRef}
               type="button"
               onClick={openPromptMode}
-              className="pressable pressable-strong"
+              className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
               style={{
                 ...styles.reevaButton
               }}
@@ -819,7 +997,14 @@ export default function DemoPage() {
           </div>
 
           <div style={styles.runRow}>
-            <button type="button" onClick={submitPrompt} className="pressable pressable-dark" style={styles.primaryCta} disabled={!canSubmitPrompt}>
+            <button
+              ref={runPromptButtonRef}
+              type="button"
+              onClick={submitPrompt}
+              className={`pressable pressable-dark${answerState === "loading" ? " cta-loading" : ""}`}
+              style={styles.primaryCta}
+              disabled={!canSubmitPrompt}
+            >
               {answerState === "loading" ? "Generating answer..." : "Run prompt"}
             </button>
             <span style={styles.helperCopy}>
@@ -833,21 +1018,22 @@ export default function DemoPage() {
         <section ref={answerSectionRef} style={styles.card}>
           <div style={styles.cardHeader}>
             <span style={styles.kicker}>Assistant answer</span>
-            {analysisReady ? (
-              <button
-                type="button"
-                onClick={() => void openAnalysisMode()}
-                className="pressable pressable-strong"
-                style={styles.analysisHeaderButton}
-              >
-                AI Analysis
-              </button>
-            ) : (
-              <span style={styles.modeChip}>{answerState === "complete" ? "Analysis available" : "Demo response"}</span>
-            )}
+            <button
+              ref={analysisButtonRef}
+              type="button"
+              onClick={() => void openAnalysisMode()}
+              className={`pressable pressable-strong${showAnalysisNudge ? " cta-nudge" : ""}`}
+              style={styles.analysisHeaderButton}
+            >
+              AI Analysis
+            </button>
           </div>
           <div style={styles.answerBox}>
-            {renderedAnswer || "Your demo answer will appear here after you submit the prompt."}
+            {renderedAnswer ? (
+              <div style={styles.answerRichText}>{renderAnswerRichText(renderedAnswer)}</div>
+            ) : (
+              "Your demo answer will appear here after you submit the prompt."
+            )}
           </div>
           {analysisReady ? (
             <div style={styles.answerActionRow}>
@@ -856,7 +1042,7 @@ export default function DemoPage() {
           ) : null}
         </section>
 
-        <section style={styles.card}>
+        <section ref={waitlistSectionRef} style={styles.card}>
           <div style={styles.cardHeader}>
             <span style={styles.kicker}>Join the waitlist</span>
             <span style={styles.modeChip}>Event access</span>
@@ -881,6 +1067,8 @@ export default function DemoPage() {
             {waitlistMessage ? <p style={styles.waitlistMessage}>{waitlistMessage}</p> : null}
           </form>
         </section>
+
+        {productTutorialOpen ? <div aria-hidden="true" style={styles.tutorialScrollSpacer} /> : null}
       </section>
 
       <ReviewPopup
@@ -923,7 +1111,9 @@ export default function DemoPage() {
 const styles: Record<string, CSSProperties> = {
   page: {
     minHeight: "100vh",
-    padding: "24px 14px 48px"
+    padding: "24px 14px 48px",
+    background:
+      "radial-gradient(circle at 12% 6%, rgba(7, 102, 254, 0.18), transparent 22%), radial-gradient(circle at 88% 78%, rgba(87, 201, 255, 0.12), transparent 18%)"
   },
   shell: {
     maxWidth: 520,
@@ -932,21 +1122,22 @@ const styles: Record<string, CSSProperties> = {
     gap: 16
   },
   hero: {
-    padding: "6px 4px 2px"
+    padding: "2px 4px 4px"
   },
   brandRow: {
     display: "flex",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 18
+    alignItems: "flex-start",
+    marginBottom: 12
   },
-  brandName: {
-    fontSize: 15,
-    fontWeight: 700
+  brandStack: {
+    display: "grid",
+    gap: 8
   },
   brandLine: {
-    fontSize: 13,
-    color: "var(--muted)"
+    fontSize: 14,
+    color: "rgba(225, 236, 255, 0.78)",
+    fontWeight: 600,
+    letterSpacing: "-0.01em"
   },
   headline: {
     fontSize: 38,
@@ -963,10 +1154,10 @@ const styles: Record<string, CSSProperties> = {
   card: {
     background: "var(--panel)",
     border: "1px solid var(--line)",
-    borderRadius: 24,
+    borderRadius: 28,
     padding: 18,
     boxShadow: "var(--shadow)",
-    backdropFilter: "blur(14px)"
+    backdropFilter: "blur(18px)"
   },
   cardHeader: {
     display: "flex",
@@ -987,7 +1178,7 @@ const styles: Record<string, CSSProperties> = {
     padding: "7px 10px",
     borderRadius: 999,
     background: "var(--brand-soft)",
-    color: "var(--brand-deep)",
+    color: "#dbe8ff",
     fontWeight: 700
   },
   promptWrap: {
@@ -997,14 +1188,14 @@ const styles: Record<string, CSSProperties> = {
     width: "100%",
     minHeight: 188,
     borderRadius: 22,
-    border: "1px solid rgba(29, 46, 92, 0.12)",
+    border: "1px solid rgba(255,255,255,0.12)",
     padding: "20px 18px 18px",
     paddingRight: 120,
     resize: "vertical",
-    background: "rgba(255,255,255,0.96)",
+    background: "rgba(8, 15, 32, 0.82)",
     color: "var(--ink)",
     lineHeight: 1.55,
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.5)"
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)"
   },
   reevaButton: {
     position: "absolute",
@@ -1024,7 +1215,7 @@ const styles: Record<string, CSSProperties> = {
     marginTop: 14,
     padding: 14,
     borderRadius: 18,
-    background: "rgba(47, 110, 251, 0.08)"
+    background: "rgba(7, 102, 254, 0.12)"
   },
   sectionLabel: {
     fontSize: 12,
@@ -1051,11 +1242,12 @@ const styles: Record<string, CSSProperties> = {
     marginTop: 14
   },
   primaryCta: {
-    background: "var(--ink)",
+    background: "linear-gradient(135deg, #0766fe 0%, #2d8cff 100%)",
     color: "#fff",
     borderRadius: 18,
     padding: "15px 16px",
-    fontWeight: 700
+    fontWeight: 700,
+    boxShadow: "0 20px 36px rgba(7, 102, 254, 0.26)"
   },
   helperCopy: {
     fontSize: 14,
@@ -1065,11 +1257,77 @@ const styles: Record<string, CSSProperties> = {
   answerBox: {
     minHeight: 220,
     borderRadius: 22,
-    border: "1px solid rgba(29, 46, 92, 0.1)",
+    border: "1px solid rgba(255,255,255,0.12)",
     padding: 18,
-    background: "rgba(255,255,255,0.96)",
-    whiteSpace: "pre-wrap",
+    background: "rgba(8, 15, 32, 0.82)",
     lineHeight: 1.65
+  },
+  answerRichText: {
+    display: "grid",
+    gap: 12
+  },
+  answerH1: {
+    margin: 0,
+    fontSize: 30,
+    lineHeight: 1.1,
+    fontWeight: 900,
+    color: "#f8fbff",
+    letterSpacing: "-0.03em"
+  },
+  answerH2: {
+    margin: 0,
+    fontSize: 23,
+    lineHeight: 1.15,
+    fontWeight: 850,
+    color: "#f8fbff",
+    letterSpacing: "-0.02em"
+  },
+  answerH3: {
+    margin: 0,
+    fontSize: 18,
+    lineHeight: 1.2,
+    fontWeight: 800,
+    color: "#eef4ff"
+  },
+  answerParagraph: {
+    margin: 0,
+    color: "rgba(236, 243, 255, 0.88)",
+    fontSize: 16,
+    lineHeight: 1.7
+  },
+  answerStrong: {
+    color: "#ffffff",
+    fontWeight: 800
+  },
+  answerList: {
+    margin: 0,
+    paddingLeft: 20,
+    display: "grid",
+    gap: 8,
+    color: "rgba(236, 243, 255, 0.88)"
+  },
+  answerOrderedList: {
+    margin: 0,
+    paddingLeft: 22,
+    display: "grid",
+    gap: 8,
+    color: "rgba(236, 243, 255, 0.88)"
+  },
+  answerListItem: {
+    fontSize: 15,
+    lineHeight: 1.65
+  },
+  answerCodeBlock: {
+    margin: 0,
+    padding: "14px 15px",
+    borderRadius: 16,
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    color: "#dfeaff",
+    overflowX: "auto",
+    fontSize: 14,
+    lineHeight: 1.6,
+    whiteSpace: "pre-wrap"
   },
   answerActionRow: {
     display: "grid",
@@ -1091,14 +1349,18 @@ const styles: Record<string, CSSProperties> = {
   field: {
     width: "100%",
     borderRadius: 16,
-    border: "1px solid rgba(29, 46, 92, 0.12)",
+    border: "1px solid rgba(255,255,255,0.12)",
     padding: "14px 14px",
-    background: "#fff"
+    background: "rgba(8, 15, 32, 0.82)",
+    color: "#f7fbff"
   },
   waitlistMessage: {
     margin: 0,
     fontSize: 14,
     color: "var(--good)"
+  },
+  tutorialScrollSpacer: {
+    height: 340
   },
   overlay: {},
   sheet: {},

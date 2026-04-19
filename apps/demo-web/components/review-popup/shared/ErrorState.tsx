@@ -17,19 +17,19 @@ export function ErrorState(props: ErrorStateProps) {
 const styles: Record<string, CSSProperties> = {
   card: {
     borderRadius: 20,
-    border: "1px solid rgba(185, 28, 28, 0.14)",
-    background: "#fff1f2",
+    border: "1px solid rgba(255,120,120,0.18)",
+    background: "rgba(70, 19, 26, 0.72)",
     padding: 16
   },
   title: {
     margin: 0,
-    color: "#b91c1c",
+    color: "#ffb4b4",
     fontSize: 16,
     fontWeight: 800
   },
   body: {
     margin: "8px 0 0",
-    color: "#7f1d1d",
+    color: "rgba(255, 222, 222, 0.82)",
     fontSize: 14,
     lineHeight: 1.55
   }
