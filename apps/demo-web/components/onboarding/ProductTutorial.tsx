@@ -55,6 +55,8 @@ export function ProductTutorial({ open, steps, onClose }: ProductTutorialProps) 
   useEffect(() => {
     if (!open || !activeStep?.targetRef.current) return
 
+    let retryTimer: number | null = null
+
     const updateRect = () => {
       const node = activeStep.targetRef.current
       if (!node) return
@@ -73,23 +75,24 @@ export function ProductTutorial({ open, steps, onClose }: ProductTutorialProps) 
         const delta = bounds.bottom - desiredBottom
         window.scrollBy({
           top: delta,
-          behavior: "smooth"
+          behavior: "auto"
         })
-        window.setTimeout(updateRect, 260)
+        retryTimer = window.setTimeout(updateRect, 70)
       }
     }
 
     activeStep.targetRef.current.scrollIntoView({
-      behavior: "smooth",
+      behavior: "auto",
       block: activeIndex >= 3 ? "start" : "nearest"
     })
 
-    const timer = window.setTimeout(updateRect, 220)
+    const timer = window.setTimeout(updateRect, 60)
     window.addEventListener("resize", updateRect)
     window.addEventListener("scroll", updateRect, true)
 
     return () => {
       window.clearTimeout(timer)
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
       window.removeEventListener("resize", updateRect)
       window.removeEventListener("scroll", updateRect, true)
     }
@@ -208,7 +211,7 @@ const styles: Record<string, CSSProperties> = {
     boxShadow: "0 0 0 2px rgba(7,102,254,0.22), 0 24px 60px rgba(0,0,0,0.34)",
     background: "rgba(255,255,255,0.02)",
     pointerEvents: "none",
-    transition: "all 260ms ease"
+    transition: "all 140ms ease-out"
   },
   topBar: {
     position: "fixed",
