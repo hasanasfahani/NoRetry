@@ -961,17 +961,17 @@ export default function DemoPage() {
         </div>
 
         <section ref={promptSectionRef} style={styles.card}>
-          <button
-            ref={promptOptimizeButtonRef}
-            type="button"
-            onClick={openPromptMode}
-            className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
-            style={styles.promptCornerButton}
-          >
-            AI Prompt Optimization
-          </button>
-          <div style={styles.cardHeader}>
+          <div style={styles.promptHeader}>
             <span style={styles.kicker}>Prompt playground</span>
+            <button
+              ref={promptOptimizeButtonRef}
+              type="button"
+              onClick={openPromptMode}
+              className={`pressable pressable-strong${showPromptOptimizeNudge ? " cta-nudge" : ""}`}
+              style={styles.promptHeaderButton}
+            >
+              AI Prompt Optimization
+            </button>
           </div>
 
           <div ref={promptPlaygroundRef} style={styles.promptWrap}>
@@ -1157,6 +1157,13 @@ const styles: Record<string, CSSProperties> = {
     marginBottom: 14,
     gap: 8
   },
+  promptHeader: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 14
+  },
   kicker: {
     fontSize: 12,
     letterSpacing: "0.12em",
@@ -1187,17 +1194,18 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: 1.55,
     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)"
   },
-  promptCornerButton: {
-    position: "absolute",
-    top: 18,
-    right: 18,
+  promptHeaderButton: {
+    flexShrink: 0,
     background: "#0766fe",
     color: "#fff",
     borderRadius: 999,
-    padding: "10px 16px",
+    padding: "10px 14px",
     boxShadow: "0 16px 28px rgba(7, 102, 254, 0.28)",
     fontSize: 13,
-    fontWeight: 700
+    fontWeight: 700,
+    lineHeight: 1.1,
+    whiteSpace: "nowrap",
+    alignSelf: "flex-start"
   },
   answerHeaderActionRow: {
     display: "flex",
