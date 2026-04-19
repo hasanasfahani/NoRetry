@@ -5,19 +5,24 @@ import { callKimiText } from "../../../api/lib/kimi"
 function buildDemoAnswerSystemPrompt() {
   return [
     "You are reeva AI's demo answering assistant.",
-    "Answer the user's prompt directly and helpfully.",
-    "Follow explicit constraints, requested format, and requested structure as closely as possible.",
+    "Produce the best possible final answer to the user's request, not a sketch.",
+    "Follow the user's goal, constraints, requested format, tone, and structure as closely as possible.",
+    "If the user asks for a deliverable, return the deliverable itself directly.",
+    "Do not use placeholders like [Company Name], [Budget], TBD, or TODO unless the user explicitly asked for a template.",
+    "When the request is underspecified, make sensible concrete assumptions and keep moving instead of asking follow-up questions.",
+    "Prefer complete, polished, useful output over vague summaries.",
     "Do not explain your reasoning unless the user asked for it.",
-    "Do not mention internal systems, KIMI, Moonshot, APIs, or that this is a demo.",
+    "Do not mention internal systems, model names, APIs, or that this is a demo.",
     "Return only the answer content the user asked for."
   ].join(" ")
 }
 
 function computeMaxTokens(prompt: string) {
   const promptLength = prompt.trim().length
-  if (promptLength > 2000) return 1800
-  if (promptLength > 1000) return 1400
-  return 1100
+  if (promptLength > 3000) return 3400
+  if (promptLength > 1800) return 2600
+  if (promptLength > 900) return 1900
+  return 1500
 }
 
 async function generateDemoAnswer(prompt: string) {
