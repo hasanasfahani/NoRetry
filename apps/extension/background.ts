@@ -22,6 +22,7 @@ type ProxyRequestMessage = {
   type: "PROMPT_OPTIMIZER_PROXY"
   path: string
   body: string
+  timeoutMs?: number
 }
 
 type AfterPipelineMessage = {
@@ -31,8 +32,9 @@ type AfterPipelineMessage = {
 
 const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
 const REQUEST_TIMEOUT_MS = 8000
+const PROJECT_PLANNING_TIMEOUT_MS = 90000
 const KIMI_API_KEY = process.env.PLASMO_PUBLIC_KIMI_API_KEY || ""
-const KIMI_MODEL = process.env.PLASMO_PUBLIC_KIMI_MODEL || "kimi-k2.5"
+const KIMI_MODEL = process.env.PLASMO_PUBLIC_KIMI_MODEL || "kimi-k2.6"
 const DEEPSEEK_API_KEY = process.env.PLASMO_PUBLIC_DEEPSEEK_API_KEY || ""
 const DEEPSEEK_MODEL = process.env.PLASMO_PUBLIC_DEEPSEEK_MODEL || "deepseek-chat"
 
@@ -360,11 +362,15 @@ chrome.runtime.onMessage.addListener((message: ProxyRequestMessage | AfterPipeli
 
   void (async () => {
     let lastError: unknown = null
+    const timeoutMs =
+      typeof message.timeoutMs === "number" && Number.isFinite(message.timeoutMs) && message.timeoutMs > 0
+        ? Math.min(Math.max(message.timeoutMs, REQUEST_TIMEOUT_MS), PROJECT_PLANNING_TIMEOUT_MS)
+        : REQUEST_TIMEOUT_MS
 
     for (const base of getApiBases()) {
       try {
         const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+        const timeoutId = setTimeout(() => controller.abort(new Error("Proxy request timed out")), timeoutMs)
 
         const response = await fetch(`${base}${message.path}`, {
           method: "POST",

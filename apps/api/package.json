@@ -9,7 +9,13 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "regression:after": "node --experimental-strip-types --loader ./scripts/ts-extension-loader.mjs ./scripts/after-review-regression.ts"
+    "regression:after": "node --experimental-strip-types --loader ./scripts/ts-extension-loader.mjs ./scripts/after-review-regression.ts",
+    "test:deep-analysis-v2": "node ./scripts/deep-analysis-v2-smoke.mjs",
+    "test:deep-analysis-v2-eval": "node ./scripts/deep-analysis-v2-eval.mjs",
+    "test:deep-analysis-v2:ci": "npm run test:deep-analysis-v2 && npm run test:deep-analysis-v2-eval",
+    "health:deep-analysis-v2": "node ./scripts/deep-analysis-v2-health.mjs",
+    "report:deep-analysis-v2-live": "node ./scripts/deep-analysis-v2-live-report.mjs",
+    "generate:deep-analysis-v2-silver": "node ./scripts/deep-analysis-v2-silver-eval-generate.mjs"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",

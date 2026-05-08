@@ -19,8 +19,9 @@ export async function callKimiJson(systemPrompt: string, userPrompt: string, max
     },
     body: JSON.stringify({
       model: env.KIMI_MODEL,
-      temperature: 0.2,
+      temperature: 0.6,
       max_tokens: maxTokens,
+      thinking: { type: "disabled" },
       messages: [
         {
           role: "system",
@@ -57,8 +58,9 @@ export async function callKimiText(systemPrompt: string, userPrompt: string, max
     },
     body: JSON.stringify({
       model: env.KIMI_MODEL,
-      temperature: 0.2,
+      temperature: 0.6,
       max_tokens: maxTokens,
+      thinking: { type: "disabled" },
       messages: [
         {
           role: "system",
