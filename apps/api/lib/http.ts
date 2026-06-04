@@ -3,8 +3,8 @@ import { ZodTypeAny } from "zod"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type"
+  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type"
 }
 
 export async function parseJson<T>(request: Request, schema: ZodTypeAny): Promise<T> {
@@ -48,14 +48,18 @@ export function ok(data: unknown, init?: ResponseInit) {
   })
 }
 
-export function badRequest(message: string, status = 400) {
+export function badRequest(message: string, status = 400, extra?: Record<string, unknown>) {
   return NextResponse.json(
-    { error: message },
+    { error: message, ...(extra ?? {}) },
     {
       status,
       headers: corsHeaders
     }
   )
+}
+
+export function unauthorized(message: string) {
+  return badRequest(message, 401)
 }
 
 export function options() {
