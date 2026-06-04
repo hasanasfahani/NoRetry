@@ -1,9 +1,12 @@
 node_modules
 .next
+.tmp
 .plasmo
 build
 dist
 .env
 .env.local
 *.log
+*.tsbuildinfo
+.DS_Store
 coverage
