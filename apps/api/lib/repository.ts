@@ -1,8 +1,6 @@
-import { PrismaClient } from "@prisma/client"
 import type { DiagnoseFailureResponse, SessionSummary } from "@prompt-optimizer/shared"
 import { runtimeFlags } from "./env"
-
-const prisma = runtimeFlags.enableDb ? new PrismaClient() : null
+import { prisma } from "./prisma"
 
 type PromptRecord = {
   id: string

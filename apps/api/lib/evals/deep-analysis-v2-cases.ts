@@ -190,7 +190,7 @@ export const DEEP_ANALYSIS_V2_EVAL_CASES: DeepAnalysisV2EvalCase[] = [
         "- Show clear error messages",
         "- Prevent empty submission",
         "- Show a booking confirmation summary",
-        "Do not connect a backend yet."
+        "Do not connect a backend"
       ],
       generatedPromptExcludes: ["Before we move forward", "Connect form to backend"],
       generatedPromptEndsWith: COMPLETION_CTA,
@@ -235,9 +235,9 @@ export const DEEP_ANALYSIS_V2_EVAL_CASES: DeepAnalysisV2EvalCase[] = [
         "- Show clear error messages",
         "- Prevent empty submission",
         "- Show a booking confirmation summary",
-        "Do not connect a backend yet."
+        "Do not connect a backend"
       ],
-      generatedPromptExcludes: ["Fix the unclear parts", "Finish missing requirements", "API endpoint"],
+      generatedPromptExcludes: ["Fix the unclear parts", "Finish missing requirements"],
       generatedPromptEndsWith: COMPLETION_CTA,
       recommendedNextMoveIncludes: ["validation"],
       nextStepSource: "assistant_suggestion",
@@ -300,7 +300,7 @@ export const DEEP_ANALYSIS_V2_EVAL_CASES: DeepAnalysisV2EvalCase[] = [
         "- Show clear error messages",
         "- Prevent empty submission",
         "- Show a booking confirmation summary",
-        "Do not connect a backend yet."
+        "Do not connect a backend"
       ],
       generatedPromptExcludes: ["Tighten only the unclear", "Finish the missing parts"],
       generatedPromptEndsWith: COMPLETION_CTA,

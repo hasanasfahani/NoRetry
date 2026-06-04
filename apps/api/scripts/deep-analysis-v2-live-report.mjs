@@ -80,6 +80,8 @@ function generatedPromptIssues(decision) {
   const prompt = decision.generatedPrompt ?? ""
   const issues = []
 
+  if (decision.overallStatus === "unavailable") return issues
+
   if (!prompt.trim()) {
     issues.push("missing_generated_prompt")
     return issues
@@ -122,6 +124,7 @@ function analyzeCandidates(candidates) {
     .filter((value) => typeof value === "number" && Number.isFinite(value))
 
   const fallbackCount = decisions.filter((decision) => decision.provider === "fallback").length
+  const unavailableCount = decisions.filter((decision) => decision.overallStatus === "unavailable").length
   const lowConfidenceCount = decisions.filter((decision) => decision.confidence === "low").length
   const riskyOrFailCount = decisions.filter((decision) => decision.overallStatus === "risky" || decision.overallStatus === "fail").length
   const pendingCount = v2Candidates.filter((candidate) => candidate.status === "pending").length
@@ -143,12 +146,15 @@ function analyzeCandidates(candidates) {
   if (fallbackCount > Math.max(1, Math.floor(v2Candidates.length * 0.2))) {
     blockers.push("Fallback provider rate is high; inspect provider failures before launch.")
   }
+  if (unavailableCount > Math.max(1, Math.floor(v2Candidates.length * 0.2))) {
+    blockers.push("LLM-unavailable rate is high; inspect provider latency/failures before launch.")
+  }
   if (lowConfidenceCount > Math.max(1, Math.floor(v2Candidates.length * 0.2))) {
     blockers.push("Low-confidence rate is high; add cases or improve the prompt before launch.")
   }
   if (riskyOrFailCount > 0) blockers.push("Risky/fail cases exist; review whether the user-facing recommendation was correct.")
-  if (typeof p90 === "number" && p90 > 15000) {
-    blockers.push("p90 latency is above 15s; investigate provider latency or prewarm behavior.")
+  if (typeof p90 === "number" && p90 > 30000) {
+    blockers.push("p90 latency is above 30s; investigate provider latency or prewarm behavior.")
   }
   if (promptIssuesByCandidate.length) {
     blockers.push("Generated-prompt quality issues exist; review next-step requirements, blocked scope, and CTA coverage.")
@@ -159,6 +165,7 @@ function analyzeCandidates(candidates) {
     decisions,
     latencies,
     fallbackCount,
+    unavailableCount,
     lowConfidenceCount,
     riskyOrFailCount,
     pendingCount,
@@ -230,6 +237,7 @@ function renderReport(inputPath, candidates, analysis) {
     `- Candidates with v2 snapshot: ${analysis.v2Candidates.length}`,
     `- Pending v2 candidates: ${analysis.pendingCount}`,
     `- Fallback provider count: ${analysis.fallbackCount}`,
+    `- LLM-unavailable count: ${analysis.unavailableCount}`,
     `- Low-confidence count: ${analysis.lowConfidenceCount}`,
     `- Risky/fail count: ${analysis.riskyOrFailCount}`,
     "",

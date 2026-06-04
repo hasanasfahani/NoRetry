@@ -22,4 +22,11 @@ export const DETECTION_THRESHOLDS = {
   afterRateLimitPerHour: 6
 } as const
 
-export const SUPPORTED_HOSTS = ["replit.com", "www.replit.com", "chatgpt.com", "chat.openai.com"]
+export const SUPPORTED_HOSTS = [
+  "replit.com",
+  "www.replit.com",
+  "chatgpt.com",
+  "chat.openai.com",
+  "lovable.dev",
+  "www.lovable.dev"
+]

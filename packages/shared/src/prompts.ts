@@ -6,6 +6,9 @@ function describeSurface(surface?: PromptSurface) {
   if (surface === "CHATGPT") {
     return "ChatGPT in the browser"
   }
+  if (surface === "LOVABLE") {
+    return "Lovable in the browser"
+  }
 
   return "Replit in the browser"
 }

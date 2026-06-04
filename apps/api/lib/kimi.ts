@@ -8,7 +8,18 @@ type KimiMessageResponse = {
   }>
 }
 
-export async function callKimiJson(systemPrompt: string, userPrompt: string, maxTokens = 700) {
+type KimiJsonOptions = {
+  responseFormatJson?: boolean
+  temperature?: number
+}
+
+export async function callKimiJson(
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens = 700,
+  signal?: AbortSignal,
+  options?: KimiJsonOptions
+) {
   if (runtimeFlags.useMocks || !env.KIMI_API_KEY) return null
 
   const response = await fetch("https://api.moonshot.ai/v1/chat/completions", {
@@ -19,9 +30,10 @@ export async function callKimiJson(systemPrompt: string, userPrompt: string, max
     },
     body: JSON.stringify({
       model: env.KIMI_MODEL,
-      temperature: 0.6,
+      temperature: options?.temperature ?? 0.6,
       max_tokens: maxTokens,
       thinking: { type: "disabled" },
+      ...(options?.responseFormatJson ? { response_format: { type: "json_object" } } : {}),
       messages: [
         {
           role: "system",
@@ -32,7 +44,8 @@ export async function callKimiJson(systemPrompt: string, userPrompt: string, max
           content: userPrompt
         }
       ]
-    })
+    }),
+    signal
   })
 
   if (!response.ok) {
@@ -47,7 +60,7 @@ export async function callKimiJson(systemPrompt: string, userPrompt: string, max
   return text.replace(/```json|```/g, "").trim()
 }
 
-export async function callKimiText(systemPrompt: string, userPrompt: string, maxTokens = 700) {
+export async function callKimiText(systemPrompt: string, userPrompt: string, maxTokens = 700, signal?: AbortSignal) {
   if (runtimeFlags.useMocks || !env.KIMI_API_KEY) return null
 
   const response = await fetch("https://api.moonshot.ai/v1/chat/completions", {
@@ -71,7 +84,8 @@ export async function callKimiText(systemPrompt: string, userPrompt: string, max
           content: userPrompt
         }
       ]
-    })
+    }),
+    signal
   })
 
   if (!response.ok) {

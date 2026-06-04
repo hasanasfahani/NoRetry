@@ -11,8 +11,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "regression:after": "node --experimental-strip-types --loader ./scripts/ts-extension-loader.mjs ./scripts/after-review-regression.ts",
     "test:deep-analysis-v2": "node ./scripts/deep-analysis-v2-smoke.mjs",
+    "test:project-planning": "node --loader ./scripts/ts-extension-loader.mjs ./scripts/project-planning-ai-smoke.mjs",
     "test:deep-analysis-v2-eval": "node ./scripts/deep-analysis-v2-eval.mjs",
     "test:deep-analysis-v2:ci": "npm run test:deep-analysis-v2 && npm run test:deep-analysis-v2-eval",
+    "smoke:deep-analysis-v2-race": "node ./scripts/deep-analysis-v2-full-race-smoke.mjs",
+    "debug:deep-analysis-v2-providers": "node ./scripts/deep-analysis-v2-provider-debug.mjs",
     "health:deep-analysis-v2": "node ./scripts/deep-analysis-v2-health.mjs",
     "report:deep-analysis-v2-live": "node ./scripts/deep-analysis-v2-live-report.mjs",
     "generate:deep-analysis-v2-silver": "node ./scripts/deep-analysis-v2-silver-eval-generate.mjs"

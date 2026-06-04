@@ -1,0 +1,390 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum WorkspaceStatus {
+  ACTIVE
+  ARCHIVED
+  DISABLED
+}
+
+enum WorkspaceMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum SubscriptionProvider {
+  STRIPE
+  MANUAL
+}
+
+enum SubscriptionStatus {
+  INACTIVE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  EXPIRED
+}
+
+enum EntitlementSource {
+  PLAN
+  MANUAL
+  PROMO
+  TRIAL
+  SYSTEM
+}
+
+enum UsageLedgerStatus {
+  PENDING
+  POSTED
+  VOIDED
+}
+
+model User {
+  id              String        @id @default(cuid())
+  email           String        @unique
+  passwordHash    String
+  firstName       String
+  lastName        String
+  displayName     String?
+  emailVerifiedAt DateTime?
+  status          UserStatus    @default(ACTIVE)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  sessions        AuthSession[]
+  devices         Device[]
+  projects        Project[]
+  ownedWorkspaces Workspace[]   @relation("WorkspaceOwner")
+  workspaceMemberships WorkspaceMember[]
+  subscriptions   Subscription[]
+  entitlements    Entitlement[]
+  usageLedgerEntries UsageLedger[]
+}
+
+model AuthSession {
+  id               String    @id @default(cuid())
+  userId           String
+  sessionTokenHash String
+  refreshTokenHash String
+  deviceLabel      String?
+  userAgent        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  lastSeenAt       DateTime  @default(now())
+  createdAt        DateTime  @default(now())
+
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@unique([sessionTokenHash])
+  @@unique([refreshTokenHash])
+}
+
+model Device {
+  id                 String    @id @default(cuid())
+  userId             String?
+  anonymousDeviceId  String
+  extensionInstallId String
+  label              String?
+  lastSeenAt         DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+
+  user               User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@unique([anonymousDeviceId, extensionInstallId])
+}
+
+model Project {
+  id           String                 @id @default(cuid())
+  userId       String
+  workspaceId  String?
+  projectKey   String
+  projectLabel String
+  source       String                 @default("REPLIT")
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+
+  user         User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace    Workspace?             @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  memorySnapshots ProjectMemorySnapshot[]
+  preferences  ProjectPreference?
+  contextImports ProjectContextImport[]
+  progress     ProjectProgress?
+  activityLogs ProjectActivityLog[]
+  usageLedgerEntries UsageLedger[]
+
+  @@unique([userId, projectKey])
+  @@index([userId])
+  @@index([workspaceId])
+}
+
+model Workspace {
+  id          String              @id @default(cuid())
+  ownerUserId String
+  name        String
+  slug        String?
+  status      WorkspaceStatus     @default(ACTIVE)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  owner       User                @relation("WorkspaceOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  members     WorkspaceMember[]
+  projects    Project[]
+  subscriptions Subscription[]
+  entitlements Entitlement[]
+  usageLedgerEntries UsageLedger[]
+
+  @@index([ownerUserId])
+  @@unique([ownerUserId, name])
+  @@unique([slug])
+}
+
+model WorkspaceMember {
+  id          String              @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceMemberRole @default(MEMBER)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  workspace   Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+model Subscription {
+  id                  String               @id @default(cuid())
+  userId              String?
+  workspaceId         String?
+  provider            SubscriptionProvider @default(STRIPE)
+  providerCustomerId  String?
+  providerSubId       String?
+  status              SubscriptionStatus   @default(INACTIVE)
+  planKey             String?
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
+  cancelAtPeriodEnd   Boolean              @default(false)
+  metadataJson        Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  user                User?                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace           Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([workspaceId, status])
+  @@unique([provider, providerSubId])
+}
+
+model Entitlement {
+  id                  String              @id @default(cuid())
+  userId              String?
+  workspaceId         String?
+  key                 String
+  value               String
+  source              EntitlementSource   @default(SYSTEM)
+  expiresAt           DateTime?
+  metadataJson        Json?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  user                User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace           Workspace?          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([userId, key])
+  @@index([workspaceId, key])
+}
+
+model UsageLedger {
+  id                  String            @id @default(cuid())
+  userId              String?
+  workspaceId         String?
+  projectId           String?
+  featureKey          String
+  quantity            Int
+  status              UsageLedgerStatus @default(PENDING)
+  eventType           String
+  metadataJson        Json?
+  occurredAt          DateTime          @default(now())
+  createdAt           DateTime          @default(now())
+
+  user                User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace           Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project             Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, featureKey, occurredAt])
+  @@index([workspaceId, featureKey, occurredAt])
+  @@index([projectId, occurredAt])
+}
+
+model ProjectMemorySnapshot {
+  id                         String   @id @default(cuid())
+  projectId                  String
+  projectContext             String
+  currentState               String
+  importedContextRawMarkdown String?
+  structuredMemoryJson       Json?
+  memoryDepth                String?
+  contextStatus              String?
+  version                    Int      @default(1)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  project                    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model ProjectPreference {
+  id                String   @id @default(cuid())
+  projectId         String   @unique
+  collaborationMode String
+  proofPreference   String
+  explanationStyle  String
+  scopePreference   String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model ProjectContextImport {
+  id                String   @id @default(cuid())
+  projectId         String
+  rawMarkdown       String
+  parsedSummaryJson Json?
+  importedAt        DateTime @default(now())
+
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model ProjectProgress {
+  id                         String   @id @default(cuid())
+  projectId                  String   @unique
+  activeSurface              String?
+  currentWorkflowState       String?
+  promptModeSessionKey       String?
+  promptModeStateJson        Json?
+  latestPromptDraft          String?
+  latestReviewTargetIdentity String?
+  latestReviewSummaryJson    Json?
+  onboardingStateJson        Json?
+  planningStateJson          Json?
+  version                    Int      @default(1)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  project                    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model ProjectActivityLog {
+  id          String   @id @default(cuid())
+  projectId   String
+  eventType   String
+  payloadJson Json?
+  createdAt   DateTime @default(now())
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+model Session {
+  id             String       @id
+  source         String
+  probableStatus String?
+  endedAt        DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  promptEvents   PromptEvent[]
+}
+
+model PromptEvent {
+  id              String       @id
+  sessionId       String
+  originalPrompt  String
+  optimizedPrompt String?
+  finalSentPrompt String
+  promptIntent    String
+  strengthScore   String
+  createdAt       DateTime     @default(now())
+
+  session         Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  outcomeEvents   OutcomeEvent[]
+
+  @@index([sessionId])
+}
+
+model OutcomeEvent {
+  id                    String       @id
+  promptEventId         String
+  outputSnippet         String
+  errorSummary          String?
+  retryCount            Int
+  changedFilesCount     Int
+  changedFilePathsSummary Json
+  detectionFlags        Json
+  probableStatus        String
+  createdAt             DateTime     @default(now())
+
+  promptEvent           PromptEvent  @relation(fields: [promptEventId], references: [id], onDelete: Cascade)
+  diagnosis             Diagnosis?
+  userFeedback          UserFeedback[]
+
+  @@index([promptEventId])
+}
+
+model Diagnosis {
+  id                     String   @id @default(cuid())
+  outcomeEventId         String   @unique
+  whyItLikelyFailed      Json
+  whatAiMisunderstood    String
+  whatToFixNextTime      Json
+  improvedRetryPrompt    String?
+  sourceType             String
+  tokenEstimate          Int
+  createdAt              DateTime @default(now())
+
+  outcomeEvent           OutcomeEvent @relation(fields: [outcomeEventId], references: [id], onDelete: Cascade)
+}
+
+model PatternCache {
+  id                String   @id @default(cuid())
+  patternKey        String   @unique
+  diagnosisTemplate Json
+  usageCount        Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model UserFeedback {
+  id            String   @id @default(cuid())
+  outcomeEventId String
+  feedbackType  String
+  createdAt     DateTime @default(now())
+
+  outcomeEvent  OutcomeEvent @relation(fields: [outcomeEventId], references: [id], onDelete: Cascade)
+
+  @@index([outcomeEventId])
+}

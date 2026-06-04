@@ -32,9 +32,13 @@ loadLocalEnvFile()
 
 const EnvSchema = z.object({
   DEEPSEEK_API_KEY: z.string().optional(),
-  DEEPSEEK_MODEL: z.string().default("deepseek-chat"),
+  DEEPSEEK_MODEL: z.string().default("deepseek-v4-flash"),
   KIMI_API_KEY: z.string().optional(),
   KIMI_MODEL: z.string().default("kimi-k2.6"),
+  PROJECT_PLANNING_PROVIDER: z.preprocess(
+    (value) => (typeof value === "string" ? value.toLowerCase() : value),
+    z.enum(["kimi", "deepseek"]).default("kimi")
+  ),
   DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS: z.string().optional(),
   DATABASE_URL: z.string().optional(),
   PROMPT_OPTIMIZER_USE_MOCKS: z.string().default("true"),
@@ -55,6 +59,7 @@ export const env = EnvSchema.parse({
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL,
   KIMI_API_KEY: process.env.KIMI_API_KEY || process.env.MOONSHOT_API_KEY,
   KIMI_MODEL: process.env.KIMI_MODEL || process.env.MOONSHOT_MODEL,
+  PROJECT_PLANNING_PROVIDER: process.env.PROJECT_PLANNING_PROVIDER,
   DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS: process.env.DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS,
   DATABASE_URL: process.env.DATABASE_URL,
   PROMPT_OPTIMIZER_USE_MOCKS: process.env.PROMPT_OPTIMIZER_USE_MOCKS,

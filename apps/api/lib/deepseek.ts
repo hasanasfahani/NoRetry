@@ -8,7 +8,17 @@ type DeepSeekMessageResponse = {
   }>
 }
 
-export async function callDeepSeekJson(systemPrompt: string, userPrompt: string, maxTokens = 700) {
+type DeepSeekJsonOptions = {
+  responseFormatJson?: boolean
+}
+
+export async function callDeepSeekJson(
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens = 700,
+  signal?: AbortSignal,
+  options?: DeepSeekJsonOptions
+) {
   if (runtimeFlags.useMocks || !env.DEEPSEEK_API_KEY) return null
 
   const response = await fetch("https://api.deepseek.com/chat/completions", {
@@ -19,11 +29,9 @@ export async function callDeepSeekJson(systemPrompt: string, userPrompt: string,
     },
     body: JSON.stringify({
       model: env.DEEPSEEK_MODEL,
-      temperature: 0.2,
+      temperature: 0.1,
       max_tokens: maxTokens,
-      response_format: {
-        type: "json_object"
-      },
+      ...(options?.responseFormatJson ? { response_format: { type: "json_object" } } : {}),
       messages: [
         {
           role: "system",
@@ -34,7 +42,8 @@ export async function callDeepSeekJson(systemPrompt: string, userPrompt: string,
           content: userPrompt
         }
       ]
-    })
+    }),
+    signal
   })
 
   if (!response.ok) {
@@ -49,7 +58,7 @@ export async function callDeepSeekJson(systemPrompt: string, userPrompt: string,
   return text.replace(/```json|```/g, "").trim()
 }
 
-export async function callDeepSeekText(systemPrompt: string, userPrompt: string, maxTokens = 700) {
+export async function callDeepSeekText(systemPrompt: string, userPrompt: string, maxTokens = 700, signal?: AbortSignal) {
   if (runtimeFlags.useMocks || !env.DEEPSEEK_API_KEY) return null
 
   const response = await fetch("https://api.deepseek.com/chat/completions", {
@@ -60,7 +69,7 @@ export async function callDeepSeekText(systemPrompt: string, userPrompt: string,
     },
     body: JSON.stringify({
       model: env.DEEPSEEK_MODEL,
-      temperature: 0.2,
+      temperature: 0.1,
       max_tokens: maxTokens,
       messages: [
         {
@@ -72,7 +81,8 @@ export async function callDeepSeekText(systemPrompt: string, userPrompt: string,
           content: userPrompt
         }
       ]
-    })
+    }),
+    signal
   })
 
   if (!response.ok) {

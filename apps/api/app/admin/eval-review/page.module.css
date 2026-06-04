@@ -1,0 +1,539 @@
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  background: #f6f7f9;
+  color: #17202c;
+}
+
+.sidebar {
+  min-height: 100vh;
+  padding: 24px 20px;
+  background: #111827;
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  position: sticky;
+  top: 0;
+}
+
+.brand,
+.kicker,
+.candidateMeta {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.brand {
+  color: #91d6ae;
+}
+
+.sidebar h1,
+.header h2,
+.candidate h3,
+.importPanel h3,
+.emptyState h3 {
+  margin: 4px 0 0;
+  letter-spacing: 0;
+}
+
+.sidebar h1 {
+  font-size: 28px;
+}
+
+.nav {
+  display: grid;
+  gap: 8px;
+}
+
+.nav a {
+  color: #ffffff;
+  text-decoration: none;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.sidebarNote {
+  margin: auto 0 0;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.workspace {
+  min-width: 0;
+  padding: 28px;
+  display: grid;
+  gap: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.header h2 {
+  font-size: 30px;
+}
+
+.kicker {
+  color: #166534;
+}
+
+.subtle,
+.importPanel p,
+.emptyState p,
+.summaryGrid p,
+.evidenceGrid p {
+  color: #5b6472;
+}
+
+.subtle {
+  margin: 8px 0 0;
+  max-width: 760px;
+}
+
+.headerActions,
+.importActions,
+.actionRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(116px, 1fr));
+  gap: 10px;
+}
+
+.v2Metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.metrics button,
+.v2Metrics div,
+.importPanel,
+.toolbar,
+.candidate,
+.emptyState {
+  background: #ffffff;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+}
+
+.metrics button {
+  color: #17202c;
+  text-align: left;
+  padding: 12px;
+  cursor: pointer;
+}
+
+.v2Metrics div {
+  padding: 12px;
+  background: #f8fbff;
+}
+
+.metrics button[data-active="true"] {
+  border-color: #166534;
+  box-shadow: inset 0 0 0 1px #166534;
+}
+
+.metrics span,
+.v2Metrics span,
+.summaryGrid span {
+  color: #64748b;
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.metrics strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+}
+
+.v2Metrics strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+}
+
+.v2Metrics p {
+  margin: 5px 0 0;
+  color: #5b6472;
+  font-size: 13px;
+}
+
+.importPanel {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.importPanel h3 {
+  font-size: 18px;
+}
+
+.importPanel p {
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.importPanel textarea,
+.toolbar input,
+.reviewFields textarea {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17202c;
+  font: inherit;
+}
+
+.importPanel textarea {
+  min-height: 118px;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.importActions span {
+  color: #475569;
+  font-size: 13px;
+}
+
+.toolbar {
+  padding: 12px;
+}
+
+.toolbar label,
+.reviewFields label {
+  color: #334155;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.toolbar input {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.candidateList {
+  display: grid;
+  gap: 12px;
+}
+
+.candidate {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.candidateHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.candidateMeta {
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.candidate h3 {
+  font-size: 20px;
+}
+
+.statusPill,
+.reasonRow span {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.statusPill {
+  padding: 7px 10px;
+  border: 1px solid transparent;
+}
+
+.statusPill[data-status="pending"] {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.statusPill[data-status="accepted"] {
+  background: #ecfdf3;
+  color: #166534;
+}
+
+.statusPill[data-status="rejected"] {
+  background: #f8fafc;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+
+.statusPill[data-status="needs_edit"] {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.statusPill[data-status="product_rule_issue"] {
+  background: #fdf2f8;
+  color: #be185d;
+}
+
+.reasonRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.reasonRow span {
+  color: #334155;
+  background: #f1f5f9;
+  padding: 6px 9px;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.summaryGrid div,
+.simpleDecisionPanel,
+.deepAnalysisV2Panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.summaryGrid strong,
+.summaryGrid p,
+.simpleDecisionPanel strong,
+.simpleDecisionPanel p,
+.simpleDecisionPanel li,
+.deepAnalysisV2Panel strong,
+.deepAnalysisV2Panel p {
+  overflow-wrap: anywhere;
+}
+
+.summaryGrid strong,
+.simpleDecisionPanel strong,
+.deepAnalysisV2Panel strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.summaryGrid p,
+.simpleDecisionPanel p,
+.deepAnalysisV2Panel p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.simpleDecisionPanel,
+.deepAnalysisV2Panel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  background: #f8fafc;
+}
+
+.deepAnalysisV2Panel {
+  border-color: #d7e5f8;
+  background: #f8fbff;
+}
+
+.simpleDecisionPanel span,
+.deepAnalysisV2Panel span {
+  color: #64748b;
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.simpleDecisionPanel ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.simplePromptPreview p {
+  max-height: 150px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #17202c;
+}
+
+.evidenceGrid,
+.reviewFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.evidenceGrid section {
+  border-left: 3px solid #d8dee8;
+  padding-left: 12px;
+}
+
+.evidenceGrid h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.evidenceGrid p {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.reviewFields {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.reviewFields textarea {
+  min-height: 86px;
+  padding: 10px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.primaryButton,
+.secondaryButton,
+.dangerButton {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  min-height: 36px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.primaryButton {
+  background: #166534;
+  color: #ffffff;
+}
+
+.secondaryButton {
+  background: #ffffff;
+  color: #17202c;
+  border-color: #cbd5e1;
+}
+
+.dangerButton {
+  background: #fff1f2;
+  color: #be123c;
+  border-color: #fecdd3;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.dangerButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.actionRow button[data-selected="true"] {
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+
+.emptyState {
+  padding: 28px;
+}
+
+.emptyState h3 {
+  font-size: 20px;
+}
+
+.emptyState p {
+  margin: 8px 0 0;
+}
+
+@media (max-width: 1100px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    min-height: auto;
+    position: static;
+  }
+
+  .metrics,
+  .v2Metrics,
+  .summaryGrid,
+  .simpleDecisionPanel,
+  .deepAnalysisV2Panel,
+  .reviewFields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .workspace {
+    padding: 16px;
+  }
+
+  .header,
+  .candidateHeader,
+  .evidenceGrid,
+  .reviewFields {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .metrics,
+  .v2Metrics,
+  .summaryGrid,
+  .simpleDecisionPanel,
+  .deepAnalysisV2Panel {
+    grid-template-columns: 1fr;
+  }
+
+  .headerActions,
+  .importActions,
+  .actionRow {
+    align-items: stretch;
+  }
+
+  .headerActions button,
+  .importActions button,
+  .actionRow button {
+    flex: 1 1 150px;
+  }
+}

@@ -8,9 +8,22 @@
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace @prompt-optimizer/api",
+    "dev:admin": "WATCHPACK_POLLING=true PORT=3002 npm run dev --workspace @prompt-optimizer/api",
     "dev:extension": "npm run dev --workspace @prompt-optimizer/extension",
     "build": "npm run build --workspaces",
     "lint": "npm run lint --workspaces",
-    "typecheck": "npm run typecheck --workspaces"
+    "typecheck": "npm run typecheck --workspaces",
+    "test:next-move": "npm run test:next-move --workspace @prompt-optimizer/extension",
+    "test:next-move:ci": "npm run test:next-move:ci --workspace @prompt-optimizer/extension",
+    "test:next-move:report": "npm run test:next-move-eval:report --workspace @prompt-optimizer/extension",
+    "test:next-move:cleanup": "npm run test:next-move-eval:cleanup --workspace @prompt-optimizer/extension",
+    "test:next-move:candidates": "npm run test:next-move-candidates:export --workspace @prompt-optimizer/extension",
+    "test:review-next-move": "npm run test:review-next-move --workspace @prompt-optimizer/extension",
+    "test:review-next-move:ci": "npm run test:review-next-move:ci --workspace @prompt-optimizer/extension",
+    "test:deep-analysis-v2": "npm run test:deep-analysis-v2 --workspace @prompt-optimizer/api && npm run test:deep-analysis-v2 --workspace @prompt-optimizer/extension",
+    "test:deep-analysis-v2-eval": "npm run test:deep-analysis-v2-eval --workspace @prompt-optimizer/api",
+    "test:deep-analysis-v2:ci": "npm run test:deep-analysis-v2:ci --workspace @prompt-optimizer/api && npm run test:deep-analysis-v2 --workspace @prompt-optimizer/extension",
+    "report:deep-analysis-v2-live": "npm run report:deep-analysis-v2-live --workspace @prompt-optimizer/api",
+    "generate:deep-analysis-v2-silver": "npm run generate:deep-analysis-v2-silver --workspace @prompt-optimizer/api"
   }
 }

@@ -3,12 +3,22 @@ import { PROMPT_INTENTS, STRENGTH_SCORES } from "./constants"
 
 export const StrengthScoreSchema = z.enum(STRENGTH_SCORES)
 export const PromptIntentSchema = z.enum(PROMPT_INTENTS)
-export const PromptSurfaceSchema = z.enum(["REPLIT", "CHATGPT"])
+export const PromptSurfaceSchema = z.enum(["REPLIT", "CHATGPT", "LOVABLE"])
 export const AfterTaskTypeSchema = z.enum(["debug", "build", "refactor", "explain"])
 export const AfterStatusSchema = z.enum(["SUCCESS", "PARTIAL", "FAILED", "UNVERIFIED"])
 export const AfterConfidenceSchema = z.enum(["low", "medium", "high"])
-export const AttemptPlatformSchema = z.enum(["chatgpt", "replit"])
+export const AttemptPlatformSchema = z.enum(["chatgpt", "replit", "lovable"])
 export const AttemptStatusSchema = z.enum(["draft", "submitted", "analyzed"])
+export const AnalysisInputSizeSchema = z.enum(["normal", "large"])
+export const AnalysisModeSchema = z.enum(["standard", "large_input_checkpoint"])
+export const LargeAnalysisInputSignalSchema = z.enum([
+  "long_prompt",
+  "prd_sections",
+  "multiple_implementation_phases",
+  "acceptance_criteria",
+  "validation_proof",
+  "phase_handoff"
+])
 export const UnifiedTaskTypeSchema = z.enum(["debug", "build", "refactor", "explain", "create_ui", "other"])
 export const VerdictStatusSchema = z.enum([
   "SUCCESS",
@@ -147,6 +157,9 @@ export const AttemptSchema = z.object({
   response_text: z.string().nullable().optional(),
   response_message_id: z.string().nullable().optional(),
   analysis_result: z.unknown().nullable().optional(),
+  analysis_input_size: AnalysisInputSizeSchema.optional(),
+  analysis_mode: AnalysisModeSchema.optional(),
+  analysis_input_signals: z.array(LargeAnalysisInputSignalSchema).max(8).optional(),
   token_usage_total: z.number().int().min(0).default(0),
   stage_cache: z.record(z.unknown()).default({})
 })
@@ -199,7 +212,7 @@ export const VerdictOutputSchema = z.object({
 })
 
 export const ArtifactContextModeSchema = z.enum(["none", "passive"])
-export const ArtifactSurfaceSchema = z.enum(["replit", "chatgpt"])
+export const ArtifactSurfaceSchema = z.enum(["replit", "chatgpt", "lovable"])
 export const ArtifactTypeSchema = z.enum([
   "response_text",
   "response_code_blocks",
@@ -523,6 +536,9 @@ export type AfterLlmRequest = z.infer<typeof AfterLlmRequestSchema>
 export type AfterLlmResponse = z.infer<typeof AfterLlmResponseSchema>
 export type AttemptPlatform = z.infer<typeof AttemptPlatformSchema>
 export type AttemptStatus = z.infer<typeof AttemptStatusSchema>
+export type AnalysisInputSize = z.infer<typeof AnalysisInputSizeSchema>
+export type AnalysisMode = z.infer<typeof AnalysisModeSchema>
+export type LargeAnalysisInputSignal = z.infer<typeof LargeAnalysisInputSignalSchema>
 export type UnifiedTaskType = z.infer<typeof UnifiedTaskTypeSchema>
 export type VerdictStatus = z.infer<typeof VerdictStatusSchema>
 export type ReviewCriterionSource = z.infer<typeof ReviewCriterionSourceSchema>

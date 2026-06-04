@@ -14,6 +14,9 @@ export default function HomePage() {
           <li>`POST /api/diagnose-failure` for selective minimal-context diagnosis</li>
           <li>`POST /api/feedback` for explicit worked / didn&apos;t work signals</li>
         </ul>
+        <p>
+          <a href="/admin/eval-review">Open the eval review admin portal</a>
+        </p>
       </div>
     </main>
   )
