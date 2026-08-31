@@ -1,5 +1,5 @@
 import type { GoalContract } from "../goal/types"
-import { buildPreflightSignals, type PreflightSignal } from "./preflight-signals"
+import { buildPreflightSignals, type EngineerEscalationWarning, type PreflightSignal } from "./preflight-signals"
 
 export type PreflightRiskLevel = "low" | "medium" | "high"
 
@@ -8,6 +8,7 @@ export type PreflightAssessment = {
   signals: PreflightSignal[]
   topSignal: PreflightSignal | null
   summary: string
+  engineerWarning?: EngineerEscalationWarning | null
 }
 
 function riskLevelFromSignals(signals: PreflightSignal[]): PreflightRiskLevel {
@@ -23,11 +24,22 @@ function buildSummary(signals: PreflightSignal[]) {
 }
 
 export function buildPreflightAssessment(input: { goalContract: GoalContract; promptText: string }): PreflightAssessment {
-  const signals = buildPreflightSignals(input)
-  return {
-    riskLevel: riskLevelFromSignals(signals),
-    signals,
-    topSignal: signals[0] ?? null,
-    summary: buildSummary(signals)
+  try {
+    const signals = buildPreflightSignals(input)
+    return {
+      riskLevel: riskLevelFromSignals(signals),
+      signals,
+      topSignal: signals[0] ?? null,
+      summary: buildSummary(signals),
+      engineerWarning: signals.find((signal) => signal.type === "engineer_escalation")?.engineerWarning ?? null
+    }
+  } catch {
+    return {
+      riskLevel: "low",
+      signals: [],
+      topSignal: null,
+      summary: "Prompt looks specific enough to send.",
+      engineerWarning: null
+    }
   }
 }

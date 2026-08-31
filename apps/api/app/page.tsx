@@ -5,11 +5,11 @@ const INSTAGRAM_URL = "https://www.instagram.com/try.reevaai/"
 const problemCards = [
   {
     title: "Looks finished",
-    detail: "Logic may be missing"
+    detail: "Details may be missing from the response"
   },
   {
     title: "Says “done”",
-    detail: "Evidence is unclear"
+    detail: "Supporting detail is unclear"
   },
   {
     title: "Moves fast",
@@ -33,18 +33,18 @@ const productCards = [
   },
   {
     title: "Review Result",
-    body: "Check what’s complete.",
-    preview: "Missing save logic"
+    body: "Review what the agent reported.",
+    preview: "Save behavior not explained"
   },
   {
-    title: "Repair Prompt",
-    body: "Fix only the gap.",
+    title: "Suggested Next Prompt",
+    body: "Ask about the reported gap.",
     preview: "Add error state"
   },
   {
     title: "Test Checklist",
     body: "Validate before moving on.",
-    preview: "Submit, refresh, verify"
+    preview: "Submit, refresh, confirm"
   }
 ]
 
@@ -132,13 +132,13 @@ export default function HomePage() {
             </div>
             <div className="mini-card">
               <span>Review Result</span>
-              <p>Data saving is missing.</p>
+              <p>Data saving was not explained.</p>
             </div>
             <div className="check-card">
               <span>Test Checklist</span>
               <label>Submit</label>
               <label>Refresh</label>
-              <label>Verify</label>
+              <label>Confirm result</label>
             </div>
           </aside>
         </div>
@@ -147,7 +147,7 @@ export default function HomePage() {
       <section className="problem-section" id="clarity">
         <div className="section-heading compact-heading">
           <p className="eyebrow">Replit builds fast. reeva AI keeps you in control.</p>
-          <h2>AI builds fast. But is it actually done?</h2>
+          <h2>AI builds fast. What did the agent report?</h2>
         </div>
         <div className="problem-grid">
           {problemCards.map((item) => (
@@ -197,7 +197,7 @@ export default function HomePage() {
 
       <section className="proof-section" id="proof">
         <div className="section-heading">
-          <h2>Catch what AI misses</h2>
+          <h2>Review what the AI reported</h2>
         </div>
         <div className="proof-card">
           <div>
@@ -209,14 +209,14 @@ export default function HomePage() {
             <p>Done</p>
           </div>
           <div className="findings">
-            <span>reeva AI finds</span>
-            <p>Data not saved</p>
-            <p>No confirmation state</p>
-            <p>No failed-submit test</p>
+            <span>reeva AI flags</span>
+            <p>Data saving not explained</p>
+            <p>Confirmation state not mentioned</p>
+            <p>Failed-submit testing not mentioned</p>
           </div>
           <div className="next-test">
             <span>Next test</span>
-            <p>Submit, refresh, verify.</p>
+            <p>Submit, refresh, confirm the result.</p>
           </div>
         </div>
       </section>

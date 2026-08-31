@@ -2,8 +2,8 @@ import * as z from "zod"
 
 export const PROJECT_PLANNING_PROVIDER_TIMEOUT_MS = 12_000
 export const PROJECT_PLANNING_CLIENT_TIMEOUT_MS = 18_000
-export const PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS = 28_000
-export const PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS = 32_000
+export const PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS = 50_000
+export const PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS = 90_000
 
 export const ProjectPlanningCriteriaKeySchema = z.enum([
   "problem",
@@ -187,12 +187,17 @@ export const ProjectPlanningIntakeFieldsSchema = z.object({
   problem: z.string().trim().max(4000).default(""),
   firstVersion: z.string().trim().max(4000).default(""),
   skipForNow: z.string().trim().max(4000).default(""),
-  anythingElse: z.string().trim().max(4000).default("")
+  anythingElse: z.string().trim().max(4000).default(""),
+  accessAndRoles: z.string().trim().max(4000).default(""),
+  dataAndSensitivity: z.string().trim().max(4000).default(""),
+  deploymentAndServices: z.string().trim().max(4000).default(""),
+  qualityPriorities: z.string().trim().max(4000).default("")
 })
 
 export const GenerateProjectPlanningDraftRequestSchema = z.object({
   projectLabel: z.string().trim().min(1).max(240),
   description: z.string().trim().min(10).max(12000),
+  generationAttempt: z.number().int().min(0).max(3).optional(),
   intakeFields: ProjectPlanningIntakeFieldsSchema.optional(),
   coverageReport: ProjectPlanningCoverageReportSchema,
   prdSnapshot: ProjectPlanningPrdSnapshotSchema.optional(),
@@ -226,3 +231,113 @@ export type AnalyzeProjectPlanningRequest = z.infer<typeof AnalyzeProjectPlannin
 export type AnalyzeProjectPlanningResponse = z.infer<typeof AnalyzeProjectPlanningResponseSchema>
 export type GenerateProjectPlanningDraftRequest = z.infer<typeof GenerateProjectPlanningDraftRequestSchema>
 export type GenerateProjectPlanningDraftResponse = z.infer<typeof GenerateProjectPlanningDraftResponseSchema>
+
+export type ProjectPlanningNfrProfile = {
+  riskLevel: "low" | "standard" | "high"
+  assumptions: string[]
+}
+
+function normalizeNfrText(value: string | null | undefined) {
+  return (value ?? "").replace(/\s+/g, " ").trim()
+}
+
+export function deriveProjectPlanningNfrProfile(
+  intakeFields: ProjectPlanningIntakeFieldsPayload
+): ProjectPlanningNfrProfile {
+  try {
+  const accessText = normalizeNfrText(intakeFields.accessAndRoles)
+  const dataText = normalizeNfrText(intakeFields.dataAndSensitivity)
+  const servicesText = normalizeNfrText(intakeFields.deploymentAndServices)
+  const prioritiesText = normalizeNfrText(intakeFields.qualityPriorities)
+  const combinedText = [intakeFields.appIdea, accessText, dataText, servicesText].join(" ").toLowerCase()
+  const noAccounts = /\b(no|without) (accounts?|logins?|sign[ -]?in)\b|\bpeople (?:do not|don't|won't) sign in\b/i.test(accessText)
+  const nothingSaved = /\b(nothing|no (?:user )?data|does not remember|doesn't remember|not saved)\b/i.test(dataText)
+  const hasAccounts = !noAccounts && /\b(accounts?|logins?|sign[ -]?in|users? sign|authentication)\b/i.test(accessText)
+  const remembersData = Boolean(dataText) && !nothingSaved
+  const hasPersonalData = /\b(personal|private|email|phone|address|name|profile|customer data|user data)\b/i.test(combinedText)
+  const hasMoney = /\b(payment|payments|billing|subscription|checkout|card|bank|money|financial transaction)\b/i.test(combinedText)
+  const hasMultipleUserTypes = /\b(admin|administrator|manager|staff|operator|roles?|permissions?|different user|user types?)\b/i.test(accessText)
+  const hasRegulatedData = /\b(regulated|medical|health|patient|banking|financial data|insurance|hipaa|pci|gdpr)\b/i.test(combinedText)
+  const riskLevel = hasMoney || hasMultipleUserTypes || hasRegulatedData
+    ? "high"
+    : hasAccounts || remembersData || hasPersonalData
+      ? "standard"
+      : "low"
+  const assumptions: string[] = []
+
+  if (hasAccounts) {
+    assumptions.push("People must sign in before accessing private parts of the app.")
+    assumptions.push("Sign-in details are checked before they are accepted.")
+  }
+  if (hasMultipleUserTypes) {
+    assumptions.push("Each user type can only see or change the information allowed for that role.")
+  } else if (hasAccounts || hasPersonalData) {
+    assumptions.push("Each person can only see or change the information they are allowed to access.")
+  }
+  if (remembersData || hasPersonalData) {
+    assumptions.push("Information is checked before it is saved.")
+  }
+  if (hasAccounts || remembersData || hasPersonalData) {
+    assumptions.push("Sign-in and saving failures show a clear message without losing what the person entered.")
+  }
+  if (servicesText && !/\b(no|without) (outside|external|third-party) services?\b/i.test(servicesText)) {
+    assumptions.push("Outside-service credentials are kept out of user-visible code.")
+  }
+  if (/\baccessib/i.test(prioritiesText)) {
+    assumptions.push("Important screens and actions remain usable with a keyboard and clear labels.")
+  }
+  if (riskLevel === "high") {
+    assumptions.push("An experienced engineer must review the high-risk areas before implementation.")
+  }
+
+  return {
+    riskLevel,
+    assumptions: Array.from(new Set(assumptions))
+  }
+  } catch {
+    return { riskLevel: "low", assumptions: [] }
+  }
+}
+
+export function buildProjectPlanningNfrSectionBody(
+  intakeFields: ProjectPlanningIntakeFieldsPayload,
+  translatedRequirements: string[] = []
+) {
+  try {
+  const accessText = normalizeNfrText(intakeFields.accessAndRoles)
+  const dataText = normalizeNfrText(intakeFields.dataAndSensitivity)
+  const servicesText = normalizeNfrText(intakeFields.deploymentAndServices)
+  const prioritiesText = normalizeNfrText(intakeFields.qualityPriorities)
+  const hasRawAnswers = Boolean(accessText || dataText || servicesText || prioritiesText)
+  if (!hasRawAnswers) return "Not yet specified"
+
+  const translated = translatedRequirements.map(normalizeNfrText)
+  const profile = deriveProjectPlanningNfrProfile(intakeFields)
+  const sections: string[] = []
+  const addSection = (title: string, value: string) => {
+    const normalized = normalizeNfrText(value)
+    if (normalized) sections.push(`${title}\n- ${normalized}`)
+  }
+
+  if (accessText) addSection("Access and permissions", translated[0] || accessText)
+  if (dataText) addSection("Data handling and privacy", translated[1] || dataText)
+  if (profile.riskLevel !== "low") {
+    addSection(
+      "Validation and error handling",
+      translated[2] || "Check sign-in and saved information before accepting it, and show clear errors without losing entered information."
+    )
+  }
+  if (servicesText) addSection("Deployment and outside services", translated[3] || servicesText)
+  if (prioritiesText) addSection("Quality priorities", translated[4] || prioritiesText)
+  if (profile.assumptions.length) {
+    sections.push(`Confirmed assumptions\n${profile.assumptions.map((item) => `- ${item}`).join("\n")}`)
+  }
+  if (profile.riskLevel === "high") {
+    sections.push("Project risk\n- High-risk — Phase 4 must require experienced-engineer review before implementation.")
+  }
+
+  return sections.join("\n\n") || "Not yet specified"
+  } catch {
+    return "Not yet specified"
+  }
+}

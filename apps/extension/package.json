@@ -5,19 +5,23 @@
   "private": true,
   "manifest": {
     "name": "reeva AI",
-    "description": "The trust layer for AI.",
+    "description": "Make Every Token Count",
     "action": {
       "default_title": "reeva AI"
     },
     "web_accessible_resources": [
       {
         "resources": [
-          "review-popup-logo.png"
+          "review-popup-logo.png",
+          "reeva-dark-logo.png"
         ],
         "matches": [
           "<all_urls>"
         ]
       }
+    ],
+    "permissions": [
+      "activeTab"
     ],
     "host_permissions": [
       "http://localhost/*",
@@ -32,10 +36,27 @@
     "test:review-answer-mode": "node ./scripts/review-answer-mode-smoke.mjs",
     "test:review-analysis-compare": "node ./scripts/review-analysis-compare.mjs",
     "test:gold-cases": "node ./scripts/gold-cases-smoke.mjs",
-    "test:review-prompt-mode-compare": "node ./scripts/review-prompt-mode-compare.mjs",
+    "test:lovable-surface": "node ./scripts/lovable-surface-smoke.mjs",
+    "test:project-onboarding": "node ./scripts/project-onboarding-smoke.mjs",
+    "test:project-planning": "node ./scripts/project-planning-smoke.mjs",
+    "test:project-tracker": "node ./scripts/project-tracker-smoke.mjs",
+    "test:large-input-checkpoint": "node ./scripts/large-input-checkpoint-smoke.mjs",
+    "test:next-move-interpreter": "node ./scripts/next-move-interpreter-smoke.mjs",
+    "test:next-move-ai-compare": "node ./scripts/next-move-ai-compare-smoke.mjs",
+    "test:next-move-eval": "node ./scripts/next-move-eval.mjs",
+    "test:next-move-eval:ci": "NEXT_MOVE_EVAL_MODE=replay NEXT_MOVE_EVAL_MIN_OVERALL=1 NEXT_MOVE_EVAL_MIN_INTERPRETER=1 NEXT_MOVE_EVAL_MIN_AI_DECISION=1 NEXT_MOVE_EVAL_MIN_HARD_GATE=1 NEXT_MOVE_EVAL_MIN_RUBRIC=1 node ./scripts/next-move-eval.mjs",
+    "test:next-move-eval:report": "NEXT_MOVE_EVAL_REPORT_PATH=.tmp/next-move-eval-report.json node ./scripts/next-move-eval.mjs",
+    "test:next-move-eval:cleanup": "NEXT_MOVE_EVAL_REPORT_PATH=.tmp/next-move-fallback-cleanup-report.json NEXT_MOVE_EVAL_REQUIRE_CLEANUP_READY=1 NEXT_MOVE_EVAL_REQUIRE_NO_FALLBACK_ONLY_SAVES=1 node ./scripts/next-move-eval.mjs",
+    "test:next-move-candidates:export": "node ./scripts/next-move-candidates-export.mjs",
+    "test:next-move": "npm run test:next-move-interpreter && npm run test:next-move-ai-compare && npm run test:next-move-eval",
+    "test:next-move:ci": "npm run test:next-move-interpreter && npm run test:next-move-ai-compare && npm run test:next-move-eval:ci",
     "test:review-routing": "node ./scripts/review-routing-smoke.mjs",
-    "test:review-prompt-mode": "node ./scripts/review-prompt-mode-smoke.mjs",
-    "test:review-prompt-mode-v2": "node ./scripts/review-prompt-mode-v2-smoke.mjs"
+    "test:review-next-move": "npm run test:next-move && npm run test:review-routing",
+    "test:review-next-move:ci": "npm run test:next-move:ci && npm run test:review-routing",
+    "test:simple-next-prompt": "node ./scripts/simple-next-prompt-smoke.mjs",
+    "test:simple-next-prompt-eval": "node ./scripts/simple-next-prompt-eval.mjs",
+    "test:deep-analysis-v2": "node ./scripts/deep-analysis-v2-smoke.mjs",
+    "test:review-prompt-mode": "node ./scripts/review-prompt-mode-smoke.mjs"
   },
   "dependencies": {
     "@plasmohq/storage": "^1.12.0",
@@ -46,6 +67,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/chrome": "^0.1.40",
     "typescript": "^5.6.2"
   }
 }

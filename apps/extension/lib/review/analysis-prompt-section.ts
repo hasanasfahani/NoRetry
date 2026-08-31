@@ -1,13 +1,31 @@
 import type { GoalContract } from "../goal/types"
-import { buildAnalysisAnswerModel } from "./analysis-answer-model"
+import type { ImportedProjectContextRecord } from "../core/project-context"
+import type { StructuredProjectMemory } from "../session/project-memory"
+import type { ProjectSettingsRecord } from "../session/project-settings"
+import { buildAnalysisAnswerModelWithInterpreter } from "./analysis-answer-model"
 import { extractEvidenceSpans } from "./analysis-evidence-spans"
 import { ANALYSIS_JUDGE_PROMPT_VERSION, runAnalysisLlmJudge } from "./analysis-llm-judge"
-import { buildBaselineNextMove, buildValidatedNextMove } from "./analysis-next-move"
+import { buildBaselineNextMove } from "./analysis-next-move"
+import {
+  buildStrategyNextMove,
+  buildStrategyPromptNote,
+  buildStrategyShortLabel,
+  determineFollowUpStrategy
+} from "./analysis-follow-up-strategy"
+import { buildAssistantSignalFirstDecision } from "./next-move-decision"
+import { buildSimpleNextPromptDecision } from "./simple-next-prompt-decision-builder"
+import {
+  getSimpleNextPromptRolloutMode,
+  shouldApplySimpleNextPromptDecision,
+  shouldBuildSimpleNextPromptDecision
+} from "./simple-next-prompt-rollout"
 import { buildAnalysisRequestModel } from "./analysis-request-model"
 import { validateAnalysisJudgeResult } from "./analysis-judge-validator"
+import { deriveReviewPhaseProgress } from "./phase-progress"
 import { rankAnalysisJudgments } from "./analysis-usefulness-ranking"
 import { buildSlotJudgments } from "./analysis-slot-extractors"
 import type { ReviewAnalysisDebugPayload, ReviewAnalysisJudgment, ReviewContract } from "./contracts"
+import { deriveWorkflowStateFromAnalysis } from "./workflow-state"
 import type { ReviewTaskType } from "./services/review-task-type"
 
 type PromptSectionKey =
@@ -43,6 +61,9 @@ type BuildAnalysisPromptSectionInput = {
   taskFamily: ReviewTaskType
   goalContract: GoalContract | null
   reviewContract: ReviewContract | null
+  importedContext?: ImportedProjectContextRecord | null
+  projectMemory?: StructuredProjectMemory | null
+  projectSettings?: ProjectSettingsRecord | null
   attemptAcceptanceCriteria?: string[]
   refineNextMovePrompt?: (input: {
     prompt: string
@@ -1168,12 +1189,6 @@ function shouldRejectGeneratedNextMove(params: {
   return false
 }
 
-function shortenNextMove(value: string) {
-  const normalized = normalizeText(value)
-  if (normalized.length <= 160) return normalized
-  return `${normalized.slice(0, 157)}...`
-}
-
 export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSectionInput): Promise<AnalysisPromptSectionOutput> {
   const contract = buildAnalysisPromptContract({
     promptText: input.promptText,
@@ -1189,12 +1204,23 @@ export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSecti
     promptText: input.promptText,
     promptContract: contract,
     goalContract: input.goalContract,
-    taskFamily: input.taskFamily
+    taskFamily: input.taskFamily,
+    importedContext: input.importedContext ?? null,
+    projectMemory: input.projectMemory ?? null,
+    projectSettings: input.projectSettings ?? null
   })
-  const answerModel = buildAnalysisAnswerModel({
+  const answerModel = await buildAnalysisAnswerModelWithInterpreter({
     responseText: input.responseText,
     promptText: input.promptText,
-    taskFamily: input.taskFamily
+    taskFamily: input.taskFamily,
+    interpretPrompt: input.refineNextMovePrompt
+      ? ({ prompt, answers, taskType }) =>
+          input.refineNextMovePrompt!({
+            prompt,
+            answers,
+            taskType: taskType as ReviewTaskType
+          })
+      : undefined
   })
   const baselineJudgments = rankAnalysisJudgments({
     judgments: [
@@ -1246,10 +1272,21 @@ export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSecti
     baselineJudgments
   })
 
-  const smartNextMove = buildValidatedNextMove({
+  const followUpStrategy = determineFollowUpStrategy({
     requestModel,
+    answerModel,
     judgments: validatedJudge.verdicts,
     noRetryNeeded: validatedJudge.noRetryNeeded
+  })
+  const workflowState = deriveWorkflowStateFromAnalysis({
+    resultStatus: validatedJudge.noRetryNeeded ? "SUCCESS" : validatedJudge.gaps.length ? "PARTIAL" : "SUCCESS",
+    strategyMode: followUpStrategy.mode,
+    taskType: input.taskFamily,
+    previousWorkflowState: input.projectMemory?.currentWorkflowState ?? null
+  })
+  const smartNextMove = buildStrategyNextMove({
+    requestModel,
+    strategy: followUpStrategy
   })
 
   const refinementPrompt = buildRefinementPrompt({
@@ -1273,7 +1310,7 @@ export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSecti
   }
 
   let refined: string | null = null
-  if (input.refineNextMovePrompt && !validatedJudge.noRetryNeeded) {
+  if (input.refineNextMovePrompt && !validatedJudge.noRetryNeeded && followUpStrategy.mode === "direct_revise") {
     try {
       refined = await input.refineNextMovePrompt({
         prompt: refinementPrompt,
@@ -1296,6 +1333,60 @@ export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSecti
   })
     ? smartNextMove
     : candidateNextMove
+  const phaseProgress = deriveReviewPhaseProgress({
+    promptText: input.promptText,
+    responseText: input.responseText,
+    importedContext: input.importedContext ?? null,
+    projectMemory: input.projectMemory ?? null
+  })
+  const simpleNextPromptRolloutMode = getSimpleNextPromptRolloutMode()
+  const simpleNextPromptDecision = shouldBuildSimpleNextPromptDecision(simpleNextPromptRolloutMode)
+    ? buildSimpleNextPromptDecision({
+        promptText: input.promptText,
+        responseText: input.responseText
+      })
+    : null
+  const appliedSimpleNextPromptDecision =
+    shouldApplySimpleNextPromptDecision(simpleNextPromptRolloutMode) && simpleNextPromptDecision
+      ? simpleNextPromptDecision
+      : null
+  const effectiveNextMove = appliedSimpleNextPromptDecision?.optimizedPrompt || normalizedNextMove
+  const effectivePromptLabel =
+    appliedSimpleNextPromptDecision?.status === "needs_confirmation"
+      ? "Confirm missing requirements"
+      : appliedSimpleNextPromptDecision?.status === "ready_for_next_prompt"
+        ? "Next step prompt"
+        : "Next move"
+  const effectivePromptNote =
+    appliedSimpleNextPromptDecision?.status === "needs_confirmation"
+      ? "Use this prompt to ask for confirmation before moving forward."
+      : appliedSimpleNextPromptDecision?.status === "ready_for_next_prompt"
+        ? "Use this prompt to continue with the best next step."
+        : buildStrategyPromptNote(followUpStrategy)
+  const assistantSignalDecision = buildAssistantSignalFirstDecision({
+    analysisStatus: validatedJudge.noRetryNeeded
+      ? "SUCCESS"
+      : validatedJudge.verdicts.some((item) => item.status === "contradicted")
+        ? "FAILED"
+        : "PARTIAL",
+    confidence: validatedJudge.verdicts.some((item) => item.status === "contradicted")
+      ? "low"
+      : validatedJudge.verdicts.some((item) => item.status === "unclear")
+        ? "medium"
+        : "high",
+    workflowState,
+    noRetryRecommended: validatedJudge.noRetryNeeded,
+    decisionText:
+      validatedJudge.noRetryNeeded
+        ? "Nothing critical is missing — safe to proceed."
+        : validatedJudge.gaps[0] || "The current answer still needs a narrower next step.",
+    recommendationText: effectiveNextMove,
+    promptLabel: effectivePromptLabel,
+    promptText: effectiveNextMove,
+    phaseProgress,
+    assistantSuggestedNextStep: answerModel.suggestedNextStep,
+    assistantNextStepSignal: answerModel.nextStepSignal
+  })
 
   const debug: ReviewAnalysisDebugPayload = {
     promptVersion: validatedJudge.promptVersion,
@@ -1313,7 +1404,23 @@ export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSecti
     smart: {
       working: validatedJudge.working,
       gaps: validatedJudge.gaps,
-      nextMove: normalizedNextMove,
+      nextMove: effectiveNextMove,
+      assistantSuggestedNextStep: answerModel.suggestedNextStep,
+      assistantNextStepSignal: answerModel.nextStepSignal,
+      assistantNextStepSignalLocal: answerModel.nextStepSignalLocal,
+      assistantNextStepSignalAi: answerModel.nextStepSignalAi,
+      assistantNextStepSignalSource: answerModel.nextStepSignalSource,
+      assistantNextStepSignalAgreement: answerModel.nextStepSignalAgreement,
+      assistantSignalDecision,
+      simpleNextPromptDecision,
+      simpleNextPromptRolloutMode,
+      simpleNextPromptApplied: Boolean(appliedSimpleNextPromptDecision),
+      workflowState,
+      phaseProgress,
+      strategy: {
+        mode: followUpStrategy.mode,
+        reason: followUpStrategy.reason
+      },
       judgments: validatedJudge.verdicts,
       judgeNotes: validatedJudge.judgeNotes,
       validatorNotes: validatedJudge.validatorNotes
@@ -1321,11 +1428,16 @@ export async function buildAnalysisPromptSection(input: BuildAnalysisPromptSecti
   }
 
   return {
-    promptLabel: "Next move",
-    promptText: normalizedNextMove,
-    promptNote: "",
-    nextMoveShort: shortenNextMove(normalizedNextMove),
-    copyPromptText: normalizedNextMove,
+    promptLabel: effectivePromptLabel,
+    promptText: effectiveNextMove,
+    promptNote: effectivePromptNote,
+    nextMoveShort:
+      appliedSimpleNextPromptDecision?.status === "needs_confirmation"
+        ? "Confirm missing requirements."
+        : appliedSimpleNextPromptDecision?.status === "ready_for_next_prompt"
+          ? "Continue with the best next step."
+          : buildStrategyShortLabel(followUpStrategy),
+    copyPromptText: effectiveNextMove,
     contract,
     working: validatedJudge.working,
     gaps: validatedJudge.gaps,

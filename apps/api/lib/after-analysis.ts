@@ -29,6 +29,7 @@ import * as z from "zod"
 import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
+import { callOpenAiJson } from "./openai"
 
 const AFTER_STAGE_SOFT_DEADLINE_MS = 8000
 const AFTER_DEEP_STAGE_SOFT_DEADLINE_MS = 16000
@@ -2643,6 +2644,7 @@ async function callStructuredJson<T>(
 ) {
   const trimmedPrompt = trimForBudget(userPrompt, 5000)
   const providers = [
+    () => callOpenAiJson(systemPrompt, trimmedPrompt, maxTokens),
     () => callKimiJson(systemPrompt, trimmedPrompt, maxTokens),
     () => callDeepSeekJson(systemPrompt, trimmedPrompt, maxTokens)
   ]

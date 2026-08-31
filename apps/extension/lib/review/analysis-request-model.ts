@@ -1,4 +1,16 @@
 import type { GoalContract } from "../goal/types"
+import type { StructuredProjectMemory } from "../session/project-memory"
+import type { ImportedProjectContextRecord } from "../core/project-context"
+import {
+  buildProjectContextPack,
+  formatProjectContextPackSummary,
+  type ProjectContextPack
+} from "../core/project-context-pack"
+import type {
+  ProjectContextStatus,
+  ProjectPreferenceSettings,
+  ProjectSettingsRecord
+} from "../session/project-settings"
 import type { AnalysisPromptContract } from "./analysis-prompt-section"
 import { detectAnalysisArtifactFamily, type AnalysisArtifactFamily } from "./analysis-artifact-family"
 import { buildAnalysisRequestSpecificity, type AnalysisRequestSpecificity } from "./analysis-specificity"
@@ -23,6 +35,15 @@ export type AnalysisRequestModel = {
   semanticRequirements: AnalysisSemanticRequirement[]
   specificity: AnalysisRequestSpecificity
   slots: AnalysisSlotValue[]
+  projectMemory: StructuredProjectMemory | null
+  projectMemoryHints: string[]
+  projectPreferences: ProjectPreferenceSettings | null
+  projectPreferenceHints: string[]
+  projectContextPack: ProjectContextPack
+  projectContextStatus: ProjectContextStatus
+  projectContextHints: string[]
+  projectContextWarnings: string[]
+  projectContextSummary: string
 }
 
 function normalize(value: string) {
@@ -86,28 +107,98 @@ function extractWordLimit(promptText: string) {
   return match ? Number(match[1]) : null
 }
 
+function buildProjectMemoryHints(memory: StructuredProjectMemory | null | undefined) {
+  if (!memory) return []
+
+  return unique([
+    memory.currentFeatureArea ? `Current feature area: ${memory.currentFeatureArea}` : "",
+    memory.currentPhase ? `Current phase: ${memory.currentPhase}` : "",
+    memory.currentWorkflowState ? `Workflow state: ${memory.currentWorkflowState}` : "",
+    ...(memory.protectedAreas ?? []).map((item) => `Protected area: ${item}`),
+    ...(memory.stableConstraints ?? []).map((item) => `Stable constraint: ${item}`),
+    ...(memory.acceptedAssumptions ?? []).map((item) => `Accepted assumption: ${item}`),
+    ...(memory.preferredPatterns ?? []).map((item) => `Preferred pattern: ${item}`),
+    ...(memory.knownBadDirections ?? []).map((item) => `Avoid this direction: ${item}`)
+  ]).slice(0, 14)
+}
+
+function buildProjectPreferenceHints(preferences: ProjectPreferenceSettings | null | undefined) {
+  if (!preferences) return []
+
+  return unique([
+    preferences.collaborationMode === "plan_first" ? "Prefer a short plan before broad implementation." : "",
+    preferences.collaborationMode === "fast" ? "Favor faster progress with fewer clarification loops." : "",
+    preferences.proofPreference === "proof_required" ? "Require explicit proof before claiming success." : "",
+    preferences.proofPreference === "files_first" ? "Name changed files or surfaces before claiming success." : "",
+    preferences.scopePreference === "narrow" ? "Keep the change narrowly scoped and avoid unrelated edits." : "",
+    preferences.explanationStyle === "plain_language"
+      ? "Explain scope, risks, and validation in plain language for a non-technical user."
+      : "Technical implementation details are acceptable when clarifying the work."
+  ])
+}
+
+function buildProjectContextHints(pack: ProjectContextPack) {
+  return pack.hints.slice(0, 18)
+}
+
 export function buildAnalysisRequestModel(params: {
   promptText: string
   promptContract: AnalysisPromptContract
   goalContract?: GoalContract | null
   taskFamily: string
+  importedContext?: ImportedProjectContextRecord | null
+  projectMemory?: StructuredProjectMemory | null
+  projectSettings?: ProjectSettingsRecord | null
 }): AnalysisRequestModel {
   const artifactFamily = detectAnalysisArtifactFamily({
     promptText: params.promptText,
     goalContract: params.goalContract ?? null,
     taskFamily: params.taskFamily
   })
+  const projectContextPack = buildProjectContextPack({
+    importedContext: params.importedContext ?? null,
+    structuredMemory: params.projectMemory ?? null,
+    settings: params.projectSettings ?? null,
+    currentRequestText: params.promptText
+  })
+  const projectPreferenceHints = buildProjectPreferenceHints(params.projectSettings?.preferences ?? null)
+  const projectContextHints = buildProjectContextHints(projectContextPack)
+  const effectiveConstraints = unique([
+    ...params.promptContract.constraints,
+    ...(params.projectSettings?.preferences.scopePreference === "narrow"
+      ? ["Keep the change narrowly scoped and avoid unrelated edits."]
+      : [])
+  ])
+  const effectiveAcceptanceCriteria = unique([
+    ...params.promptContract.acceptanceCriteria,
+    ...projectContextPack.definitionOfDone,
+    ...(params.projectSettings?.preferences.proofPreference === "proof_required"
+      ? ["Provide explicit proof before claiming success."]
+      : []),
+    ...(params.projectSettings?.preferences.proofPreference === "files_first"
+      ? ["List the changed files or surfaces before claiming success.", "Provide proof that the result works after naming the changes."]
+      : []),
+    ...(params.projectSettings?.preferences.collaborationMode === "plan_first"
+      ? ["Return a short plan before broad implementation."]
+      : [])
+  ])
   const styleConstraints = extractStyleConstraints(params.promptText)
   const semanticRequirements = buildSemanticRequirements([
     ...params.promptContract.taskGoal,
     ...params.promptContract.requirements,
-    ...params.promptContract.constraints,
-    ...params.promptContract.acceptanceCriteria,
-    ...params.promptContract.actualOutputToEvaluate
+    ...effectiveConstraints,
+    ...effectiveAcceptanceCriteria,
+    ...params.promptContract.actualOutputToEvaluate,
+    ...projectPreferenceHints,
+    ...projectContextHints
   ])
   const specificity = buildAnalysisRequestSpecificity({
     promptText: params.promptText,
-    promptContract: params.promptContract,
+    promptContract: {
+      ...params.promptContract,
+      constraints: effectiveConstraints,
+      acceptanceCriteria: effectiveAcceptanceCriteria
+    },
     semanticRequirements
   })
 
@@ -116,8 +207,8 @@ export function buildAnalysisRequestModel(params: {
     rawPrompt: normalize(params.promptText),
     taskGoal: params.promptContract.taskGoal,
     requirements: params.promptContract.requirements,
-    constraints: params.promptContract.constraints,
-    acceptanceCriteria: params.promptContract.acceptanceCriteria,
+    constraints: effectiveConstraints,
+    acceptanceCriteria: effectiveAcceptanceCriteria,
     outputRequirements: params.promptContract.actualOutputToEvaluate,
     audience: extractAudience(params.promptText),
     tone: extractTone(params.promptText),
@@ -128,7 +219,16 @@ export function buildAnalysisRequestModel(params: {
     wordLimitMax: extractWordLimit(params.promptText),
     semanticRequirements,
     specificity,
-    slots: []
+    slots: [],
+    projectMemory: params.projectMemory ?? null,
+    projectMemoryHints: buildProjectMemoryHints(params.projectMemory ?? null),
+    projectPreferences: params.projectSettings?.preferences ?? null,
+    projectPreferenceHints,
+    projectContextPack,
+    projectContextStatus: projectContextPack.contextStatus,
+    projectContextHints,
+    projectContextWarnings: projectContextPack.warnings,
+    projectContextSummary: formatProjectContextPackSummary(projectContextPack)
   }
 
   model.slots = buildAnalysisRequestSlots(model)

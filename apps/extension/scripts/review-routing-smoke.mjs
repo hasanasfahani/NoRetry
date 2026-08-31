@@ -13,7 +13,10 @@ async function bundleModules(outdir) {
     entryPoints: [
       path.resolve(extensionRoot, "lib/review/services/review-task-type.ts"),
       path.resolve(extensionRoot, "lib/review/services/review-analysis.ts"),
-      path.resolve(extensionRoot, "lib/review/mappers/review-view-model.ts")
+      path.resolve(extensionRoot, "lib/review/mappers/review-view-model.ts"),
+      path.resolve(extensionRoot, "lib/review/phase-progress.ts"),
+      path.resolve(extensionRoot, "lib/review/analysis-answer-model.ts"),
+      path.resolve(extensionRoot, "lib/review/next-move-decision.ts")
     ],
     outdir,
     bundle: true,
@@ -198,8 +201,602 @@ async function main() {
     const { classifyReviewTaskType } = taskTypeMod
     const { createReviewAnalysisRunner, getReviewAnalysisContext } = analysisMod
     const { mapAfterAnalysisToReviewViewModel } = viewModelMod
+    const phaseProgressMod = await import(pathToFileURL(path.join(outdir, "phase-progress.js")).href)
+    const answerModelMod = await import(pathToFileURL(path.join(outdir, "analysis-answer-model.js")).href)
+    const nextMoveDecisionMod = await import(pathToFileURL(path.join(outdir, "next-move-decision.js")).href)
+    const { deriveReviewPhaseProgress } = phaseProgressMod
+    const { buildAnalysisAnswerModel } = answerModelMod
+    const { buildAssistantSignalFirstDecision, buildNextMoveDecision } = nextMoveDecisionMod
+
+    const importedContext = {
+      rawMarkdown: [
+        "# Implementation Phases",
+        "Phase 1 — Core reminder creation",
+        "Goal: Build the first working reminder flow.",
+        "Deliverables:",
+        "- Reminder creation works",
+        "Acceptance Criteria:",
+        "- Users can create reminders",
+        "",
+        "Phase 2 — Customization & settings",
+        "Goal: Add customization and settings.",
+        "Deliverables:",
+        "- Settings screen exists",
+        "Acceptance Criteria:",
+        "- Settings work correctly"
+      ].join("\n"),
+      currentState: "The project is currently in Phase 1 implementation.",
+      parsedAt: new Date().toISOString()
+    }
+
+    const inferredProgress = deriveReviewPhaseProgress({
+      promptText: "Implement Phase 1 only.",
+      responseText: "Phase 1 is complete. Waiting for your approval to move to Phase 2 (customization & settings).",
+      importedContext,
+      projectMemory: null
+    })
+    assert.equal(inferredProgress?.activePhaseIndex, 0)
+    assert.equal(inferredProgress?.nextPhaseIndex, 1)
+
+    const promptPhaseProgress = deriveReviewPhaseProgress({
+      promptText: [
+        "Implement Phase 2 only.",
+        "# Implementation Phases",
+        "Phase 1 — Core reminder creation",
+        "Goal: Build the first working reminder flow.",
+        "Phase 2 — Customization & settings",
+        "Goal: Add customization and settings.",
+        "Phase 3 — Polish",
+        "Goal: Improve the finishing details."
+      ].join("\n"),
+      responseText: "Phase 2 is complete. Waiting for approval before Phase 3.",
+      importedContext: null,
+      projectMemory: null
+    })
+    assert.equal(promptPhaseProgress?.activePhaseIndex, 1)
+    assert.equal(promptPhaseProgress?.nextPhaseIndex, 2)
+    assert.equal(promptPhaseProgress?.activePhaseLabel, "Phase 2 — Customization & settings")
+
+    const completedPhaseProgress = deriveReviewPhaseProgress({
+      promptText: [
+        "# Implementation Phases",
+        "Phase 1 — Core reminder creation",
+        "Goal: Build the first working reminder flow.",
+        "Phase 2 — Customization & settings",
+        "Goal: Add customization and settings.",
+        "Phase 3 — Polish",
+        "Goal: Improve the finishing details."
+      ].join("\n"),
+      responseText: "Phase 3 completed and validated. No later phase has been started.",
+      importedContext: null,
+      projectMemory: null
+    })
+    assert.equal(completedPhaseProgress?.activePhaseIndex, 2)
+    assert.equal(completedPhaseProgress?.nextPhaseIndex, null)
+    assert.equal(completedPhaseProgress?.isFinalPhase, true)
+
+    const answerModel = buildAnalysisAnswerModel({
+      responseText: "Phase 1 is complete. Waiting for your approval to move to Phase 2 (customization & settings).",
+      promptText: "Implement Phase 1 only.",
+      taskFamily: "creation"
+    })
+    assert.match(answerModel.suggestedNextStep || "", /move to phase 2/i)
+    assert.equal(answerModel.nextStepSignal?.kind, "approval_to_continue")
+    assert.equal(answerModel.nextStepSignal?.currentStepClaim, "complete")
+    assert.equal(answerModel.nextStepSignal?.requiresApproval, true)
+    assert.equal(answerModel.nextStepSignal?.targetPhaseNumber, 2)
+    assert.match(answerModel.nextStepSignal?.nextMoveSummary ?? "", /continue with phase 2/i)
+
+    const readyForPhaseSignal = buildAnalysisAnswerModel({
+      responseText: "Phase 1 code is ready in the canvas. I'm ready for Phase 2.",
+      promptText: "Provide code for phase 1 only and stop until my confirmation to start phase 2.",
+      taskFamily: "creation"
+    })
+    assert.equal(readyForPhaseSignal.nextStepSignal?.kind, "approval_to_continue")
+    assert.equal(readyForPhaseSignal.nextStepSignal?.currentStepClaim, "complete")
+    assert.equal(readyForPhaseSignal.nextStepSignal?.requiresApproval, true)
+    assert.equal(readyForPhaseSignal.nextStepSignal?.targetPhaseNumber, 2)
+
+    const optionalEnhancementSignal = buildAnalysisAnswerModel({
+      responseText: "Phase 1 is done. If you want, I can add tests next.",
+      promptText: "Implement Phase 1 only.",
+      taskFamily: "creation"
+    })
+    assert.equal(optionalEnhancementSignal.nextStepSignal?.kind, "offer_optional_enhancement")
+    assert.equal(optionalEnhancementSignal.nextStepSignal?.currentStepClaim, "complete")
+    assert.equal(optionalEnhancementSignal.nextStepSignal?.suggestsImplementation, true)
+
+    const backendEnhancementSignal = buildAnalysisAnswerModel({
+      responseText: "If you'd like, I can connect this to a backend next.",
+      promptText: "The current UI is done.",
+      taskFamily: "creation"
+    })
+    assert.equal(backendEnhancementSignal.nextStepSignal?.kind, "offer_optional_enhancement")
+
+    const clarificationSignal = buildAnalysisAnswerModel({
+      responseText: "Let me know if you want me to connect this to a backend next.",
+      promptText: "Implement the core flow.",
+      taskFamily: "creation"
+    })
+    assert.equal(clarificationSignal.nextStepSignal?.kind, "clarify_decision")
+    assert.equal(clarificationSignal.nextStepSignal?.suggestsClarification, true)
+
+    const completionSignal = buildAnalysisAnswerModel({
+      responseText: "This is done.",
+      promptText: "Finish the current task.",
+      taskFamily: "creation"
+    })
+    assert.equal(completionSignal.nextStepSignal?.kind, "task_complete")
+
+    const genericContinueSignal = buildAnalysisAnswerModel({
+      responseText: "The current step is complete.\nNext, continue by building the history screen.",
+      promptText: "Implement Phase 1 only.",
+      taskFamily: "creation"
+    })
+    assert.equal(genericContinueSignal.nextStepSignal?.kind, "continue_current_work")
+    assert.equal(genericContinueSignal.nextStepSignal?.currentStepClaim, "complete")
+
+    const assistantPhaseDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "Nothing critical is missing — safe to proceed.",
+      recommendationText: "Continue without retrying this answer.",
+      promptLabel: "Next move",
+      promptText: "Continue to the next approved step.",
+      phaseProgress: inferredProgress,
+      assistantSuggestedNextStep: answerModel.suggestedNextStep,
+      assistantNextStepSignal: answerModel.nextStepSignal
+    })
+    assert.equal(assistantPhaseDecision?.signalKind, "approval_to_continue")
+    assert.equal(assistantPhaseDecision?.decision.status, "ready_for_next_phase")
+    assert.match(assistantPhaseDecision?.decision.recommendation.primaryCtaLabel ?? "", /Implement Phase 2/i)
+    assert.match(assistantPhaseDecision?.decision.recommendation.nextStepGuidance ?? "", /use the button below/i)
+
+    const blockedPhaseAdvanceDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "PARTIAL",
+      confidence: "medium",
+      workflowState: "implementation_underway",
+      noRetryRecommended: false,
+      decisionText: "The current step is still missing required pieces.",
+      recommendationText: "Finish the current step before moving on.",
+      promptLabel: "Next move",
+      promptText: "Finish the missing requirements.",
+      phaseProgress: inferredProgress,
+      assistantSuggestedNextStep: readyForPhaseSignal.suggestedNextStep,
+      assistantNextStepSignal: readyForPhaseSignal.nextStepSignal
+    })
+    assert.equal(blockedPhaseAdvanceDecision?.signalKind, "approval_to_continue")
+    assert.equal(blockedPhaseAdvanceDecision?.decision.status, "incomplete")
+    assert.equal(blockedPhaseAdvanceDecision?.decision.recommendation.kind, "finish_missing_requirements")
+    assert.equal(blockedPhaseAdvanceDecision?.decision.recommendation.primaryCtaLabel, "Finish missing requirements")
+    assert.match(blockedPhaseAdvanceDecision?.decision.assistantPrompt.body ?? "", /stay on the current step only/i)
+
+    const validationHoldDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "validation_needed",
+      noRetryRecommended: true,
+      decisionText: "The current step still needs visible proof.",
+      recommendationText: "Validate the current step before continuing.",
+      promptLabel: "Next move",
+      promptText: "Continue to the next approved step.",
+      phaseProgress: inferredProgress,
+      assistantSuggestedNextStep: answerModel.suggestedNextStep,
+      assistantNextStepSignal: answerModel.nextStepSignal
+    })
+    assert.equal(validationHoldDecision?.decision.status, "risky")
+    assert.equal(validationHoldDecision?.decision.recommendation.kind, "review_before_advancing")
+
+    const genericContinuationDecision = buildNextMoveDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "Nothing critical is missing — safe to proceed.",
+      recommendationText: "Continue without retrying this answer.",
+      promptLabel: "Next move",
+      promptText: "Continue to the next approved step.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: answerModel.suggestedNextStep,
+      assistantNextStepSignal: answerModel.nextStepSignal
+    })
+    assert.equal(genericContinuationDecision.status, "ready_for_next_phase")
+    assert.match(genericContinuationDecision.recommendation.primaryCtaLabel, /continue with phase 2/i)
+    assert.match(genericContinuationDecision.assistantPrompt.body ?? "", /preserve the accepted work/i)
+
+    const noSignalPhaseAwareDecision = buildNextMoveDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "Nothing critical is missing — safe to proceed.",
+      recommendationText: "Continue without retrying this answer.",
+      promptLabel: "Next move",
+      promptText: "No retry needed.",
+      phaseProgress: inferredProgress,
+      assistantSuggestedNextStep: null,
+      assistantNextStepSignal: null
+    })
+    assert.equal(noSignalPhaseAwareDecision.status, "complete")
+    assert.equal(noSignalPhaseAwareDecision.recommendation.kind, "move_to_next_task")
+
+    const incompleteGenericContinuationDecision = buildNextMoveDecision({
+      analysisStatus: "PARTIAL",
+      confidence: "medium",
+      workflowState: "implementation_underway",
+      noRetryRecommended: false,
+      decisionText: "The current step is still missing required pieces.",
+      recommendationText: "Finish the current step before moving on.",
+      promptLabel: "Next move",
+      promptText: "Finish the missing requirements.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: readyForPhaseSignal.suggestedNextStep,
+      assistantNextStepSignal: readyForPhaseSignal.nextStepSignal
+    })
+    assert.equal(incompleteGenericContinuationDecision.status, "incomplete")
+    assert.equal(incompleteGenericContinuationDecision.recommendation.kind, "finish_missing_requirements")
+    assert.match(incompleteGenericContinuationDecision.assistantPrompt.body ?? "", /finish the missing parts before moving on/i)
+
+    const assistantValidationDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "PARTIAL",
+      confidence: "medium",
+      workflowState: "validation_needed",
+      noRetryRecommended: false,
+      decisionText: "Validation is still needed.",
+      recommendationText: "Ask for visible proof before moving on.",
+      promptLabel: "Next move",
+      promptText: "Validate the current work with proof.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: "I can add tests next.",
+      assistantNextStepSignal: optionalEnhancementSignal.nextStepSignal
+    })
+    assert.equal(assistantValidationDecision?.signalKind, "offer_optional_enhancement")
+    assert.equal(assistantValidationDecision?.decision.status, "risky")
+    assert.match(assistantValidationDecision?.decision.assistantPrompt.body ?? "", /validate the current step with concrete proof/i)
+
+    const assistantOptionalDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "Nothing critical is missing — safe to proceed.",
+      recommendationText: "Continue without retrying this answer.",
+      promptLabel: "Next move",
+      promptText: "Continue with the optional follow-up if needed.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: optionalEnhancementSignal.suggestedNextStep,
+      assistantNextStepSignal: optionalEnhancementSignal.nextStepSignal
+    })
+    assert.equal(assistantOptionalDecision?.signalKind, "offer_optional_enhancement")
+    assert.equal(assistantOptionalDecision?.decision.recommendation.kind, "continue_optional_enhancement")
+    assert.equal(assistantOptionalDecision?.decision.recommendation.primaryCtaLabel, "Continue with optional step")
+    assert.match(assistantOptionalDecision?.decision.assistantPrompt.body ?? "", /optional next step only/i)
+
+    const blockedOptionalDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "PARTIAL",
+      confidence: "medium",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "The current task still misses part of the requested work.",
+      recommendationText: "Finish the current step before adding more scope.",
+      promptLabel: "Next move",
+      promptText: "Continue with the optional follow-up if needed.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: optionalEnhancementSignal.suggestedNextStep,
+      assistantNextStepSignal: optionalEnhancementSignal.nextStepSignal
+    })
+    assert.equal(blockedOptionalDecision?.decision.recommendation.kind, "review_before_advancing")
+
+    const assistantClarificationDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "PARTIAL",
+      confidence: "medium",
+      workflowState: "implementation_underway",
+      noRetryRecommended: false,
+      decisionText: "A product decision is still needed.",
+      recommendationText: "Clarify the next step before continuing.",
+      promptLabel: "Next move",
+      promptText: "Clarify the next step.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: clarificationSignal.suggestedNextStep,
+      assistantNextStepSignal: clarificationSignal.nextStepSignal
+    })
+    assert.equal(assistantClarificationDecision?.signalKind, "clarify_decision")
+    assert.equal(assistantClarificationDecision?.decision.status, "blocked")
+    assert.match(assistantClarificationDecision?.decision.assistantPrompt.body ?? "", /answer this before building more/i)
+
+    const assistantCompleteDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "Nothing critical is missing — safe to proceed.",
+      recommendationText: "Continue without retrying this answer.",
+      promptLabel: "Next move",
+      promptText: "No retry needed.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: completionSignal.suggestedNextStep,
+      assistantNextStepSignal: completionSignal.nextStepSignal
+    })
+    assert.equal(assistantCompleteDecision?.signalKind, "task_complete")
+    assert.equal(assistantCompleteDecision?.decision.recommendation.kind, "move_to_next_task")
+    assert.equal(assistantCompleteDecision?.decision.recommendation.primaryCtaLabel, "Type next task")
+    assert.match(assistantCompleteDecision?.decision.recommendation.nextStepGuidance ?? "", /type your next task/i)
+
+    const assistantGenericContinuationDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "The visible answer satisfies the current step.",
+      recommendationText: "Continue with the next implementation step.",
+      promptLabel: "Next move",
+      promptText: "Continue with the next implementation step only.",
+      phaseProgress: null,
+      assistantSuggestedNextStep: genericContinueSignal.suggestedNextStep,
+      assistantNextStepSignal: genericContinueSignal.nextStepSignal
+    })
+    assert.equal(assistantGenericContinuationDecision?.signalKind, "continue_current_work")
+    assert.equal(assistantGenericContinuationDecision?.decision.status, "ready_for_next_phase")
+    assert.match(
+      assistantGenericContinuationDecision?.decision.recommendation.primaryCtaLabel ?? "",
+      /continue with/i
+    )
+
+    const mismatchedPhaseSignal = buildAnalysisAnswerModel({
+      responseText: "Phase 1 is complete. Waiting for your approval to move to Phase 3.",
+      promptText: "Implement Phase 1 only.",
+      taskFamily: "creation"
+    })
+    const mismatchedPhaseDecision = buildAssistantSignalFirstDecision({
+      analysisStatus: "SUCCESS",
+      confidence: "high",
+      workflowState: "safe_to_proceed",
+      noRetryRecommended: true,
+      decisionText: "The visible answer satisfies the current step.",
+      recommendationText: "Continue with the next approved step.",
+      promptLabel: "Next move",
+      promptText: "Continue only with the next approved step.",
+      phaseProgress: inferredProgress,
+      assistantSuggestedNextStep: mismatchedPhaseSignal.suggestedNextStep,
+      assistantNextStepSignal: mismatchedPhaseSignal.nextStepSignal
+    })
+    assert.equal(mismatchedPhaseDecision?.signalKind, "approval_to_continue")
+    assert.equal(mismatchedPhaseDecision?.decision.status, "ready_for_next_phase")
+    assert.match(mismatchedPhaseDecision?.decision.recommendation.primaryCtaLabel ?? "", /phase 3/i)
+    assert.doesNotMatch(mismatchedPhaseDecision?.decision.assistantPrompt.body ?? "", /goal: add customization and settings/i)
+
+    const phaseReadyResult = {
+      ...makeProofResult(),
+      status: "SUCCESS",
+      confidence: "high",
+      confidence_reason: "The visible answer matches the accepted Phase 1 requirements.",
+      prompt_strategy: "fix_missing",
+      next_prompt: "",
+      next_prompt_output: {
+        next_prompt: "",
+        prompt_strategy: "fix_missing"
+      },
+      stage_2: {
+        ...makeProofResult().stage_2,
+        missing_criteria: [],
+        analysis_notes: ["The answer matches the current phase requirements."]
+      },
+      acceptance_checklist: [
+        { label: "The generated prompt preserves the user’s core goal", status: "met" },
+        { label: "The generated prompt preserves important constraints", status: "met" }
+      ]
+    }
+    const phaseProgress = {
+      hasPhasePlan: true,
+      activePhaseIndex: 0,
+      activePhaseLabel: "Phase 1 — Core setup",
+      nextPhaseIndex: 1,
+      nextPhaseLabel: "Phase 2 — Customization & settings",
+      isFinalPhase: false,
+      phases: [
+        {
+          id: "phase_1",
+          index: 0,
+          title: "Phase 1 — Core setup",
+          goal: "Deliver the first working phase.",
+          deliverables: ["Working Phase 1"],
+          acceptanceCriteria: ["Phase 1 works as expected."]
+        },
+        {
+          id: "phase_2",
+          index: 1,
+          title: "Phase 2 — Customization & settings",
+          goal: "Add customization and settings.",
+          deliverables: ["Settings screen"],
+          acceptanceCriteria: ["Settings work correctly."]
+        }
+      ]
+    }
+    const phaseReadyViewModel = mapAfterAnalysisToReviewViewModel({
+      result: phaseReadyResult,
+      reviewContract: {
+        taskFamily: "creation",
+        checklistSource: "informational_generic",
+        sanitizationChanges: [],
+        overallDecision: "Nothing critical is missing — safe to proceed.",
+        recommendation: "Continue without retrying this answer.",
+        confidence: "high",
+        confidenceNote: "Phase 1 matches the requested requirements.",
+        confidenceReasons: ["The visible answer matches the accepted phase scope."],
+        failureTypes: [],
+        evidenceSummary: {
+          summary: "Phase 1 looks complete.",
+          proofPoints: ["The assistant confirmed Phase 1 completion."],
+          missingProof: []
+        },
+        attemptMemory: null,
+        requirements: [
+          {
+            id: "req_1",
+            label: "Phase 1 requirements are complete",
+            type: "requirement",
+            priority: "P1",
+            status: "pass",
+            evidence: ["Visible implementation summary"]
+          }
+        ],
+        topFailures: [],
+        topPasses: [],
+        missingItems: [],
+        whyItems: ["The assistant confirmed Phase 1 completion."],
+        proofSummary: "The visible answer satisfies the current phase requirements.",
+        checkedItems: ["Phase 1 completion was checked against the accepted requirements."],
+        uncheckedItems: [],
+        promptLabel: "Next best move",
+        promptText: "Implement the next phase only.",
+        promptNote: "Move forward one phase at a time.",
+        nextMoveShort: "Implement the next phase only.",
+        feedbackPrompt: "Was this helpful?",
+        phaseProgress,
+        analysisDebug: {
+          promptVersion: "test",
+          selectedPath: "smart",
+          comparisonSummary: "Smart path matched the accepted phase requirements.",
+          baseline: {
+            working: [],
+            gaps: [],
+            nextMove: "",
+            judgments: []
+          },
+          smart: {
+            working: ["Phase 1 matches the accepted requirements."],
+            gaps: [],
+            nextMove: "Implement the next phase only.",
+            assistantSuggestedNextStep: "Waiting for your approval to move to Phase 2.",
+            assistantNextStepSignal: answerModel.nextStepSignal,
+            assistantNextStepSignalLocal: answerModel.nextStepSignal,
+            assistantNextStepSignalAi: {
+              ...answerModel.nextStepSignal,
+              source: "ai"
+            },
+            assistantNextStepSignalSource: "ai",
+            assistantNextStepSignalAgreement: "agree",
+            workflowState: "safe_to_proceed",
+            phaseProgress,
+            strategy: {
+              mode: "no_retry",
+              reason: "Phase 1 is ready to advance."
+            },
+            judgments: [],
+            judgeNotes: [],
+            validatorNotes: []
+          }
+        }
+      },
+      mode: "deep",
+      taskType: "creation",
+      quickBaseline: null,
+      onCopyPrompt: () => {}
+    })
+
+    assert.equal(phaseReadyViewModel.statusBadge.label, "Looks good")
+    assert.equal(phaseReadyViewModel.nextMoveDecision?.status, "ready_for_next_phase")
+    assert.equal(phaseReadyViewModel.nextMoveDecision?.recommendation.primaryCtaLabel, "Implement Phase 2 — Customization & settings")
+    assert.match(phaseReadyViewModel.nextMoveDecision?.recommendation.assistantContext ?? "", /approval to continue with phase 2/i)
+    assert.match(phaseReadyViewModel.nextMoveDecision?.recommendation.nextStepGuidance ?? "", /use the button below/i)
+    assert.match(phaseReadyViewModel.nextMoveInterpreterNote ?? "", /ai and the local fallback agree/i)
+    assert.match(phaseReadyViewModel.promptLabel, /Implement Phase 2/i)
+    assert.ok(phaseReadyViewModel.promptActions.length > 0, "Expected a submit action for next-phase continuation.")
+
+    const summaryOnlyPhaseProgress = deriveReviewPhaseProgress({
+      promptText:
+        "give me the code for each phase, start with phase 1 and then stop wait for my confirmation to start the phase 2",
+      responseText:
+        "Done — Phase 1 is implemented.\nWaiting for your approval to move to Phase 2 (customization & settings).",
+      importedContext: {
+        rawMarkdown:
+          "# Implementation Phases\nThe implementation is split into three phases. Phase 1 builds the core integration and reminder engine. Phase 2 adds user customization and settings. Phase 3 polishes the experience and adds basic analytics.",
+        currentState: ""
+      },
+      projectMemory: null
+    })
+
+    assert.ok(summaryOnlyPhaseProgress, "Expected summary-only project context to still recover phase progress.")
+    assert.equal(summaryOnlyPhaseProgress?.activePhaseLabel, "Phase 1 — The Core Integration And Reminder Engine")
+    assert.equal(summaryOnlyPhaseProgress?.nextPhaseLabel, "Phase 2 — User Customization And Settings")
 
     let analyzeCalls = 0
+    analyzeCalls = 0
+    const phaseScopedRunner = createReviewAnalysisRunner({
+      analyzeAfterAttempt: async () => {
+        analyzeCalls += 1
+        return makeProofResult()
+      },
+      attachAnalysisResult: async () => null,
+      preprocessResponse,
+      getProjectMemoryContext: () => ({
+        projectContext: "",
+        currentState: "",
+        importedContext: {
+          rawMarkdown: `# Project Overview
+- A simple offline mobile water tracker.
+
+# Constraints
+- Must work offline.
+- Should be free to build and run.
+- Cross-platform on iOS and Android.
+
+# User Intent To Preserve
+- No ads.
+- No social features or sharing.
+- No integration with external devices or apps.
+- No reminders or notifications.
+- No cloud sync or account creation.
+
+# Definition Of Done
+- App works fully offline with no crashes.
+- No ads appear anywhere in the app.
+
+# Implementation Phases
+The development is split into three sequential phases. Phase 1 builds the minimum viable product. Phase 2 adds history and data persistence. Phase 3 adds polish and usability improvements.`,
+          currentState: "Current focus: Phase 1 only."
+        },
+        structuredMemory: null,
+        settings: null
+      }),
+      collectChangedFilesSummary: () => [],
+      collectVisibleErrorSummary: () => ""
+    })
+
+    const waterTrackerAttempt = makeAttempt(
+      `Daily Water Intake Tracker - Mobile App PRD\n\nprovide the code for this app, start by phase 1 and then stop until my confirmation to start phase 2`,
+      "other"
+    )
+    const waterTrackerTaskType = classifyReviewTaskType(waterTrackerAttempt)
+    const waterTrackerResult = await phaseScopedRunner({
+      target: {
+        attempt: waterTrackerAttempt,
+        taskType: waterTrackerTaskType,
+        responseText: `Below is Phase 1 only.\n\n\`\`\`jsx\nexport default function App() {\n  return null\n}\n\`\`\`\n\nPhase 1 covered\n\nStop here. When you confirm, I’ll provide Phase 2: History, past-day logs, individual entries, and delete log entry.`,
+        responseIdentity: "resp-water-1",
+        threadIdentity: "thread-water-1",
+        normalizedResponseText: "phase 1 covered stop here confirm phase 2"
+      },
+      mode: "deep",
+      quickBaseline: null
+    })
+
+    assert.doesNotMatch(
+      waterTrackerResult.next_prompt_output?.next_prompt ?? "",
+      /Preserve this exclusion:\s+(?:advertisements?|cloud sync|account|external devices|apps|crashes?)/i
+    )
+    assert.notEqual(
+      waterTrackerResult.analysisDebug?.smart?.strategy?.mode,
+      "plan_first",
+      "Expected phase-scoped implementation answers with a clear continuation cue to avoid the broad plan-first loop."
+    )
+    assert.doesNotMatch(
+      waterTrackerResult.next_prompt_output?.next_prompt ?? "",
+      /^Before making broader changes,/i
+    )
+
     const runner = createReviewAnalysisRunner({
       analyzeAfterAttempt: async () => {
         analyzeCalls += 1

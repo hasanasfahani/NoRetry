@@ -1,4 +1,17 @@
-import type { ReviewPopupMockState, ReviewPopupViewModel } from "./review-types"
+import type { ReviewPopupViewModel } from "./review-types"
+
+type ReviewPopupMockState = ReviewPopupViewModel["state"]
+type LegacyMockReviewViewModel = Omit<
+  ReviewPopupViewModel,
+  "mode" | "confidenceReasons" | "proofSummary" | "checkedArtifacts" | "uncheckedArtifacts" | "checklistRows" | "quickToDeepDelta"
+> & {
+  mode?: ReviewPopupViewModel["mode"]
+  confidenceReasons?: string[]
+  proofChecked?: string[]
+  proofMissing?: string[]
+  checklist?: ReviewPopupViewModel["checklistRows"]
+  quickToDeepDelta?: string
+}
 
 const sharedMissingItems = [
   "Strength button visibly appears inside the Replit AI prompt area after the user types enough text.",
@@ -11,7 +24,7 @@ const sharedChecklist = [
   { id: "3", label: "No old AFTER logic is wired into the new popup tree", status: "blocked" as const }
 ]
 
-export const mockReviewStates: Record<ReviewPopupMockState, ReviewPopupViewModel> = {
+const legacyMockReviewStates: Record<ReviewPopupMockState, LegacyMockReviewViewModel> = {
   loading: {
     state: "loading",
     eyebrow: "Review popup",
@@ -167,6 +180,35 @@ export const mockReviewStates: Record<ReviewPopupMockState, ReviewPopupViewModel
   }
 }
 
+export const mockReviewStates = Object.fromEntries(
+  Object.entries(legacyMockReviewStates).map(([state, value]) => [state, normalizeMockReviewState(value)])
+) as Record<ReviewPopupMockState, ReviewPopupViewModel>
+
 export function getMockReviewPopupViewModel(state: ReviewPopupMockState): ReviewPopupViewModel {
   return mockReviewStates[state]
+}
+
+function normalizeMockReviewState(value: LegacyMockReviewViewModel): ReviewPopupViewModel {
+  const {
+    proofChecked = [],
+    proofMissing = [],
+    checklist = [],
+    mode,
+    confidenceReasons = [],
+    quickToDeepDelta = "",
+    ...rest
+  } = value
+  return {
+    ...rest,
+    mode: mode ?? (rest.state === "quick_review" ? "quick" : "deep"),
+    confidenceReasons,
+    proofSummary:
+      proofChecked.length || proofMissing.length
+        ? `${proofChecked.length} checked · ${proofMissing.length} missing`
+        : "No proof checked yet.",
+    checkedArtifacts: proofChecked,
+    uncheckedArtifacts: proofMissing,
+    checklistRows: checklist,
+    quickToDeepDelta
+  }
 }

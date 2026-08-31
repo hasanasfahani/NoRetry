@@ -5,6 +5,7 @@ import {
 } from "@prompt-optimizer/shared"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
+import { callOpenAiJson } from "./openai"
 
 function dedupe(items: string[], limit = 5) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))].slice(0, limit)
@@ -92,6 +93,8 @@ function fallbackQuestionBatch(input: AfterNextQuestionRequest) {
 }
 
 async function callStructuredJson(systemPrompt: string, userPrompt: string, maxTokens = 420) {
+  const openAi = await callOpenAiJson(systemPrompt, userPrompt, maxTokens)
+  if (openAi) return openAi
   const kimi = await callKimiJson(systemPrompt, userPrompt, maxTokens)
   if (kimi) return kimi
   return callDeepSeekJson(systemPrompt, userPrompt, maxTokens)

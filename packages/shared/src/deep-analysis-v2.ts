@@ -35,12 +35,12 @@ export const DeepAnalysisV2RequirementMatchSchema = z.object({
 })
 
 export const DeepAnalysisV2ProviderMetadataSchema = z.object({
-  provider: z.enum(["kimi", "deepseek", "fallback", "none"]),
+  provider: z.enum(["openai", "kimi", "deepseek", "fallback", "none"]),
   model: z.string().optional(),
   latencyMs: z.number().int().nonnegative().optional(),
   timedOut: z.boolean().default(false),
   usedFallback: z.boolean().default(false),
-  providerAttempted: z.enum(["kimi", "deepseek", "none"]).optional(),
+  providerAttempted: z.enum(["openai", "kimi", "deepseek", "none"]).optional(),
   fallbackReason: z
     .enum(["mocks_enabled", "missing_key", "timeout", "empty_response", "invalid_json", "provider_error", "unknown"])
     .optional(),

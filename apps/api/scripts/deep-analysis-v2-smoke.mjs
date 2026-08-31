@@ -144,6 +144,43 @@ async function main() {
     assert.equal(repairedProviderResult.providerMetadata.provider, "deepseek")
     assert.equal(repairedProviderResult.overallStatus, "pass")
 
+    let messyProviderCallCount = 0
+    let messyProviderRepairCallCount = 0
+    const messyProviderOutput = [
+      "Here is the decision:",
+      "<decision_json>",
+      "{ status: \"success\", score: 0.91, issues: [\"Recovered locally\",], missing: [],",
+      " nextStepRequirements: [\"Add required field validation\",], blockedScope: [\"Do not add backend\",],",
+      " generatedPrompt: \"Please implement validation only. After you finish, confirm which requirements were completed and suggest the next step.\", } // trailing note",
+      "</decision_json>"
+    ].join("\n")
+    const messyProviderResult = await runDeepAnalysisV2(input, {
+      callJson: async (systemPrompt) => {
+        messyProviderCallCount += 1
+        if (/repair/i.test(systemPrompt)) messyProviderRepairCallCount += 1
+        return messyProviderOutput
+      }
+    })
+    assert.equal(messyProviderResult.providerMetadata.provider, "deepseek")
+    assert.equal(messyProviderResult.overallStatus, "pass")
+    assert.equal(messyProviderCallCount, 1)
+    assert.equal(messyProviderRepairCallCount, 0, "Expected tolerant local parsing to recover before LLM repair.")
+    assert.deepEqual(messyProviderResult.nextStepRequirements, ["Add required field validation"])
+    assert.ok(messyProviderResult.blockedScope.includes("Do not add backend"))
+
+    let lowBudgetRepairCallCount = 0
+    const lowBudgetUnavailable = await runDeepAnalysisV2(input, {
+      hardTimeoutMs: 5000,
+      retryDelayMs: 0,
+      callJson: async (systemPrompt) => {
+        if (/repair/i.test(systemPrompt)) lowBudgetRepairCallCount += 1
+        return "not json"
+      }
+    })
+    assert.equal(lowBudgetRepairCallCount, 0, "Expected compact JSON repair to be skipped when the repair budget is too low.")
+    assert.equal(lowBudgetUnavailable.providerMetadata.provider, "none")
+    assert.equal(lowBudgetUnavailable.providerMetadata.deepSeekFailureReason, "invalid_json")
+
     const noSuggestionKimiOutput = JSON.stringify({
       ...JSON.parse(providerOutput),
       prompt_intent: "ask_for_next_step",
@@ -813,6 +850,24 @@ async function main() {
     assert.equal(derivedPhaseCompletionCarryoverResult.overallStatus, "pass")
     assert.equal(derivedPhaseCompletionCarryoverResult.phaseCompletionClaimed, true)
     assert.equal(derivedPhaseCompletionCarryoverResult.phaseAdvanceBasis, "phase_completion_claimed_with_carryover")
+
+    const ordinaryCompletionWithMissingResult = await runDeepAnalysisV2({
+      ...multiUserAcceptanceInput,
+      promptText: "Finish the invoice feature, include manual testing steps, and explain the remaining risks.",
+      responseText: [
+        "The invoice feature is complete.",
+        "Receipt upload and monthly summaries were implemented.",
+        "Email forwarding and receipt-history search still need to be finished."
+      ].join("\n")
+    }, {
+      callJson: async () => phaseCompletionCarryoverOutput
+    })
+    assert.equal(ordinaryCompletionWithMissingResult.overallStatus, "needs_confirmation")
+    assert.equal(ordinaryCompletionWithMissingResult.phaseAdvanceBasis, "")
+    assert.equal(ordinaryCompletionWithMissingResult.promptIntent, "confirm_missing_requirements")
+    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /^Before we move forward, confirm these requirements/)
+    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /suggest (?:what )?the next step/i)
+    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /Do not add new scope yet/i)
 
     const staleMissingIdsOutput = JSON.stringify({
       verdict: "partial",
@@ -1751,14 +1806,42 @@ async function main() {
     assert.equal(timedOutResult.providerMetadata.timedOut, true)
     assert.equal(timedOutResult.providerMetadata.providerAttempted, "deepseek")
     assert.equal(timedOutResult.providerMetadata.fallbackReason, "timeout")
+    assert.equal(timedOutResult.providerMetadata.deepSeekAttempted, true)
+    assert.equal(typeof timedOutResult.providerMetadata.kimiLatencyMs, "number")
+    assert.match(timedOutResult.providerMetadata.failureMessage ?? "", /deepseek:|kimi:/i)
     assert.equal(timedOutResult.overallStatus, "unavailable")
 
+    const boundedDeepSeekResult = await runDeepAnalysisV2(input, {
+      callDeepSeekJson: async () => new Promise((resolve) => setTimeout(() => resolve(providerOutput), 50)),
+      callKimiJson: async () => new Promise((resolve) => setTimeout(() => resolve(providerOutput), 15)),
+      hardTimeoutMs: 80,
+      deepSeekFastFailureTimeoutMs: 5,
+      retryDelayMs: 0
+    })
+    assert.equal(boundedDeepSeekResult.providerMetadata.provider, "kimi")
+    assert.equal(boundedDeepSeekResult.overallStatus, "pass")
+
     const healthOk = await mod.checkDeepAnalysisV2ProviderHealth({
-      callJson: async () => JSON.stringify({ ok: true }),
+      callJson: async () => providerOutput,
       now: () => 100
     })
     assert.equal(healthOk.ok, true)
     assert.equal(healthOk.provider, "deepseek")
+    assert.equal(healthOk.providers.length, 3)
+    assert.equal(healthOk.providers.find((provider) => provider.provider === "openai")?.reason, "missing_key")
+    assert.equal(healthOk.providers.find((provider) => provider.provider === "kimi")?.reason, "missing_key")
+
+    const kimiHealthOk = await mod.checkDeepAnalysisV2ProviderHealth({
+      callJson: async () => "",
+      callKimiJson: async () => providerOutput,
+      now: () => 100
+    })
+    assert.equal(kimiHealthOk.ok, true)
+    assert.equal(kimiHealthOk.provider, "kimi")
+    assert.equal(
+      kimiHealthOk.providers.find((provider) => provider.provider === "deepseek")?.reason,
+      "empty_response"
+    )
 
     console.log("api-deep-analysis-v2-smoke: ok")
   } finally {

@@ -1,4 +1,10 @@
-import type { AnalyzePromptResponse, ClarificationQuestion } from "@prompt-optimizer/shared"
+import {
+  buildRequestBrief,
+  formatRequestBriefSummary,
+  type AnalyzePromptResponse,
+  type ClarificationQuestion,
+  type RequestBrief
+} from "@prompt-optimizer/shared"
 
 const OTHER_OPTION = "Other"
 
@@ -263,13 +269,22 @@ export function formatPromptModeStructuredDraft(params: {
   sourcePrompt: string
   planningGoal: string
   refinedPrompt: string
+  requestBrief?: RequestBrief | null
   localAnalysis: AnalyzePromptResponse
   answeredPath: string[]
   constraints: string[]
 }) {
-  const { sourcePrompt, planningGoal, refinedPrompt, localAnalysis, answeredPath, constraints } = params
+  const { sourcePrompt, planningGoal, refinedPrompt, requestBrief: providedRequestBrief, localAnalysis, answeredPath, constraints } = params
   const promptSignals = extractPromptSignals(sourcePrompt)
   const intentDefaults = buildIntentDefaults(localAnalysis.intent)
+  const requestBrief =
+    providedRequestBrief ??
+    buildPromptModeRequestBrief({
+      sourcePrompt,
+      localAnalysis,
+      answeredPath,
+      constraints
+    })
 
   const taskLine = normalizeBulletText(refinedPrompt || planningGoal || sourcePrompt)
 
@@ -302,6 +317,7 @@ export function formatPromptModeStructuredDraft(params: {
 
   return [
     `Task / goal:\n${taskLine}`,
+    `Inferred PM brief:\n${formatRequestBriefSummary(requestBrief)}`,
     buildSection("Key requirements", keyRequirements),
     buildSection("Constraints", preservedConstraints),
     buildSection("Required inputs or ingredients", requiredInputs),
@@ -310,4 +326,28 @@ export function formatPromptModeStructuredDraft(params: {
   ]
     .filter(Boolean)
     .join("\n\n")
+}
+
+export function buildPromptModeRequestBrief(params: {
+  sourcePrompt: string
+  localAnalysis: AnalyzePromptResponse
+  answeredPath?: string[]
+  constraints?: string[]
+}) {
+  const promptSignals = extractPromptSignals(params.sourcePrompt)
+  return buildRequestBrief({
+    promptText: params.sourcePrompt,
+    intent: params.localAnalysis.intent,
+    deliverableType: promptSignals.keyRequirements.find((item) => /html|css|javascript/i.test(item))
+      ? "html file"
+      : /\brecipe|meal|lunch|dinner\b/i.test(params.sourcePrompt)
+        ? "recipe"
+        : null,
+    hardConstraints: dedupeCaseInsensitive([...(params.constraints ?? []), ...promptSignals.constraints]),
+    outputRequirements: dedupeCaseInsensitive(promptSignals.outputFormat),
+    softPreferences: dedupeCaseInsensitive(promptSignals.style),
+    answeredPath: params.answeredPath ?? [],
+    missingElements: params.localAnalysis.missing_elements,
+    suggestions: params.localAnalysis.suggestions
+  })
 }

@@ -15,6 +15,7 @@ type OptimizerShellProps = {
   afterPanelOpen: boolean
   reviewPopupOpen: boolean
   reviewSignal: ReviewSignalState
+  reviewButtonAttentionKind: "onboarding" | "review" | null
   promptPreview: string
   beforeResult: AnalyzePromptResponse | null
   isAnalyzingPrompt: boolean
@@ -34,6 +35,7 @@ type OptimizerShellProps = {
   totalQuestions: number
   draftReady: boolean
   isEvaluatingAfterResponse: boolean
+  isDeepAnalysisPrewarming: boolean
   onClosePanel: () => void
   onOpenPanel: () => void
   onOpenAfterPanel: () => void
@@ -58,7 +60,7 @@ type OptimizerShellProps = {
 function badgeTone(score: StrengthScore | undefined) {
   switch (score) {
     case "HIGH":
-      return { bg: "rgba(220,252,231,0.92)", fg: "#16a34a", border: "rgba(22,163,74,0.22)" }
+      return { bg: "rgba(219,234,254,0.92)", fg: "#0766fe", border: "rgba(7,102,254,0.22)" }
     case "MID":
       return { bg: "rgba(254,243,199,0.94)", fg: "#eab308", border: "rgba(234,179,8,0.22)" }
     default:
@@ -124,16 +126,16 @@ function reviewSignalAppearance(signal: ReviewSignalState) {
   switch (signal.state) {
     case "typing":
       return {
-        background: "rgba(224,231,255,0.98)",
-        border: "rgba(79,70,229,0.22)",
-        color: "#4338ca",
+        background: "#2563eb",
+        border: "rgba(37,99,235,0.34)",
+        color: "#ffffff",
         overlay: ""
       }
     case "green":
       return {
-        background: "rgba(220,252,231,0.96)",
-        border: "rgba(22,163,74,0.24)",
-        color: "#15803d",
+        background: "rgba(219,234,254,0.96)",
+        border: "rgba(7,102,254,0.24)",
+        color: "#0766fe",
         overlay: "✓"
       }
     case "red":
@@ -173,9 +175,9 @@ function reviewSignalAppearance(signal: ReviewSignalState) {
       }
     default:
       return {
-        background: "rgba(255,255,255,0.96)",
-        border: "rgba(15,23,42,0.14)",
-        color: "#0f172a",
+        background: "#2563eb",
+        border: "rgba(37,99,235,0.28)",
+        color: "#ffffff",
         overlay: ""
       }
   }
@@ -189,6 +191,9 @@ export function OptimizerShell(props: OptimizerShellProps) {
 
   const isBusy = props.isAnalyzingPrompt || props.isLoadingQuestions
   const reviewSignal = reviewSignalAppearance(props.reviewSignal)
+  const reviewBadgeBackground = props.isDeepAnalysisPrewarming ? "#2563eb" : reviewSignal.background
+  const reviewBadgeBorder = props.isDeepAnalysisPrewarming ? "rgba(37,99,235,0.34)" : reviewSignal.border
+  const reviewBadgeColor = props.isDeepAnalysisPrewarming ? "#ffffff" : reviewSignal.color
   const tone = isBusy
     ? { bg: "#eff6ff", fg: "#1d4ed8", border: "rgba(29,78,216,0.18)" }
     : badgeTone(props.beforeResult?.score)
@@ -198,8 +203,14 @@ export function OptimizerShell(props: OptimizerShellProps) {
   const autoAdvanceTimerRef = useRef<number | null>(null)
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0)
   const [savedQuestionId, setSavedQuestionId] = useState<string | null>(null)
+  const [dismissedEngineerWarningKey, setDismissedEngineerWarningKey] = useState<string | null>(null)
   const questions = props.beforeResult?.clarification_questions ?? []
   const activeQuestion = questions[activeQuestionIndex] ?? null
+  const engineerWarning = props.reviewSignal.engineerWarning
+  const engineerWarningKey = engineerWarning
+    ? `${props.reviewSignal.targetKey ?? "current-prompt"}:${engineerWarning.whyRisky}`
+    : null
+  const showEngineerWarning = Boolean(engineerWarning && engineerWarningKey !== dismissedEngineerWarningKey)
 
   const answerSignature = useMemo(
     () =>
@@ -326,19 +337,28 @@ export function OptimizerShell(props: OptimizerShellProps) {
             0%, 80%, 100% { transform: translateY(0); opacity: 0.42; }
             40% { transform: translateY(-3px); opacity: 1; }
           }
+          @keyframes reviewBadgeAttentionPulse {
+            0% { transform: scale(1); }
+            45% { transform: scale(1.12); }
+            100% { transform: scale(1); }
+          }
         `}
       </style>
       {!props.panelOpen && !props.afterPanelOpen && !props.reviewPopupOpen ? (
         <div style={styles.badgeStack}>
           <button
             type="button"
-            style={styles.reviewBadge(reviewSignal.background, reviewSignal.border, reviewSignal.color)}
+            style={styles.reviewBadge(reviewBadgeBackground, reviewBadgeBorder, reviewBadgeColor, props.reviewButtonAttentionKind)}
             onMouseDown={holdPromptFocus}
             onClick={props.onOpenReviewPopup}
             aria-label={props.reviewSignal.ariaLabel}
             title={props.reviewSignal.tooltip}
           >
-            {props.reviewSignal.state === "loading" ? (
+            {props.isDeepAnalysisPrewarming ? (
+              <span style={styles.reviewDeepAnalysisSpin}>
+                <ReviewSparkIcon />
+              </span>
+            ) : props.reviewSignal.state === "loading" ? (
               <span style={styles.reviewSignalSpinner} />
             ) : props.reviewSignal.state === "typing" ? (
               <span style={styles.reviewTypingWrap}>
@@ -356,6 +376,27 @@ export function OptimizerShell(props: OptimizerShellProps) {
               </>
             )}
           </button>
+          {showEngineerWarning && engineerWarning && engineerWarningKey ? (
+            <section style={styles.engineerWarning} role="alert">
+              <p style={styles.engineerWarningTitle}>Involve an experienced engineer</p>
+              <p style={styles.engineerWarningCopy}>
+                <strong>Why this is risky:</strong> {engineerWarning.whyRisky}
+              </p>
+              <p style={styles.engineerWarningCopy}>
+                <strong>What could go wrong:</strong> {engineerWarning.whatCouldGoWrong}
+              </p>
+              <p style={styles.engineerWarningCopy}>
+                <strong>What reeva cannot check:</strong> {engineerWarning.reevaCannotCheck}
+              </p>
+              <button
+                type="button"
+                style={styles.engineerWarningAction}
+                onMouseDown={holdPromptFocus}
+                onClick={() => setDismissedEngineerWarningKey(engineerWarningKey)}>
+                {engineerWarning.actionLabel}
+              </button>
+            </section>
+          ) : null}
         </div>
       ) : null}
 
@@ -674,7 +715,42 @@ const styles = {
   badgeStack: {
     display: "inline-flex",
     alignItems: "center",
-    gap: 6
+    gap: 6,
+    position: "relative"
+  } as CSSProperties,
+  engineerWarning: {
+    position: "absolute",
+    right: 34,
+    bottom: 0,
+    width: 320,
+    padding: 14,
+    borderRadius: 16,
+    background: "rgba(255,255,255,0.98)",
+    border: "1px solid rgba(180,83,9,0.28)",
+    boxShadow: "0 18px 42px rgba(15,23,42,0.18)",
+    color: "#1f2937"
+  } as CSSProperties,
+  engineerWarningTitle: {
+    margin: "0 0 8px",
+    color: "#92400e",
+    fontSize: 14,
+    fontWeight: 800
+  } as CSSProperties,
+  engineerWarningCopy: {
+    margin: "6px 0",
+    fontSize: 12,
+    lineHeight: 1.45
+  } as CSSProperties,
+  engineerWarningAction: {
+    marginTop: 8,
+    border: "1px solid rgba(180,83,9,0.28)",
+    borderRadius: 10,
+    background: "#fff7ed",
+    color: "#9a3412",
+    padding: "7px 10px",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer"
   } as CSSProperties,
   badge: (bg: string, fg: string, border: string): CSSProperties => ({
     border: `1px solid ${border}`,
@@ -692,9 +768,7 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     cursor: "pointer",
-    boxShadow: "0 8px 18px rgba(15,23,42,0.12)",
-    backdropFilter: "blur(10px)",
-    WebkitBackdropFilter: "blur(10px)",
+    boxShadow: "0 8px 18px rgba(37,99,235,0.24)",
     outline: "none",
     transition: "transform 140ms ease, box-shadow 140ms ease"
   }),
@@ -712,13 +786,17 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     cursor: "pointer",
-    boxShadow: "0 8px 18px rgba(15,23,42,0.12)",
     backdropFilter: "blur(10px)",
     WebkitBackdropFilter: "blur(10px)",
     outline: "none",
     transition: "transform 140ms ease, box-shadow 140ms ease"
   }),
-  reviewBadge: (background: string, borderColor: string, color: string): CSSProperties => ({
+  reviewBadge: (
+    background: string,
+    borderColor: string,
+    color: string,
+    attentionKind: "onboarding" | "review" | null
+  ): CSSProperties => ({
     border: `1px solid ${borderColor}`,
     borderRadius: "999px",
     background,
@@ -731,12 +809,17 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     cursor: "pointer",
-    boxShadow: "0 8px 18px rgba(15,23,42,0.12)",
     backdropFilter: "blur(10px)",
     WebkitBackdropFilter: "blur(10px)",
     outline: "none",
     transition: "transform 140ms ease, box-shadow 140ms ease",
-    position: "relative"
+    position: "relative",
+    animation: attentionKind ? "reviewBadgeAttentionPulse 1.08s ease-in-out infinite" : undefined,
+    boxShadow: attentionKind
+      ? attentionKind === "review"
+        ? "0 0 0 8px rgba(22,163,74,0.12), 0 0 0 18px rgba(22,163,74,0.08), 0 14px 30px rgba(22,163,74,0.2)"
+        : "0 0 0 8px rgba(37,99,235,0.14), 0 0 0 18px rgba(37,99,235,0.08), 0 14px 30px rgba(37,99,235,0.22)"
+      : "0 8px 18px rgba(15,23,42,0.12)"
   }),
   afterBadgeSpin: {
     display: "inline-flex",
@@ -786,7 +869,12 @@ const styles = {
     height: 18,
     borderRadius: 4,
     display: "block",
-    boxShadow: "0 2px 6px rgba(37,99,235,0.28)"
+    boxShadow: "none"
+  } as CSSProperties,
+  reviewDeepAnalysisSpin: {
+    display: "inline-flex",
+    animation: "promptOptimizerSpin 0.9s linear infinite",
+    transformOrigin: "50% 50%"
   } as CSSProperties,
   reviewTypingWrap: {
     position: "relative",
@@ -803,15 +891,16 @@ const styles = {
     gap: 3,
     padding: "2px 5px",
     borderRadius: 999,
-    background: "rgba(255,255,255,0.92)",
-    boxShadow: "0 8px 18px rgba(15,23,42,0.12)"
+    background: "#2563eb",
+    border: "1px solid rgba(255,255,255,0.52)",
+    boxShadow: "0 8px 18px rgba(37,99,235,0.18)"
   } as CSSProperties,
   reviewTypingDot: (delay: number) =>
     ({
       width: 4,
       height: 4,
       borderRadius: 999,
-      background: "#4338ca",
+      background: "#ffffff",
       animation: "reviewTypingDot 0.95s ease-in-out infinite",
       animationDelay: `${delay}s`
     }) satisfies CSSProperties,
@@ -883,7 +972,7 @@ const styles = {
     fontSize: 11,
     textTransform: "uppercase",
     letterSpacing: "0.12em",
-    color: "#166534"
+    color: "#075fd6"
   } as CSSProperties,
   heading: {
     margin: "4px 0 0",
@@ -927,7 +1016,7 @@ const styles = {
     fontSize: 12,
     textTransform: "uppercase",
     letterSpacing: "0.08em",
-    color: "#166534"
+    color: "#075fd6"
   } as CSSProperties,
   rowItem: {
     margin: "0 0 8px",
@@ -944,8 +1033,8 @@ const styles = {
     width: 16,
     height: 16,
     borderRadius: "50%",
-    border: "2px solid rgba(22,163,74,0.18)",
-    borderTopColor: "#16a34a",
+    border: "2px solid rgba(7,102,254,0.18)",
+    borderTopColor: "#0766fe",
     animation: "promptOptimizerSpin 0.9s linear infinite"
   } as CSSProperties,
   questionBlock: {
@@ -1003,7 +1092,7 @@ const styles = {
     width: `${Math.max(0, Math.min(100, width))}%`,
     height: "100%",
     borderRadius: 999,
-    background: "linear-gradient(90deg, #166534 0%, #4ade80 100%)"
+    background: "linear-gradient(90deg, #075fd6 0%, #60a5fa 100%)"
   }),
   stickyProgressArea: {
     position: "sticky",
@@ -1024,10 +1113,10 @@ const styles = {
     height: 36,
     borderRadius: 999,
     border: `1px solid ${
-      active ? "rgba(22,101,52,0.32)" : answered ? "rgba(74,222,128,0.28)" : "rgba(31,41,55,0.12)"
+      active ? "rgba(7,102,254,0.32)" : answered ? "rgba(96,165,250,0.28)" : "rgba(31,41,55,0.12)"
     }`,
-    background: active ? "#dcfce7" : answered ? "#f0fdf4" : "#fff",
-    color: active ? "#166534" : "#334155",
+    background: active ? "#dbeafe" : answered ? "#eff6ff" : "#fff",
+    color: active ? "#075fd6" : "#334155",
     fontWeight: 700,
     cursor: "pointer"
   }),
@@ -1035,8 +1124,8 @@ const styles = {
     padding: "12px 14px",
     borderRadius: 16,
     marginBottom: 14,
-    background: ready ? "rgba(220,252,231,0.9)" : "rgba(255,247,234,0.92)",
-    border: `1px solid ${ready ? "rgba(22,101,52,0.18)" : "rgba(180,83,9,0.16)"}`
+    background: ready ? "rgba(219,234,254,0.9)" : "rgba(255,247,234,0.92)",
+    border: `1px solid ${ready ? "rgba(7,102,254,0.18)" : "rgba(180,83,9,0.16)"}`
   }),
   completionTitle: {
     margin: "0 0 4px",
@@ -1073,8 +1162,8 @@ const styles = {
   savedPill: {
     padding: "4px 10px",
     borderRadius: 999,
-    background: "#dcfce7",
-    color: "#166534",
+    background: "#dbeafe",
+    color: "#075fd6",
     fontSize: 11,
     fontWeight: 700,
     letterSpacing: "0.04em",
@@ -1138,8 +1227,8 @@ const styles = {
   } as CSSProperties,
   answerChip: {
     borderRadius: 999,
-    background: "#ecfccb",
-    color: "#3f6212",
+    background: "#dbeafe",
+    color: "#075fd6",
     padding: "6px 10px",
     fontSize: 12,
     fontWeight: 700
@@ -1149,12 +1238,12 @@ const styles = {
       selected
         ? mode === "multi"
           ? "rgba(109,40,217,0.28)"
-          : "rgba(22,101,52,0.32)"
+          : "rgba(7,102,254,0.32)"
         : "rgba(31,41,55,0.12)"
     }`,
     borderRadius: 999,
-    background: selected ? (mode === "multi" ? "#ede9fe" : "#dcfce7") : "#fff",
-    color: selected ? (mode === "multi" ? "#6d28d9" : "#166534") : "#334155",
+    background: selected ? (mode === "multi" ? "#ede9fe" : "#dbeafe") : "#fff",
+    color: selected ? (mode === "multi" ? "#6d28d9" : "#075fd6") : "#334155",
     padding: "9px 12px",
     fontWeight: 600,
     cursor: "pointer"

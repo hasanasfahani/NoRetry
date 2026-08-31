@@ -18,9 +18,15 @@ type ThreadSnapshot = {
 
 type CreateReviewTargetResolverInput = {
   getLatestAssistantResponse: () => AssistantSnapshot
+  getAnswerCompletionState?: () => {
+    isStreamingActive: boolean
+    assistantControlsVisible: boolean
+    reason: string
+  }
   getLatestUserPrompt: () => UserSnapshot
   getThread: () => ThreadSnapshot
   getLatestSubmittedAttempt: () => Promise<Attempt | null>
+  getPinnedSubmittedAttempt?: () => Attempt | null
   getReviewableAttempts?: () => Promise<Attempt[]>
   ensureSubmittedAttempt?: () => Promise<Attempt | null>
   readAssistantMessageIdentity: (node: HTMLElement | null, text: string) => string
@@ -29,6 +35,10 @@ type CreateReviewTargetResolverInput = {
 
 function normalizePromptText(value: string) {
   return value.replace(/\s+/g, " ").trim()
+}
+
+function normalizeComparisonText(value: string) {
+  return normalizePromptText(value).toLowerCase()
 }
 
 function normalizeAttemptResponseText(normalizeResponseText: (value: string) => string, attempt: Attempt) {
@@ -66,6 +76,24 @@ function buildPromptCandidates(latestUserPrompt: string, attempt: Attempt | null
   return candidates
 }
 
+function hasPromptContextInResponse(responseText: string, attempt: Attempt) {
+  const normalizedResponse = normalizeComparisonText(responseText)
+  if (!normalizedResponse) return false
+
+  const candidates = [attempt.raw_prompt, attempt.optimized_prompt, attempt.intent.goal]
+    .map((value) => normalizeComparisonText(value))
+    .filter((value) => value.length >= 24)
+
+  return candidates.some((candidate) => {
+    if (normalizedResponse.includes(candidate)) return true
+
+    const prefix = candidate.slice(0, 96).trim()
+    if (prefix.length >= 24 && normalizedResponse.includes(prefix)) return true
+
+    return false
+  })
+}
+
 function matchesResolvedAssistantResponse(params: {
   attempt: Attempt
   responseIdentity: string
@@ -81,6 +109,10 @@ function matchesResolvedAssistantResponse(params: {
   }
 
   if (normalizedCurrentResponse && normalizedAttemptResponse && normalizedAttemptResponse === normalizedCurrentResponse) {
+    return true
+  }
+
+  if (hasPromptContextInResponse(responseText, attempt)) {
     return true
   }
 
@@ -100,6 +132,18 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
   return async function resolveReviewTarget(): Promise<ReviewTargetResolution> {
     const assistant = input.getLatestAssistantResponse()
     const responseText = assistant.text.trim()
+    const completionState = input.getAnswerCompletionState?.()
+    if (completionState && (completionState.isStreamingActive || (responseText && !completionState.assistantControlsVisible))) {
+      logReviewTarget("target resolution paused", {
+        reason: "still_updating",
+        completionReason: completionState?.reason ?? "unknown",
+        streaming: completionState?.isStreamingActive ?? false,
+        assistantControlsVisible: completionState?.assistantControlsVisible ?? false,
+        responseLength: responseText.length
+      })
+      return { ok: false, reason: "still_updating" }
+    }
+
     if (!responseText) {
       logReviewTarget("target resolution failed", {
         reason: "no_response",
@@ -111,6 +155,7 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
     const latestUserPrompt = input.getLatestUserPrompt().text.trim()
     const responseIdentity = assistant.identity || input.readAssistantMessageIdentity(assistant.node, assistant.text)
     const latestSubmittedAttempt = await input.getLatestSubmittedAttempt()
+    const pinnedSubmittedAttempt = input.getPinnedSubmittedAttempt?.() ?? null
     const reviewableAttempts =
       (await input.getReviewableAttempts?.()) ??
       (latestSubmittedAttempt ? [latestSubmittedAttempt] : [])
@@ -125,14 +170,38 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
           normalizeResponseText: input.normalizeResponseText
         })
       ) ?? null
-    let attempt =
+    const promptMatchedAttempt =
       latestUserPrompt
         ? reviewableAttempts.find((candidate) => matchesSubmittedAttempt(latestUserPrompt, candidate)) ?? null
-        : responseMatchedAttempt ?? latestAttempt
+        : null
+
+    const pinnedAttemptMatchesResponse =
+      pinnedSubmittedAttempt &&
+      matchesResolvedAssistantResponse({
+        attempt: pinnedSubmittedAttempt,
+        responseIdentity,
+        responseText: assistant.text,
+        normalizeResponseText: input.normalizeResponseText
+      })
+    const pinnedAttemptMatchesPrompt =
+      pinnedSubmittedAttempt && latestUserPrompt
+        ? matchesSubmittedAttempt(latestUserPrompt, pinnedSubmittedAttempt)
+        : false
+
+    let attempt =
+      responseMatchedAttempt ??
+      (pinnedAttemptMatchesResponse || (!responseMatchedAttempt && pinnedSubmittedAttempt)
+        ? pinnedSubmittedAttempt
+        : null) ??
+      promptMatchedAttempt ??
+      latestAttempt
 
     logReviewTarget("latest submitted attempt read", {
       attemptId: attempt?.attempt_id ?? null,
       latestAttemptId: latestAttempt?.attempt_id ?? null,
+      pinnedAttemptId: pinnedSubmittedAttempt?.attempt_id ?? null,
+      pinnedAttemptMatchesResponse,
+      pinnedAttemptMatchesPrompt,
       responseMatchedAttemptId: responseMatchedAttempt?.attempt_id ?? null,
       candidateCount: reviewableAttempts.length,
       latestUserPromptLength: latestUserPrompt.length,
@@ -141,7 +210,7 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
       responseLength: responseText.length
     })
 
-    if ((!attempt || (!latestUserPrompt && !responseMatchedAttempt)) && input.ensureSubmittedAttempt) {
+    if (!attempt && input.ensureSubmittedAttempt) {
       const ensuredAttempt = await input.ensureSubmittedAttempt()
       if (ensuredAttempt) {
         attempt = ensuredAttempt
@@ -160,11 +229,23 @@ export function createReviewTargetResolver(input: CreateReviewTargetResolverInpu
       return { ok: false, reason: "no_submitted_attempt" }
     }
 
-    if (!matchesSubmittedAttempt(latestUserPrompt, attempt)) {
+    if (!latestUserPrompt && !responseMatchedAttempt && !pinnedSubmittedAttempt && input.ensureSubmittedAttempt) {
+      const ensuredAttempt = await input.ensureSubmittedAttempt()
+      if (ensuredAttempt) {
+        attempt = ensuredAttempt
+      }
+      logReviewTarget("missing prompt attempt fallback used", {
+        attemptId: ensuredAttempt?.attempt_id ?? null,
+        responseIdentity,
+        responseLength: responseText.length
+      })
+    }
+
+    if (!responseMatchedAttempt && latestUserPrompt && !matchesSubmittedAttempt(latestUserPrompt, attempt)) {
       const ensuredAttempt = input.ensureSubmittedAttempt ? await input.ensureSubmittedAttempt() : null
       if (ensuredAttempt && matchesSubmittedAttempt(latestUserPrompt, ensuredAttempt)) {
         attempt = ensuredAttempt
-      } else if (!latestUserPrompt && latestAttempt) {
+      } else if (latestAttempt) {
         attempt = latestAttempt
       } else {
         logReviewTarget("target resolution failed", {

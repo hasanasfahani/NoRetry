@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react"
 import type { AfterAnalysisResult, ClarificationQuestion } from "@prompt-optimizer/shared"
+import { ArchitectureConfirmationPanel } from "./review-popup/review/ProjectSettingsPanel"
+import type { ArchitectureConfirmationState } from "../lib/session/project-memory"
 
 type AfterVerdictPanelProps = {
   verdict: AfterAnalysisResult
@@ -32,6 +34,7 @@ type AfterVerdictPanelProps = {
   projectMemoryDepth: "quick" | "deep"
   projectHandoffDraft: string
   isSavingProjectMemory: boolean
+  architectureConfirmation: ArchitectureConfirmationState | null
   suggestedDirectionChips: { id: string; label: string }[]
   activeSuggestionChipId: string | null
   hasUsedSuggestedDirection: boolean
@@ -58,6 +61,9 @@ type AfterVerdictPanelProps = {
   onProjectMemoryDepthChange: (value: "quick" | "deep") => void
   onCopyProjectContextRequest: () => void
   onSaveProjectMemory: () => void
+  onArchitectureConfirmationEdit: () => void
+  onArchitectureConfirmationDraftChange: (value: string) => void
+  onArchitectureConfirmationConfirm: () => void
   onClose: () => void
 }
 
@@ -242,17 +248,17 @@ function checklistStatusMarker(
   const explanation = verification?.explanation?.toLowerCase() ?? ""
   switch (item.status) {
     case "met":
-      return "(verified)"
+      return "(supported by response)"
     case "missed":
       return /(contradict|failed step|failure signals|error signals)/i.test(explanation)
         ? "(contradicted)"
         : /(did not observe|did not confirm|could not verify|not fully confirmed|still could not confirm|not clearly prove|did not support|not verified)/i.test(explanation)
-          ? "(not verified yet)"
+          ? "(not supported by response yet)"
           : "(missing)"
     case "blocked":
       return "(blocked)"
     default:
-      return "(not verified yet)"
+      return "(not supported by response yet)"
   }
 }
 
@@ -540,26 +546,26 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
       : []
   const deepReviewEvidenceHint =
     activeReviewMode === "deep" && props.verdict.checked_artifact_types.length
-      ? `Deep checked artifacts: ${props.verdict.checked_artifact_types
+      ? `Response details reviewed: ${props.verdict.checked_artifact_types
           .map((item) => item.replace(/_/g, "/"))
           .slice(0, 4)
           .join(" • ")}`
       : activeReviewMode === "deep" && deepReviewAnalysisNotes.length
       ? `Deep review found: ${deepReviewAnalysisNotes.slice(0, 2).join(" • ")}`
       : activeReviewMode === "deep" && deepReviewEvidenceItems.length
-      ? `Deep review inspected: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
+      ? `Deep response review: ${deepReviewEvidenceItems.slice(0, 2).join(" • ")}`
       : ""
   const shouldShowDeepReviewEvidenceHint =
     activeReviewMode !== "deep" &&
     Boolean(deepReviewEvidenceHint) &&
     !summarySentence.toLowerCase().includes(deepReviewEvidenceHint.toLowerCase().replace(/^deep review (found|inspected):\s*/i, ""))
   const showProofDetailsSummary = popupState === "ANALYSIS_READY" || ["NOT_ENOUGH_PROOF", "NEEDS_REFINEMENT", "WRONG_DIRECTION", "SAFE_TO_PROCEED"].includes(popupState)
-  const checkedArtifactsText = checkedArtifacts.length ? checkedArtifacts.join(", ") : "no stable evidence captured yet"
+  const checkedArtifactsText = checkedArtifacts.length ? checkedArtifacts.join(", ") : "none mentioned"
   const uncheckedArtifactsText = uncheckedArtifacts.length
     ? uncheckedArtifacts.join(", ")
     : popupState === "RESPONSE_STILL_STREAMING" || popupState === "ANALYSIS_RAN_TOO_EARLY"
       ? "final assistant response, complete code blocks, runtime behavior"
-      : "no major missing proof was identified in this view"
+      : "no major missing details identified in this response review"
   const shouldShowLoadingProgress =
     Boolean(props.loadingProgress) && (props.isEvaluating || props.isDeepAnalyzing) && !isPlannerOnlyState
   const visibleQuestions = props.nextQuestionHistory.length ? props.nextQuestionHistory : props.nextQuestions
@@ -680,7 +686,15 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
       </style>
       <button type="button" style={styles.scrim} onClick={props.onClose} aria-label="Close verdict panel" />
       <section data-after-panel="true" style={styles.panel(tone.border)}>
-        {props.projectContextSetupActive ? (
+        {props.architectureConfirmation ? (
+          <ArchitectureConfirmationPanel
+            confirmation={props.architectureConfirmation}
+            saving={props.isSavingProjectMemory}
+            onEdit={props.onArchitectureConfirmationEdit}
+            onDraftChange={props.onArchitectureConfirmationDraftChange}
+            onConfirm={props.onArchitectureConfirmationConfirm}
+          />
+        ) : props.projectContextSetupActive ? (
           <div style={styles.contextSetupSurface}>
             <div style={styles.header}>
               <div>
@@ -862,7 +876,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   <p style={styles.recommendedActionLine}>👉 Recommended: {recommendedActionText}</p>
                   {topMissingItems.length ? (
                     <div style={styles.missingSummaryBlock}>
-                      <p style={styles.missingSummaryTitle}>Missing / unverified</p>
+                      <p style={styles.missingSummaryTitle}>Missing / unsupported</p>
                       <ul style={styles.missingSummaryList}>
                         {topMissingItems.map((item) => (
                           <li key={item} style={styles.missingSummaryItem}>
@@ -985,23 +999,23 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
               if (nextExpanded) props.onProofDetailsExpanded()
             }}
           >
-            {detailsExpanded ? "Hide proof details" : "Show proof details"}
+            {detailsExpanded ? "Hide response details" : "Show response details"}
           </button>
           {detailsExpanded ? (
             <>
               <div style={styles.detailsBlock}>
-                <p style={styles.criteriaCaption}>Proof checked</p>
+                <p style={styles.criteriaCaption}>Response details reviewed</p>
                 <p style={styles.criteriaNote}>
-                  Checked: {checkedArtifactsText}
+                  Filenames mentioned in the response: {checkedArtifactsText}
                 </p>
                 <p style={styles.criteriaNote}>
-                  Not checked: {uncheckedArtifactsText}
+                  Expected details not mentioned in the response: {uncheckedArtifactsText}
                 </p>
               </div>
 
               {dedupedBlockedOrUnprovenItems.length ? (
                 <div style={styles.detailsBlock}>
-                  <p style={styles.criteriaCaption}>Not verified yet / blocked</p>
+                  <p style={styles.criteriaCaption}>Not supported by the response / blocked</p>
                   <ul style={styles.list}>
                     {dedupedBlockedOrUnprovenItems.map((item) => (
                       <li key={item} style={styles.listItem}>
@@ -1037,7 +1051,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   {activeReviewMode === "deep" ? (
                     <p style={styles.criteriaNote}>Built on the same checklist as Quick, but judged with stronger visible evidence.</p>
                   ) : (
-                    <p style={styles.criteriaNote}>Quick read shows what the answer seems to cover before deeper proof checks.</p>
+                    <p style={styles.criteriaNote}>Quick read shows what the answer seems to cover before a deeper response review.</p>
                   )}
                   {activeReviewMode === "deep" && deepReviewEvidenceHint ? (
                     <p style={styles.criteriaNote}>{deepReviewEvidenceHint}</p>
@@ -1263,7 +1277,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                       onClick={props.onSubmitPlanningGoalPrompt}
                       disabled={!props.planningGoal.trim()}
                     >
-                      Submit Prompt
+                      Copy Prompt
                     </button>
                   ) : (
                     <button
@@ -1377,7 +1391,7 @@ export function AfterVerdictPanel(props: AfterVerdictPanelProps) {
                   onClick={props.onSubmitNextPrompt}
                   disabled={!props.nextPromptDraft.trim()}
                 >
-                  Submit Prompt
+                  Copy Prompt
                 </button>
               </div>
             ) : null}

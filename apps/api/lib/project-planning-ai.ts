@@ -1,4 +1,6 @@
 import {
+  buildProjectPlanningNfrSectionBody,
+  ProjectPlanningIntakeFieldsSchema,
   GenerateProjectPlanningDraftResponseSchema,
   PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS,
   PROJECT_PLANNING_PROVIDER_TIMEOUT_MS,
@@ -23,24 +25,26 @@ import {
 import * as z from "zod"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
+import { callOpenAiJson } from "./openai"
 import { env } from "./env"
 
 type ProjectPlanningOutputQualityStatus = ProjectPlanningDiagnosticsPayload["outputQualityStatus"]
 type ProjectPlanningProviderAttempt = NonNullable<ProjectPlanningDiagnosticsPayload["providerAttempts"]>[number]
 type ProjectPlanningProvider = {
-  name: "Kimi" | "DeepSeek"
+  name: "Kimi" | "DeepSeek" | "OpenAI"
   configured: boolean
   call: (signal: AbortSignal) => Promise<string | null>
   repairJson?: (input: { raw: string; schemaDescription: string; signal: AbortSignal }) => Promise<string | null>
 }
+type ProjectPlanningProviderId = "kimi" | "deepseek" | "openai"
 type ProjectPlanningRetryError = Error & { retryCount?: number }
 type ProjectPlanningPromptKind = NonNullable<ProjectPlanningDiagnosticsPayload["promptKind"]>
 type ProjectPlanningRequestMetadata = Pick<
   ProjectPlanningDiagnosticsPayload,
   "descriptionPreview" | "descriptionHash" | "projectLabel" | "promptKind"
 >
-type ProjectPlanningJsonParseResult = {
-  data: unknown
+type ProjectPlanningJsonParseResult<T = unknown> = {
+  data: T
   malformedJson: boolean
   repairAttempted: boolean
   repairSucceeded: boolean
@@ -50,6 +54,8 @@ const PROJECT_PLANNING_PROVIDER_MAX_ATTEMPTS = 2
 const PROJECT_PLANNING_RETRY_DELAY_MS = 350
 const PROJECT_PLANNING_ANALYSIS_MAX_TOKENS = 480
 const PROJECT_PLANNING_DRAFT_MAX_TOKENS = 1_100
+const PROJECT_PLANNING_COMPACT_DRAFT_RETRY_MAX_TOKENS = 900
+const PROJECT_PLANNING_COMPACT_DRAFT_RETRY_TIMEOUT_MS = 30_000
 const PROJECT_PLANNING_REPAIR_MAX_TOKENS = 700
 const PROJECT_PLANNING_REPAIR_MIN_REMAINING_MS = 1_500
 
@@ -157,13 +163,30 @@ function createPlanningDiagnostics(input: {
 }
 
 function selectProjectPlanningProvider(input: {
-  provider: "kimi" | "deepseek"
+  provider: ProjectPlanningProviderId
   hasKimiApiKey: boolean
   hasDeepSeekApiKey: boolean
+  hasOpenAiApiKey: boolean
   systemPrompt: string
   userPrompt: string
   maxTokens: number
 }): ProjectPlanningProvider {
+  if (input.provider === "openai") {
+    return {
+      name: "OpenAI",
+      configured: input.hasOpenAiApiKey,
+      call: (signal: AbortSignal) =>
+        callOpenAiJson(input.systemPrompt, input.userPrompt, input.maxTokens, signal),
+      repairJson: ({ raw, schemaDescription, signal }) =>
+        callOpenAiJson(
+          "Convert malformed content into valid JSON only.",
+          buildJsonRepairPrompt(schemaDescription, raw),
+          PROJECT_PLANNING_REPAIR_MAX_TOKENS,
+          signal
+        )
+    }
+  }
+
   if (input.provider === "deepseek") {
     return {
       name: "DeepSeek",
@@ -200,11 +223,28 @@ function selectProjectPlanningProvider(input: {
 function buildProjectPlanningRaceProviders(input: {
   hasKimiApiKey: boolean
   hasDeepSeekApiKey: boolean
+  hasOpenAiApiKey: boolean
   systemPrompt: string
   userPrompt: string
   maxTokens: number
 }): ProjectPlanningProvider[] {
   const providers: ProjectPlanningProvider[] = []
+
+  if (input.hasOpenAiApiKey) {
+    providers.push({
+      name: "OpenAI",
+      configured: true,
+      call: (signal: AbortSignal) =>
+        callOpenAiJson(input.systemPrompt, input.userPrompt, input.maxTokens, signal),
+      repairJson: ({ raw, schemaDescription, signal }) =>
+        callOpenAiJson(
+          "Convert malformed content into valid JSON only.",
+          buildJsonRepairPrompt(schemaDescription, raw),
+          PROJECT_PLANNING_REPAIR_MAX_TOKENS,
+          signal
+        )
+    })
+  }
 
   if (input.hasKimiApiKey) {
     providers.push({
@@ -326,44 +366,269 @@ const DESCRIPTION_STOP_WORDS = new Set([
   "with"
 ])
 
+type LooseJsonParseResult = {
+  value: unknown
+  recovered: boolean
+}
+
+const PROJECT_PLANNING_JSON_ALIAS_MAP: Record<string, string> = {
+  productName: "title",
+  product_name: "title",
+  appName: "title",
+  app_name: "title",
+  name: "title",
+  summary: "overview",
+  description: "overview",
+  users: "targetUser",
+  targetUsers: "targetUser",
+  target_users: "targetUser",
+  audience: "targetUser",
+  persona: "targetUser",
+  primaryGoal: "goal",
+  primary_goal: "goal",
+  objective: "goal",
+  mvpScope: "scope",
+  mvp_scope: "scope",
+  features: "requirements",
+  userStories: "requirements",
+  user_stories: "requirements",
+  functionalRequirements: "requirements",
+  functional_requirements: "requirements",
+  outOfScope: "nonGoals",
+  out_of_scope: "nonGoals",
+  exclusions: "nonGoals",
+  non_goals: "nonGoals",
+  successMetrics: "successCriteria",
+  success_metrics: "successCriteria",
+  acceptanceCriteria: "successCriteria",
+  acceptance_criteria: "successCriteria",
+  risks: "assumptionsRisks",
+  assumptions: "assumptionsRisks",
+  assumptions_risks: "assumptionsRisks",
+  implementationPlan: "phases",
+  implementation_plan: "phases",
+  roadmap: "phases",
+  milestones: "phases"
+}
+
+const PROJECT_PLANNING_PHASE_ALIAS_MAP: Record<string, string> = {
+  name: "title",
+  phaseName: "title",
+  phase_name: "title",
+  summary: "goal",
+  objective: "goal",
+  scope: "buildScope",
+  tasks: "buildScope",
+  features: "buildScope",
+  build_scope: "buildScope",
+  exclusions: "outOfScope",
+  nonGoals: "outOfScope",
+  non_goals: "outOfScope",
+  out_of_scope: "outOfScope",
+  state: "dataState",
+  data: "dataState",
+  data_state: "dataState",
+  outputs: "deliverables",
+  acceptance: "acceptanceCriteria",
+  tests: "acceptanceCriteria",
+  acceptance_criteria: "acceptanceCriteria",
+  validation: "validationProof",
+  proof: "validationProof",
+  validation_proof: "validationProof"
+}
+
 function parseLooseJson(raw: string): unknown {
-  const cleaned = raw.trim()
+  return parseLooseJsonWithMetadata(raw).value
+}
+
+function parseLooseJsonWithMetadata(raw: string): LooseJsonParseResult {
+  const cleaned = normalizeLooseJsonText(raw)
 
   try {
     const parsed = JSON.parse(cleaned)
     if (typeof parsed === "string" && looksLikeJson(parsed)) {
-      return parseLooseJson(parsed)
+      const nested = parseLooseJsonWithMetadata(parsed)
+      return {
+        value: nested.value,
+        recovered: true
+      }
     }
-    return parsed
+    return {
+      value: parsed,
+      recovered: false
+    }
   } catch {
-    const startCandidates = [cleaned.indexOf("{"), cleaned.indexOf("[")].filter((index) => index >= 0)
-    const start = startCandidates.length ? Math.min(...startCandidates) : -1
-    if (start === -1) {
-      throw new ProjectPlanningMalformedJsonError("Model response did not contain JSON")
-    }
-
-    for (let end = cleaned.length; end > start; end -= 1) {
-      const slice = cleaned.slice(start, end).trim()
-      if (!slice) continue
-
-      try {
-        return JSON.parse(slice)
-      } catch {
-        continue
+    const startCandidates = findJsonStartIndexes(cleaned)
+    for (const start of startCandidates) {
+      const repaired = repairLooseJsonText(cleaned, start)
+      if (!repaired) continue
+      const parsed = tryParseLooseJsonCandidate(repaired)
+      if (parsed.ok) {
+        return {
+          value: parsed.value,
+          recovered: true
+        }
       }
     }
 
-    const repaired = repairLooseJsonText(cleaned, start)
-    if (repaired) {
-      try {
-        return JSON.parse(repaired)
-      } catch {
-        // Keep the public error stable below.
+    const candidates = buildLooseJsonCandidates(cleaned)
+    for (const candidate of candidates) {
+      const parsed = tryParseLooseJsonCandidate(candidate.text)
+      if (parsed.ok) {
+        return {
+          value: parsed.value,
+          recovered: true
+        }
       }
     }
 
     throw new ProjectPlanningMalformedJsonError()
   }
+}
+
+function normalizeLooseJsonText(raw: string) {
+  return raw
+    .trim()
+    .replace(/^\uFEFF/, "")
+    .replace(/```(?:json|javascript|js)?/gi, "")
+    .replace(/```/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim()
+}
+
+function tryParseLooseJsonCandidate(raw: string): { ok: true; value: unknown } | { ok: false } {
+  const variants = buildRepairVariants(raw)
+
+  for (const variant of variants) {
+    try {
+      const parsed = JSON.parse(variant)
+      if (typeof parsed === "string" && looksLikeJson(parsed)) {
+        return { ok: true, value: parseLooseJson(parsed) }
+      }
+      return { ok: true, value: parsed }
+    } catch {
+      continue
+    }
+  }
+
+  return { ok: false }
+}
+
+function buildRepairVariants(raw: string) {
+  const normalized = normalizeLooseJsonText(raw)
+  const withoutTrailingCommas = normalized.replace(/,\s*([}\]])/g, "$1")
+  const withQuotedKeys = withoutTrailingCommas.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
+  const withoutLineComments = withQuotedKeys.replace(/(^|\n)\s*\/\/.*(?=\n|$)/g, "$1")
+  const withoutInlineLineComments = withQuotedKeys.replace(/\/\/[^\n\r]*/g, "")
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "")
+
+  return Array.from(new Set([
+    normalized,
+    withoutTrailingCommas,
+    withQuotedKeys,
+    withoutLineComments,
+    withoutInlineLineComments,
+    withoutBlockComments
+  ].map((variant) => variant.trim()).filter(Boolean)))
+}
+
+function findJsonStartIndexes(raw: string) {
+  const indexes: number[] = []
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (character === "\\") {
+        escaped = true
+      } else if (character === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (character === '"') {
+      inString = true
+    } else if (character === "{" || character === "[") {
+      indexes.push(index)
+    }
+  }
+
+  return indexes
+}
+
+function buildLooseJsonCandidates(raw: string) {
+  const candidates: Array<{ text: string; score: number }> = []
+  const stack: Array<{ character: "{" | "["; index: number }> = []
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (character === "\\") {
+        escaped = true
+      } else if (character === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (character === '"') {
+      inString = true
+      continue
+    }
+
+    if (character === "{" || character === "[") {
+      stack.push({ character, index })
+      continue
+    }
+
+    if (character !== "}" && character !== "]") continue
+
+    const expected = character === "}" ? "{" : "["
+    for (let stackIndex = stack.length - 1; stackIndex >= 0; stackIndex -= 1) {
+      const start = stack[stackIndex]
+      if (start.character !== expected) continue
+      const text = raw.slice(start.index, index + 1).trim()
+      candidates.push({
+        text,
+        score: scoreJsonCandidate(text)
+      })
+      stack.splice(stackIndex)
+      break
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length)
+}
+
+function scoreJsonCandidate(value: string) {
+  const keyMatches = [
+    "title",
+    "overview",
+    "summary",
+    "problem",
+    "targetUser",
+    "targetUsers",
+    "requirements",
+    "successCriteria",
+    "implementationPlan",
+    "phases",
+    "deliverables",
+    "acceptanceCriteria",
+    "\"d\"",
+    "\"p\""
+  ].reduce((score, key) => score + (value.includes(key) ? 100 : 0), 0)
+
+  return keyMatches + Math.min(value.length, 8000) / 100
 }
 
 function looksLikeJson(value: string) {
@@ -374,36 +639,129 @@ function looksLikeJson(value: string) {
 function repairLooseJsonText(raw: string, start: number) {
   const candidate = raw
     .slice(start)
-    .replace(/```(?:json)?/gi, "")
-    .replace(/```/g, "")
     .trim()
 
   if (!candidate) return null
 
   const repaired = candidate
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/,\s*([}\]])/g, "$1")
     .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
     .trim()
 
-  return repaired || null
+  if (!repaired) return null
+
+  const closingTokens: string[] = []
+  let inString = false
+  let escaped = false
+
+  for (const character of repaired) {
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (character === "\\") {
+        escaped = true
+      } else if (character === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (character === '"') {
+      inString = true
+    } else if (character === "{") {
+      closingTokens.push("}")
+    } else if (character === "[") {
+      closingTokens.push("]")
+    } else if (character === "}" || character === "]") {
+      const expected = closingTokens[closingTokens.length - 1]
+      if (character === expected) closingTokens.pop()
+    }
+  }
+
+  if (inString) return repaired
+  return `${repaired}${closingTokens.reverse().join("")}`
 }
 
-async function parseProjectPlanningJsonWithRepair(input: {
+function normalizeProjectPlanningModelAliases(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeProjectPlanningModelAliases(item))
+  if (!value || typeof value !== "object") return value
+
+  const record = value as Record<string, unknown>
+  const normalized: Record<string, unknown> = {}
+  const isPhaseLike =
+    "deliverables" in record ||
+    "acceptanceCriteria" in record ||
+    "acceptance_criteria" in record ||
+    "buildScope" in record ||
+    "build_scope" in record
+  const aliasMap = isPhaseLike ? PROJECT_PLANNING_PHASE_ALIAS_MAP : PROJECT_PLANNING_JSON_ALIAS_MAP
+
+  for (const [key, rawValue] of Object.entries(record)) {
+    const normalizedKey = aliasMap[key] ?? key
+    const normalizedValue = normalizeProjectPlanningModelAliases(rawValue)
+    if (normalized[normalizedKey] === undefined) {
+      normalized[normalizedKey] = normalizedValue
+    } else if (Array.isArray(normalized[normalizedKey]) && Array.isArray(normalizedValue)) {
+      normalized[normalizedKey] = [...normalized[normalizedKey] as unknown[], ...normalizedValue]
+    }
+  }
+
+  if (Array.isArray(normalized.phases)) {
+    normalized.phases = normalized.phases.map((phase) => {
+      if (!phase || typeof phase !== "object" || Array.isArray(phase)) return phase
+      const phaseRecord = phase as Record<string, unknown>
+      const normalizedPhase: Record<string, unknown> = {}
+      for (const [key, rawValue] of Object.entries(phaseRecord)) {
+        const normalizedKey = PROJECT_PLANNING_PHASE_ALIAS_MAP[key] ?? key
+        if (normalizedPhase[normalizedKey] === undefined) {
+          normalizedPhase[normalizedKey] = normalizeProjectPlanningModelAliases(rawValue)
+        }
+      }
+      return normalizedPhase
+    })
+  }
+
+  return normalized
+}
+
+async function parseProjectPlanningJsonWithRepair<T>(input: {
   raw: string
   provider: ProjectPlanningProvider
+  schema: z.ZodType<T>
   schemaDescription: string
   signal: AbortSignal
   startedAt: number
   timeoutMs: number
-}): Promise<ProjectPlanningJsonParseResult> {
+}): Promise<ProjectPlanningJsonParseResult<T>> {
+  const parseAndValidate = (raw: string) => {
+    const parsed = parseLooseJsonWithMetadata(raw)
+    const normalized = normalizeProjectPlanningModelAliases(parsed.value)
+    const result = input.schema.safeParse(normalized)
+    if (result.success) return result.data
+
+    throw new ProjectPlanningMalformedJsonError(
+      `Model JSON did not match the required PRD shape: ${result.error.message.slice(0, 600)}`
+    )
+  }
+
   try {
+    const parsed = parseLooseJsonWithMetadata(input.raw)
+    const normalized = normalizeProjectPlanningModelAliases(parsed.value)
+    const result = input.schema.safeParse(normalized)
+    if (!result.success) {
+      throw new ProjectPlanningMalformedJsonError(
+        `Model JSON did not match the required PRD shape: ${result.error.message.slice(0, 600)}`
+      )
+    }
+
     return {
-      data: parseLooseJson(input.raw),
-      malformedJson: false,
-      repairAttempted: false,
-      repairSucceeded: false
+      data: result.data,
+      malformedJson: parsed.recovered,
+      repairAttempted: parsed.recovered,
+      repairSucceeded: parsed.recovered
     }
   } catch (error) {
     if (!(error instanceof ProjectPlanningMalformedJsonError)) {
@@ -419,7 +777,7 @@ async function parseProjectPlanningJsonWithRepair(input: {
     try {
       const repairedRaw = await input.provider.repairJson({
         raw: input.raw,
-        schemaDescription: input.schemaDescription,
+        schemaDescription: `${input.schemaDescription}\nValidation failure: ${error.message.slice(0, 800)}`,
         signal: input.signal
       })
       if (!repairedRaw) {
@@ -427,7 +785,7 @@ async function parseProjectPlanningJsonWithRepair(input: {
       }
 
       return {
-        data: parseLooseJson(repairedRaw),
+        data: parseAndValidate(repairedRaw),
         malformedJson: true,
         repairAttempted: true,
         repairSucceeded: true
@@ -714,6 +1072,7 @@ export const projectPlanningAiTestInternals = {
   buildCoverageFromPrdSnapshot,
   buildCompactDraftContext,
   buildDraftFromCompactPrd,
+  parseLooseJson,
   buildPrdFieldsFromCompactDraft,
   buildProjectPlanningDraftResponseFromCompactData,
   buildProjectPlanningRaceProviders,
@@ -749,16 +1108,39 @@ function buildProjectPlanningAnalysisPromptInput(input: AnalyzeProjectPlanningRe
 function buildProjectPlanningDraftPromptInput(input: {
   projectLabel: string
   compactDraftContext: ReturnType<typeof buildCompactDraftContext>
+  generationAttempt?: number
+  mode?: "full" | "compact_retry"
 }) {
+  if (input.mode === "compact_retry") {
+    const systemPrompt = "Return one valid compact JSON object only. Build a concrete MVP PRD from the intake."
+    const userPrompt = [
+      JSON.stringify({
+        projectLabel: input.projectLabel,
+        ...compactDraftPromptContext(input.compactDraftContext)
+      }),
+      'Shape={"d":["title","overview","problem","targetUser","goal","scope"],"r":["req"],"n":["nonGoal"],"c":["constraint"],"sc":["success"],"ar":["risk"],"nfr":["access","data","validation and errors","deployment and services","quality priorities"],"p":[["phase title","phase goal",["build scope"],["out of scope"],["data/state"],["deliverables"],["acceptance criteria"],["validation proof"]]]}',
+      "Rules: JSON only. d has exactly 6 strings. r=4. n/c/ar=2 each. sc=3. nfr has exactly 5 strings in the shown order and translates only the user's NFR answers into concise engineering constraints; use Not specified for an unanswered area. p has exactly 3 phases. Each phase array has exactly 8 items. Phase list fields are arrays. build scope=2, out of scope=1, data/state=1, deliverables=2, acceptance criteria=2, validation proof=1. Keep each item under 12 words. Use the user's exact app domain, entities, user actions, states, and success signals. Phase 1 is the smallest usable foundation; phases 2-3 extend without duplicating. Do not include cohorts, app-store launch, public beta, real-user metrics, stakeholder reports, markdown, comments, or explanation."
+    ].join("\n")
+
+    return {
+      systemPrompt,
+      userPrompt,
+      maxTokens: PROJECT_PLANNING_COMPACT_DRAFT_RETRY_MAX_TOKENS
+    }
+  }
+
   const systemPrompt = "Return one valid JSON object only. Build a concrete MVP PRD from the intake."
   const userPrompt = [
     JSON.stringify({
       projectLabel: input.projectLabel,
       ...compactDraftPromptContext(input.compactDraftContext)
     }),
-    'Shape={"title":"string","overview":"string","problem":"string","targetUser":"string","goal":"string","scope":"string","requirements":["string"],"nonGoals":["string"],"constraints":["string"],"successCriteria":["string"],"assumptionsRisks":["string"],"phase1Title":"string","phase1Goal":"string","phase1BuildScope":["string"],"phase1OutOfScope":["string"],"phase1DataState":["string"],"phase1Deliverables":["string"],"phase1AcceptanceCriteria":["string"],"phase1ValidationProof":["string"],"phase2Title":"string","phase2Goal":"string","phase2BuildScope":["string"],"phase2OutOfScope":["string"],"phase2DataState":["string"],"phase2Deliverables":["string"],"phase2AcceptanceCriteria":["string"],"phase2ValidationProof":["string"],"phase3Title":"string","phase3Goal":"string","phase3BuildScope":["string"],"phase3OutOfScope":["string"],"phase3DataState":["string"],"phase3Deliverables":["string"],"phase3AcceptanceCriteria":["string"],"phase3ValidationProof":["string"]}',
-    "Rules: arrays only for list fields. intake wins. Infer gaps in assumptionsRisks. requirements=4; nonGoals/constraints/successCriteria/assumptionsRisks=2 each. Exactly 3 implementation phases. Per phase: buildScope=2, outOfScope=1, dataState=1, implementation deliverables=2, implementation acceptanceCriteria=2, agent-verifiable validationProof=1. No cohorts, studies, app-store/public beta, business reports, or real-user metrics in phase fields. Keep every item under 14 words. Phase 1 is the smallest usable foundation; later phases do not duplicate it. Avoid generic placeholder wording. Use domain entities, actions, states, success signals."
-  ].join("\n")
+    'Shape={"title":"string","overview":"string","problem":"string","targetUser":"string","goal":"string","scope":"string","requirements":["string"],"nonGoals":["string"],"constraints":["string"],"successCriteria":["string"],"assumptionsRisks":["string"],"nonFunctionalRequirements":["access","data","validation and errors","deployment and services","quality priorities"],"phase1Title":"string","phase1Goal":"string","phase1BuildScope":["string"],"phase1OutOfScope":["string"],"phase1DataState":["string"],"phase1Deliverables":["string"],"phase1AcceptanceCriteria":["string"],"phase1ValidationProof":["string"],"phase2Title":"string","phase2Goal":"string","phase2BuildScope":["string"],"phase2OutOfScope":["string"],"phase2DataState":["string"],"phase2Deliverables":["string"],"phase2AcceptanceCriteria":["string"],"phase2ValidationProof":["string"],"phase3Title":"string","phase3Goal":"string","phase3BuildScope":["string"],"phase3OutOfScope":["string"],"phase3DataState":["string"],"phase3Deliverables":["string"],"phase3AcceptanceCriteria":["string"],"phase3ValidationProof":["string"]}',
+    "Rules: arrays only for list fields. intake wins. Infer gaps in assumptionsRisks. requirements=4; nonGoals/constraints/successCriteria/assumptionsRisks=2 each. nonFunctionalRequirements has exactly 5 strings in the shown order and translates only the user's NFR answers into concise engineering constraints; use Not specified for an unanswered area. Exactly 3 implementation phases. Per phase: buildScope=2, outOfScope=1, dataState=1, implementation deliverables=2, implementation acceptanceCriteria=2, agent-verifiable validationProof=1. No cohorts, studies, app-store/public beta, business reports, or real-user metrics in phase fields. Keep every item under 14 words. Phase 1 is the smallest usable foundation; later phases do not duplicate it. Avoid generic placeholder wording. Use domain entities, actions, states, success signals.",
+    input.generationAttempt
+      ? "Retry correction: the previous response failed JSON validation. Return every required key, close all arrays and objects, and output no markdown."
+      : ""
+  ].filter(Boolean).join("\n")
 
   return {
     systemPrompt,
@@ -780,7 +1162,11 @@ function compactDraftPromptContext(context: ReturnType<typeof buildCompactDraftC
       problem: truncatePromptValue(context.intake.problem, 140),
       firstVersion: truncatePromptValue(context.intake.firstVersion, 180),
       skipForNow: truncatePromptValue(context.intake.skipForNow, 120),
-      anythingElse: truncatePromptValue(context.intake.anythingElse, 140)
+      anythingElse: truncatePromptValue(context.intake.anythingElse, 140),
+      accessAndRoles: truncatePromptValue(context.intake.accessAndRoles, 180),
+      dataAndSensitivity: truncatePromptValue(context.intake.dataAndSensitivity, 180),
+      deploymentAndServices: truncatePromptValue(context.intake.deploymentAndServices, 160),
+      qualityPriorities: truncatePromptValue(context.intake.qualityPriorities, 140)
     }).filter(([, value]) => Boolean(value))
   )
   const hasIntake = Object.keys(intake).length > 0
@@ -838,7 +1224,11 @@ function buildResolvedDraftInputs(input: GenerateProjectPlanningDraftRequest) {
     problem: input.intakeFields?.problem ?? "",
     firstVersion: input.intakeFields?.firstVersion ?? "",
     skipForNow: input.intakeFields?.skipForNow ?? "",
-    anythingElse: input.intakeFields?.anythingElse ?? ""
+    anythingElse: input.intakeFields?.anythingElse ?? "",
+    accessAndRoles: input.intakeFields?.accessAndRoles ?? "",
+    dataAndSensitivity: input.intakeFields?.dataAndSensitivity ?? "",
+    deploymentAndServices: input.intakeFields?.deploymentAndServices ?? "",
+    qualityPriorities: input.intakeFields?.qualityPriorities ?? ""
   }
   const clarifiedAnswers = input.questions.map((question) => {
     const rawAnswer = input.answerState[question.id]
@@ -935,6 +1325,7 @@ async function callStructuredJson<T>(
     provider: env.PROJECT_PLANNING_PROVIDER,
     hasKimiApiKey: Boolean(env.KIMI_API_KEY),
     hasDeepSeekApiKey: Boolean(env.DEEPSEEK_API_KEY),
+    hasOpenAiApiKey: Boolean(env.OPENAI_API_KEY),
     systemPrompt,
     userPrompt,
     maxTokens
@@ -1046,6 +1437,7 @@ async function runProjectPlanningAnalysisProviderRace(input: {
   const providers = input.providers ?? buildProjectPlanningRaceProviders({
     hasKimiApiKey: Boolean(env.KIMI_API_KEY),
     hasDeepSeekApiKey: Boolean(env.DEEPSEEK_API_KEY),
+    hasOpenAiApiKey: Boolean(env.OPENAI_API_KEY),
     systemPrompt: input.systemPrompt,
     userPrompt: input.userPrompt,
     maxTokens: input.maxTokens
@@ -1116,12 +1508,13 @@ async function runProjectPlanningAnalysisProviderRace(input: {
           const parseResult = await parseProjectPlanningJsonWithRepair({
             raw,
             provider,
+            schema: ProjectPlanningAnalysisModelSchema,
             schemaDescription: PROJECT_PLANNING_ANALYSIS_JSON_SCHEMA_DESCRIPTION,
             signal: controller.signal,
             startedAt,
             timeoutMs
           })
-          const modelData = ProjectPlanningAnalysisModelSchema.parse(parseResult.data)
+          const modelData = parseResult.data
           const durationMs = Date.now() - providerStartedAt
           const nextAttempts: ProjectPlanningProviderAttempt[] = [
             ...attempts,
@@ -1232,7 +1625,7 @@ const PROJECT_PLANNING_ANALYSIS_JSON_SCHEMA_DESCRIPTION =
   '{"summary":"string","sections":[{"key":"problem|target_user|goal_outcome|scope|core_requirements|non_goals|constraints|success_criteria|assumptions_risks","status":"filled|partial|missing","draft":"string","missing":["string"]}],"questions":[{"id":"string","section":"scope","question":"string","why":"string","mode":"single|multi","options":["string","Other"]}]}'
 
 const PROJECT_PLANNING_DRAFT_JSON_SCHEMA_DESCRIPTION =
-  '{"title":"string","overview":"string","problem":"string","targetUser":"string","goal":"string","scope":"string","requirements":["string"],"nonGoals":["string"],"constraints":["string"],"successCriteria":["string"],"assumptionsRisks":["string"],"phase1Title":"string","phase1Goal":"string","phase1BuildScope":["string"],"phase1OutOfScope":["string"],"phase1DataState":["string"],"phase1Deliverables":["string"],"phase1AcceptanceCriteria":["string"],"phase1ValidationProof":["string"],"phase2Title":"string","phase2Goal":"string","phase2BuildScope":["string"],"phase2OutOfScope":["string"],"phase2DataState":["string"],"phase2Deliverables":["string"],"phase2AcceptanceCriteria":["string"],"phase2ValidationProof":["string"],"phase3Title":"string","phase3Goal":"string","phase3BuildScope":["string"],"phase3OutOfScope":["string"],"phase3DataState":["string"],"phase3Deliverables":["string"],"phase3AcceptanceCriteria":["string"],"phase3ValidationProof":["string"]}'
+  '{"title":"string","overview":"string","problem":"string","targetUser":"string","goal":"string","scope":"string","requirements":["string"],"nonGoals":["string"],"constraints":["string"],"successCriteria":["string"],"assumptionsRisks":["string"],"nonFunctionalRequirements":["access","data","validation and errors","deployment and services","quality priorities"],"phase1Title":"string","phase1Goal":"string","phase1BuildScope":["string"],"phase1OutOfScope":["string"],"phase1DataState":["string"],"phase1Deliverables":["string"],"phase1AcceptanceCriteria":["string"],"phase1ValidationProof":["string"],"phase2Title":"string","phase2Goal":"string","phase2BuildScope":["string"],"phase2OutOfScope":["string"],"phase2DataState":["string"],"phase2Deliverables":["string"],"phase2AcceptanceCriteria":["string"],"phase2ValidationProof":["string"],"phase3Title":"string","phase3Goal":"string","phase3BuildScope":["string"],"phase3OutOfScope":["string"],"phase3DataState":["string"],"phase3Deliverables":["string"],"phase3AcceptanceCriteria":["string"],"phase3ValidationProof":["string"]}'
 
 const CompactProjectPlanningAnalysisSchema = z.object({
   s: z.array(z.array(z.unknown()).max(4)).max(9).default([]),
@@ -1287,6 +1680,7 @@ const CompactProjectPlanningDraftSchema = z.object({
   c: z.array(z.unknown()).min(1).max(4),
   sc: z.array(z.unknown()).min(2).max(4),
   ar: z.array(z.unknown()).min(1).max(4),
+  nfr: z.array(z.unknown()).max(5).optional(),
   p: z.array(z.array(z.unknown()).min(4).max(10)).min(2).max(3)
 })
 
@@ -1306,6 +1700,7 @@ const FlatProjectPlanningDraftSchema = z.object({
   constraints: FlatProjectPlanningDraftListValueSchema,
   successCriteria: FlatProjectPlanningDraftListValueSchema,
   assumptionsRisks: FlatProjectPlanningDraftListValueSchema,
+  nonFunctionalRequirements: FlatProjectPlanningDraftListValueSchema.optional(),
   phase1Title: NonEmptyDraftStringSchema,
   phase1Goal: NonEmptyDraftStringSchema,
   phase1BuildScope: FlatProjectPlanningDraftListValueSchema.optional(),
@@ -1348,6 +1743,8 @@ const ObjectProjectPlanningDraftSchema = z.object({
   success_criteria: z.union([z.array(z.unknown()), z.unknown()]).optional(),
   assumptionsRisks: z.union([z.array(z.unknown()), z.unknown()]).optional(),
   assumptions_risks: z.union([z.array(z.unknown()), z.unknown()]).optional(),
+  nonFunctionalRequirements: z.union([z.array(z.unknown()), z.unknown()]).optional(),
+  non_functional_requirements: z.union([z.array(z.unknown()), z.unknown()]).optional(),
   phases: z.array(z.object({
     title: z.unknown().optional(),
     name: z.unknown().optional(),
@@ -1490,6 +1887,7 @@ function flatDraftToCompact(data: FlatProjectPlanningDraftPayload): CompactProje
     c: ensureDraftList(splitDraftBulletText(data.constraints), "Keep the first release focused and practical.", 1, 4),
     sc: ensureDraftList(splitDraftBulletText(data.successCriteria), "The MVP works end to end for the target user.", 2, 4),
     ar: ensureDraftList(splitDraftBulletText(data.assumptionsRisks), "Some details were inferred from the intake and should be confirmed.", 1, 4),
+    nfr: optionalDraftList(data.nonFunctionalRequirements, 5),
     p: [
       [
         data.phase1Title,
@@ -1610,6 +2008,10 @@ function draftModelToCompact(data: ProjectPlanningDraftModelPayload): CompactPro
     1,
     4
   )
+  const nonFunctionalRequirements = objectStringArrayAt(
+    record,
+    ["nonFunctionalRequirements", "non_functional_requirements"]
+  ).slice(0, 5)
   const phases = (Array.isArray(record.phases) ? record.phases : []).map((phase, index) => {
     const phaseRecord = phase && typeof phase === "object" && !Array.isArray(phase)
       ? phase as Record<string, unknown>
@@ -1658,6 +2060,7 @@ function draftModelToCompact(data: ProjectPlanningDraftModelPayload): CompactPro
     c: constraints,
     sc: successCriteria,
     ar: assumptionsRisks,
+    nfr: nonFunctionalRequirements,
     p: phases
   })
 }
@@ -1931,98 +2334,6 @@ function buildFallbackQuestions(description: string): ProjectPlanningQuestionPay
   return questions.slice(0, 5)
 }
 
-function buildFallbackDraft(input: GenerateProjectPlanningDraftRequest): GenerateProjectPlanningDraftResponse {
-  const description = input.description.trim()
-  const sections = [
-    { id: "overview", title: "Product Overview", body: description },
-    { id: "problem", title: "Problem", body: "The product needs to solve the core user pain described in the planning brief in a simple, focused first release." },
-    { id: "target-user", title: "Target User", body: "The first release should focus on the main user described in the planning brief." },
-    { id: "goal", title: "Primary Goal", body: "Deliver a first version that solves the main problem clearly and reliably without adding unrelated scope." },
-    { id: "scope", title: "Scope", body: "Keep the first release focused on the narrowest complete version needed to deliver the core value." },
-    { id: "requirements", title: "Core Requirements", body: "Build the must-have flows and product behaviors described in the planning brief and clarified answers." },
-    { id: "non-goals", title: "Non-Goals", body: "Do not add extra features, nice-to-haves, or unrelated workflows unless they were explicitly clarified." },
-    { id: "constraints", title: "Constraints", body: "Respect the current product boundaries, architecture, and delivery constraints described in the brief." },
-    { id: "success", title: "Success Criteria", body: "The first release should work end to end, feel clear to the target user, and satisfy the clarified planning criteria." },
-    { id: "implementation-phases", title: "Implementation Phases", body: "- Phase 1: Set up the core data and workflow needed for the main feature.\n- Phase 2: Build the primary user-facing experience.\n- Phase 3: Add validation, edge-case handling, and trust-building details.\n- Phase 4: Verify the flow against the success criteria before moving on." },
-    { id: "assumptions-risks", title: "Assumptions / Risks", body: "The product still depends on any assumptions or missing details that were not fully resolved during planning." },
-    { id: "implementation-handoff", title: "Implementation Handoff", body: buildImplementationHandoffBody() }
-  ]
-
-  const implementationPhases = [
-    {
-      id: "phase_1",
-      title: "Phase 1 — Core setup",
-      goal: "Set up the core structure needed for the main workflow.",
-      buildScope: ["Define the core data/state shape", "Wire the smallest usable workflow path"],
-      outOfScope: ["Do not start later-phase polish or optional features"],
-      dataState: ["Core state needed to start and complete the main workflow"],
-      deliverables: ["Core data shape or state", "Basic workflow wiring", "Narrow scope only"],
-      acceptanceCriteria: ["The main workflow can be started", "No unrelated parts are changed"],
-      validationProof: ["Show the main workflow can start with the expected state"]
-    },
-    {
-      id: "phase_2",
-      title: "Phase 2 — Main experience",
-      goal: "Build the main user-facing flow for the first release.",
-      buildScope: ["Build the primary user interaction", "Connect the UI to the Phase 1 workflow state"],
-      outOfScope: ["Do not add unrelated secondary workflows"],
-      dataState: ["State changes caused by the primary user actions"],
-      deliverables: ["Primary UI and interaction flow", "Happy-path completion", "Clear user guidance"],
-      acceptanceCriteria: ["A user can complete the main flow end to end", "The behavior matches the PRD scope"],
-      validationProof: ["Show the happy path working end to end"]
-    },
-    {
-      id: "phase_3",
-      title: "Phase 3 — Validation and proof",
-      goal: "Tighten the experience and validate it against the success criteria.",
-      buildScope: ["Add validation and important edge-case handling", "Verify the first release against success criteria"],
-      outOfScope: ["Do not expand the MVP scope"],
-      dataState: ["Validation, empty, and edge-case states"],
-      deliverables: ["Validation states", "Edge-case handling", "Concrete verification"],
-      acceptanceCriteria: ["The success criteria are explicitly checked", "The implementation is validated before any next phase"],
-      validationProof: ["List the concrete checks or tests completed"]
-    }
-  ]
-
-  const submissionPrompt = [
-    "Implement this PRD one phase at a time.",
-    "",
-    "Important sequencing rule:",
-    "- Start with Phase 1 only.",
-    "- Do not start Phase 2 until Phase 1 is finished and validated against its acceptance criteria.",
-    "- After finishing the current phase, explain what changed and show concrete implementation validation proof before moving on.",
-    "",
-    "PRD",
-    sections.map((section) => `${section.title}\n${section.body}`).join("\n\n"),
-    "",
-    "Implementation phases",
-    implementationPhases
-      .map(formatImplementationPhaseDetails)
-      .join("\n\n"),
-    "",
-    "For this response, implement Phase 1 only."
-  ].join("\n").trim()
-
-  return {
-    draft: {
-      title: `${input.projectLabel} PRD draft`,
-      summary: "This PRD draft was generated with a lightweight fallback because AI planning was unavailable.",
-      sections,
-      implementationPhases,
-      submissionPrompt
-    },
-    aiAvailable: false,
-    diagnostics: createPlanningDiagnostics({
-      aiAvailable: false,
-      fallbackUsed: true,
-      providerName: null,
-      durationMs: 0,
-      errorReason: "debug_fallback_used",
-      outputQualityStatus: "not_checked"
-    })
-  }
-}
-
 function buildSubmissionPromptFromDraft(draft: Omit<GeneratedPrdDraftPayload, "submissionPrompt">) {
   const renderList = (label: string, items: string[]) => items.length
     ? `${label}:\n${items.map((item) => `- ${item}`).join("\n")}`
@@ -2140,14 +2451,20 @@ function buildPrdFieldsFromCompactDraft(blueprint: z.infer<typeof CompactProject
     nonGoals: compactStringArrayAt([blueprint.n], 0),
     constraints: compactStringArrayAt([blueprint.c], 0),
     successCriteria: compactStringArrayAt([blueprint.sc], 0),
-    assumptionsRisks: compactStringArrayAt([blueprint.ar], 0)
+    assumptionsRisks: compactStringArrayAt([blueprint.ar], 0),
+    nonFunctionalRequirements: compactStringArrayAt([blueprint.nfr], 0)
   }
 }
 
 function buildDraftFromCompactPrd(
-  blueprint: z.infer<typeof CompactProjectPlanningDraftSchema>
+  blueprint: z.infer<typeof CompactProjectPlanningDraftSchema>,
+  intakeFields = ProjectPlanningIntakeFieldsSchema.parse({})
 ): GeneratedPrdDraftPayload {
   const prd = buildPrdFieldsFromCompactDraft(blueprint)
+  const nonFunctionalRequirements = buildProjectPlanningNfrSectionBody(
+    intakeFields,
+    prd.nonFunctionalRequirements
+  )
   const implementationPhases = blueprint.p.map((phase, index) => {
     const hasDetailedPhaseShape = Array.isArray(phase[5]) || Array.isArray(phase[6]) || Array.isArray(phase[7])
     const buildScope = hasDetailedPhaseShape ? compactStringArrayAt(phase, 2).slice(0, 3) : []
@@ -2193,6 +2510,11 @@ function buildDraftFromCompactPrd(
       { id: "constraints", title: "Constraints", body: formatBulletList(prd.constraints) },
       { id: "success", title: "Success Criteria", body: formatBulletList(prd.successCriteria) },
       {
+        id: "non-functional-requirements",
+        title: "Non-Functional Requirements",
+        body: nonFunctionalRequirements
+      },
+      {
         id: "implementation-phases",
         title: "Implementation Phases",
         body: implementationPhases
@@ -2217,7 +2539,7 @@ function buildProjectPlanningDraftResponseFromCompactData(input: {
   compactData: CompactProjectPlanningDraftPayload
   diagnostics: ProjectPlanningDiagnosticsPayload
 }): GenerateProjectPlanningDraftResponse {
-  const draft = buildDraftFromCompactPrd(input.compactData)
+  const draft = buildDraftFromCompactPrd(input.compactData, input.resolvedDraftInputs.intakeFields)
   const parsedDraft = GenerateProjectPlanningDraftResponseSchema.shape.draft.parse(draft)
   const shiftedSection = parsedDraft.sections.find((section) =>
     PRD_DRAFT_FIELD_PLACEHOLDERS.has(normalizeTextForQuality(section.body))
@@ -2271,6 +2593,32 @@ function buildProjectPlanningDraftResponseFromModelData(input: {
   })
 }
 
+function combineProjectPlanningDiagnostics(input: {
+  first: ProjectPlanningDiagnosticsPayload
+  second: ProjectPlanningDiagnosticsPayload
+  durationMs: number
+  success: boolean
+}): ProjectPlanningDiagnosticsPayload {
+  return {
+    ...input.second,
+    aiAvailable: input.success,
+    fallbackUsed: false,
+    durationMs: Math.max(0, Math.round(input.durationMs)),
+    malformedJson: Boolean(input.first.malformedJson || input.second.malformedJson),
+    repairAttempted: Boolean(input.first.repairAttempted || input.second.repairAttempted),
+    repairSucceeded: Boolean(input.first.repairSucceeded || input.second.repairSucceeded),
+    providerAttempts: [
+      ...(input.first.providerAttempts ?? []),
+      ...(input.second.providerAttempts ?? [])
+    ],
+    outputQualityStatus: input.success
+      ? input.second.outputQualityStatus
+      : input.first.outputQualityStatus === "failed" || input.second.outputQualityStatus === "failed"
+        ? "failed"
+        : "not_checked"
+  }
+}
+
 async function runProjectPlanningDraftProviderRace(input: {
   description: string
   resolvedDraftInputs: ReturnType<typeof buildResolvedDraftInputs>
@@ -2284,6 +2632,7 @@ async function runProjectPlanningDraftProviderRace(input: {
   const providers = input.providers ?? buildProjectPlanningRaceProviders({
     hasKimiApiKey: Boolean(env.KIMI_API_KEY),
     hasDeepSeekApiKey: Boolean(env.DEEPSEEK_API_KEY),
+    hasOpenAiApiKey: Boolean(env.OPENAI_API_KEY),
     systemPrompt: input.systemPrompt,
     userPrompt: input.userPrompt,
     maxTokens: input.maxTokens
@@ -2354,12 +2703,13 @@ async function runProjectPlanningDraftProviderRace(input: {
           const parseResult = await parseProjectPlanningJsonWithRepair({
             raw,
             provider,
+            schema: ProjectPlanningDraftModelSchema,
             schemaDescription: PROJECT_PLANNING_DRAFT_JSON_SCHEMA_DESCRIPTION,
             signal: controller.signal,
             startedAt,
             timeoutMs
           })
-          const modelData = ProjectPlanningDraftModelSchema.parse(parseResult.data)
+          const modelData = parseResult.data
           const durationMs = Date.now() - providerStartedAt
           const nextAttempts: ProjectPlanningProviderAttempt[] = [
             ...attempts,
@@ -2464,25 +2814,75 @@ export async function runProjectPlanningAnalysis(
 export async function runProjectPlanningDraft(
   input: GenerateProjectPlanningDraftRequest
 ): Promise<GenerateProjectPlanningDraftResponse> {
+  const startedAt = Date.now()
   const resolvedDraftInputs = buildResolvedDraftInputs(input)
   const prdSnapshot = input.prdSnapshot ?? buildPrdSnapshotFromCoverageReport(input.coverageReport)
   const compactDraftContext = buildCompactDraftContext(resolvedDraftInputs, prdSnapshot)
-  const { systemPrompt, userPrompt, maxTokens } = buildProjectPlanningDraftPromptInput({
+  const metadata = buildProjectPlanningRequestMetadata({
+    description: input.description,
     projectLabel: input.projectLabel,
-    compactDraftContext
+    promptKind: "prd_draft"
+  })
+  const fullPrompt = buildProjectPlanningDraftPromptInput({
+    projectLabel: input.projectLabel,
+    compactDraftContext,
+    generationAttempt: input.generationAttempt
   })
 
-  return runProjectPlanningDraftProviderRace({
-    description: input.description,
-    resolvedDraftInputs,
-    systemPrompt,
-    userPrompt,
-    maxTokens,
-    metadata: buildProjectPlanningRequestMetadata({
+  try {
+    return await runProjectPlanningDraftProviderRace({
       description: input.description,
+      resolvedDraftInputs,
+      systemPrompt: fullPrompt.systemPrompt,
+      userPrompt: fullPrompt.userPrompt,
+      maxTokens: fullPrompt.maxTokens,
+      metadata,
+      timeoutMs: PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS
+    })
+  } catch (firstError) {
+    if (!(firstError instanceof ProjectPlanningAiError)) throw firstError
+
+    const compactRetryPrompt = buildProjectPlanningDraftPromptInput({
       projectLabel: input.projectLabel,
-      promptKind: "prd_draft"
-    }),
-    timeoutMs: PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS
-  })
+      compactDraftContext,
+      generationAttempt: input.generationAttempt,
+      mode: "compact_retry"
+    })
+
+    try {
+      const compactResponse = await runProjectPlanningDraftProviderRace({
+        description: input.description,
+        resolvedDraftInputs,
+        systemPrompt: compactRetryPrompt.systemPrompt,
+        userPrompt: compactRetryPrompt.userPrompt,
+        maxTokens: compactRetryPrompt.maxTokens,
+        metadata,
+        timeoutMs: PROJECT_PLANNING_COMPACT_DRAFT_RETRY_TIMEOUT_MS
+      })
+
+      return {
+        ...compactResponse,
+        diagnostics: combineProjectPlanningDiagnostics({
+          first: firstError.diagnostics,
+          second: compactResponse.diagnostics,
+          durationMs: Date.now() - startedAt,
+          success: true
+        })
+      }
+    } catch (secondError) {
+      if (!(secondError instanceof ProjectPlanningAiError)) throw secondError
+      const combinedDiagnostics = combineProjectPlanningDiagnostics({
+        first: firstError.diagnostics,
+        second: secondError.diagnostics,
+        durationMs: Date.now() - startedAt,
+        success: false
+      })
+      throw new ProjectPlanningAiError(
+        combinedDiagnostics.errorReason === "provider_timeout"
+          ? "Project Planning draft providers timed out during the full PRD attempt and compact PRD retry."
+          : "Project Planning draft providers did not return a valid PRD during the full attempt or compact retry.",
+        combinedDiagnostics
+      )
+    }
+  }
 }

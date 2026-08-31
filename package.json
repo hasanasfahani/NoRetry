@@ -8,6 +8,9 @@
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace @prompt-optimizer/api",
+    "clean:api": "rm -rf apps/api/.next",
+    "dev:api:clean": "npm run clean:api && WATCHPACK_POLLING=true npm run dev --workspace @prompt-optimizer/api -- --hostname 0.0.0.0 -p ${PORT:-3000}",
+    "replit:dev": "npm run dev:api:clean",
     "dev:admin": "WATCHPACK_POLLING=true PORT=3002 npm run dev --workspace @prompt-optimizer/api",
     "dev:extension": "npm run dev --workspace @prompt-optimizer/extension",
     "build": "npm run build --workspaces",
@@ -25,5 +28,13 @@
     "test:deep-analysis-v2:ci": "npm run test:deep-analysis-v2:ci --workspace @prompt-optimizer/api && npm run test:deep-analysis-v2 --workspace @prompt-optimizer/extension",
     "report:deep-analysis-v2-live": "npm run report:deep-analysis-v2-live --workspace @prompt-optimizer/api",
     "generate:deep-analysis-v2-silver": "npm run generate:deep-analysis-v2-silver --workspace @prompt-optimizer/api"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.4.1",
+    "dotenv": "^17.4.2",
+    "openai": "^6.45.0",
+    "pg": "^8.22.0",
+    "pg-boss": "^12.22.0",
+    "resend": "^6.14.0"
   }
 }

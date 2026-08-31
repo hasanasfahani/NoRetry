@@ -32,7 +32,10 @@ function buttonStyle(kind: PopupAction["kind"], disabled: boolean): CSSPropertie
     fontSize: 14,
     fontWeight: 700,
     cursor: disabled ? "not-allowed" : "pointer",
-    opacity: disabled ? 0.55 : 1
+    opacity: disabled ? 0.55 : 1,
+    maxWidth: "100%",
+    whiteSpace: "normal",
+    overflowWrap: "anywhere"
   }
 
   if (kind === "primary") {
@@ -66,6 +69,7 @@ const styles: Record<string, CSSProperties> = {
   row: {
     display: "flex",
     flexWrap: "wrap",
-    gap: 10
+    gap: 10,
+    minWidth: 0
   }
 }

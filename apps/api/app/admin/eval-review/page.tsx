@@ -51,10 +51,10 @@ type DeepAnalysisV2DecisionSnapshot = {
   completedAt?: string
   rolloutMode?: "off" | "shadow" | "on"
   applied?: boolean
-  provider: "kimi" | "deepseek" | "fallback" | "none"
+  provider: "openai" | "kimi" | "deepseek" | "fallback" | "none"
   model?: string
   latencyMs?: number
-  providerAttempted?: "kimi" | "deepseek" | "none"
+  providerAttempted?: "openai" | "kimi" | "deepseek" | "none"
   fallbackReason?: string
   failureMessage?: string
   kimiLatencyMs?: number
@@ -77,7 +77,7 @@ type DeepAnalysisV2ComparisonSnapshot = {
   v1Decision: string | null
   v2Decision: string
   agreement: "agree" | "disagree" | "unknown"
-  provider: "kimi" | "deepseek" | "fallback" | "none"
+  provider: "openai" | "kimi" | "deepseek" | "fallback" | "none"
   latencyMs?: number
   generatedPrompt: string
 }

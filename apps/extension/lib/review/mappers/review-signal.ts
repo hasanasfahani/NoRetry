@@ -1,6 +1,7 @@
 import type { AfterAnalysisResult } from "@prompt-optimizer/shared/src/schemas"
 import type { ReviewSignalState } from "../types"
 import type { ReviewTaskType } from "../services/review-task-type"
+import { isNoRetryAnalysisResult } from "../no-retry"
 
 function isGoalMisaligned(result: AfterAnalysisResult) {
   return result.status === "WRONG_DIRECTION" || result.stage_2.problem_fit === "wrong_direction"
@@ -53,6 +54,15 @@ export function mapReviewResultToSignal(input: {
       state: "red",
       tooltip: "Likely wrong — don’t trust",
       ariaLabel: "Review signal: Likely wrong — don’t trust",
+      targetKey
+    }
+  }
+
+  if (isNoRetryAnalysisResult(result)) {
+    return {
+      state: "green",
+      tooltip: "No retry needed",
+      ariaLabel: "Review signal: No retry needed",
       targetKey
     }
   }

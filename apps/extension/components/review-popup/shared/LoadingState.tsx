@@ -18,12 +18,12 @@ const ANSWER_STAGES: LoadingStage[] = [
   {
     threshold: 0,
     status: "Reading the latest answer...",
-    support: "reeva AI is scanning the latest assistant reply before judging how trustworthy it really is."
+    support: "reeva AI is reviewing what the latest assistant reply says."
   },
   {
     threshold: 15,
-    status: "Separating confidence from correctness...",
-    support: "It is distinguishing polished language from claims that are actually supported."
+    status: "Separating claims from supporting detail...",
+    support: "It is distinguishing polished language from claims supported within the response."
   },
   {
     threshold: 35,
@@ -42,12 +42,12 @@ const ANSWER_STAGES: LoadingStage[] = [
   },
   {
     threshold: 90,
-    status: "Turning the analysis into a clear verdict...",
-    support: "It is converting the review into a verdict that is easier to trust and act on."
+    status: "Turning the analysis into a clear response review...",
+    support: "It is summarizing the review so it is easier to understand and act on."
   },
   {
     threshold: 100,
-    status: "Done — your answer now has a trust check.",
+    status: "Done — your response review is ready.",
     support: "The analysis is ready."
   }
 ]
@@ -71,21 +71,21 @@ const PROMPT_STAGES: LoadingStage[] = [
   {
     threshold: 55,
     status: "Choosing the most important clarification first...",
-    support: "It is deciding which clarification will strengthen the prompt the fastest."
+    support: "It is deciding which clarification will make the next move safest."
   },
   {
     threshold: 75,
-    status: "Building the decision path for a stronger prompt...",
-    support: "It is shaping the branch logic so the prompt can improve through the shortest useful path."
+    status: "Building the decision path for a clearer next move...",
+    support: "It is shaping the branch logic through the shortest useful path."
   },
   {
     threshold: 90,
     status: "Preparing the first question...",
-    support: "It is packaging the next question so the prompt tree starts clearly, not mechanically."
+    support: "It is packaging the next question so the guide starts clearly, not mechanically."
   },
   {
     threshold: 100,
-    status: "Ready — let’s make your prompt harder to misread.",
+    status: "Ready - let's make the next move harder to misread.",
     support: "The first step is ready."
   }
 ]
@@ -178,7 +178,7 @@ export function LoadingState(props: LoadingStateProps) {
         `}
       </style>
       <div style={styles.progressMeta}>
-        <span style={styles.kicker}>{props.mode === "answer" ? "Trust check" : "Prompt planner"}</span>
+        <span style={styles.kicker}>{props.mode === "answer" ? "Response review" : "Next Move"}</span>
         <span style={styles.percent}>{Math.round(progress)}%</span>
       </div>
       <div style={styles.barTrack}>

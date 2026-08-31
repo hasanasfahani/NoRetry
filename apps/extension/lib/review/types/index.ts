@@ -1,16 +1,9 @@
+import type { RequestBrief } from "@prompt-optimizer/shared/src/request-brief"
 import type { AfterAnalysisResult, AnalyzePromptResponse, Attempt, ClarificationQuestion } from "@prompt-optimizer/shared/src/schemas"
 import type { GoalContract } from "../../goal/types"
+import type { PreflightAssessment } from "../../preflight/preflight-risk-engine"
 import type { ReviewContract } from "../contracts"
 import type { ReviewTaskType } from "../services/review-task-type"
-import type { ReviewPromptModeV2Validation } from "../v2/prompt-mode-v2-assembly"
-import type { ReviewPromptModeV2ProgressState } from "../v2/prompt-mode-v2-progress"
-import type {
-  ReviewPromptModeV2IntentConfidence,
-  ReviewPromptModeV2RequestType,
-  ReviewPromptModeV2TaskTypeChip,
-  ReviewPromptModeV2TemplateKind
-} from "../v2/request-types"
-import type { ReviewPromptModeV2QuestionMode, ReviewPromptModeV2SectionState } from "../v2/section-schemas"
 
 export type ReviewPromptRenderSection = {
   title: string
@@ -23,23 +16,11 @@ export type ReviewPromptContract = {
   renderedPrompt: string
 }
 
-export type ReviewPreflightSignal = {
-  label: string
-  severity: "info" | "warning" | "critical"
-}
-
-export type ReviewPreflightAssessment = {
-  riskLevel: "low" | "medium" | "high"
-  signals: ReviewPreflightSignal[]
-  topSignal: ReviewPreflightSignal | null
-  summary: string
-}
-
 export type ReviewPopupMode = "quick" | "deep"
 
 export type ReviewPopupState = "idle" | "loading" | "quick_review" | "deep_review" | "error"
 
-export type ReviewPopupSurface = "answer_mode" | "prompt_mode" | "prompt_mode_v2"
+export type ReviewPopupSurface = "answer_mode" | "prompt_mode"
 
 export type ReviewSignalVisualState =
   | "idle"
@@ -56,6 +37,10 @@ export type ReviewSignalState = {
   tooltip: string
   ariaLabel: string
   targetKey: string | null
+  reason?: string
+  requestKind?: "handoff_document" | "code_change" | "debug_fix" | "planning" | "answer_only" | "unknown"
+  confidence?: "low" | "medium" | "high"
+  engineerWarning?: NonNullable<PreflightAssessment["engineerWarning"]>
 }
 
 export type ReviewTarget = {
@@ -74,7 +59,7 @@ export type ReviewTargetResolution =
     }
   | {
       ok: false
-      reason: "no_response" | "no_submitted_attempt"
+      reason: "no_response" | "no_submitted_attempt" | "still_updating"
     }
 
 export type ReviewResultCache = {
@@ -84,13 +69,14 @@ export type ReviewResultCache = {
 }
 
 export type ReviewPromptModePopupState = "idle" | "loading" | "questions" | "error"
-export type ReviewPromptModeV2PopupState = "idle" | "loading" | "entry" | "questions" | "error"
 
 export type ReviewPromptModeState = {
   popupState: ReviewPromptModePopupState
   sessionKey: string | null
   sourcePrompt: string
+  nextMoveInitialChoice: "small_feature" | "large_feature" | "bug_fix" | "small_change" | null
   planningGoal: string
+  requestBrief: RequestBrief | null
   goalContract: GoalContract | null
   promptContract: ReviewPromptContract | null
   planningAttempt: Attempt | null
@@ -104,48 +90,12 @@ export type ReviewPromptModeState = {
   answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
   isLoadingQuestions: boolean
+  branchReadyToGenerate: boolean
+  branchStatusMessage: string | null
   isGeneratingPrompt: boolean
   promptDraft: string
   promptReady: boolean
   errorMessage: string | null
-}
-
-export type ReviewPromptModeV2State = {
-  popupState: ReviewPromptModeV2PopupState
-  sessionKey: string | null
-  sourcePrompt: string
-  goalContract: GoalContract | null
-  localAnalysis: AnalyzePromptResponse | null
-  intentConfidence: ReviewPromptModeV2IntentConfidence
-  likelyTaskTypes: ReviewPromptModeV2TaskTypeChip[]
-  selectedTaskType: ReviewPromptModeV2RequestType | null
-  selectedTemplateKind: ReviewPromptModeV2TemplateKind | null
-  clarifyingQuestion: string | null
-  clarifyingAnswer: string
-  sections: ReviewPromptModeV2SectionState[]
-  additionalNotes: string[]
-  isGeneratingPrompt: boolean
-  promptDraft: string
-  promptReady: boolean
-  validation: ReviewPromptModeV2Validation | null
-  progress: ReviewPromptModeV2ProgressState | null
-  assemblyErrorMessage: string | null
-  questionHistory: ReviewPromptModeV2Question[]
-  activeQuestionIndex: number
-  answerState: Record<string, string | string[]>
-  otherAnswerState: Record<string, string>
-  errorMessage: string | null
-}
-
-export type ReviewPromptModeV2Question = {
-  id: string
-  sectionId: string
-  sectionLabel: string
-  label: string
-  helper: string
-  mode: ReviewPromptModeV2QuestionMode
-  options: string[]
-  depth?: "primary" | "secondary" | "tertiary"
 }
 
 export type ReviewTypingState = {
@@ -153,13 +103,14 @@ export type ReviewTypingState = {
   promptText: string
   sessionKey: string | null
   goalContract: GoalContract | null
-  preflight: ReviewPreflightAssessment | null
+  preflight: PreflightAssessment | null
 }
 
 export type ReviewPopupControllerState = {
   surface: ReviewPopupSurface
   popupState: ReviewPopupState
   activeMode: ReviewPopupMode
+  analysisState?: "idle" | "quick_check_ready" | "v2_running" | "v2_ready" | "v2_unavailable" | "stale"
   targetKey: string | null
   cacheStatus: "none" | "hit" | "miss"
   analysisStarted: boolean

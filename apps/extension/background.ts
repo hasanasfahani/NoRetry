@@ -1,4 +1,5 @@
 import {
+  DEEP_ANALYSIS_V2_CLIENT_TIMEOUT_MS,
   AfterAnalysisResultSchema,
   AfterPipelineRequestSchema,
   IntentExtractionOutputSchema,
@@ -6,6 +7,8 @@ import {
   Stage1OutputSchema,
   Stage2OutputSchema,
   VerdictOutputSchema,
+  PROJECT_PLANNING_CLIENT_TIMEOUT_MS,
+  PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS,
   type AfterPipelineRequest,
   type AttemptIntent
 } from "@prompt-optimizer/shared"
@@ -30,13 +33,178 @@ type AfterPipelineMessage = {
   payload: AfterPipelineRequest
 }
 
+type CaptureVisibleTabMessage = {
+  type: "PROMPT_OPTIMIZER_CAPTURE_VISIBLE_TAB"
+}
+
+type ActionIconMessage = {
+  type: "PROMPT_OPTIMIZER_ACTION_ICON"
+  state: "idle" | "loading" | "attention"
+  token: string
+  active?: boolean
+  kind?: "onboarding" | "review"
+  durationMs?: number
+}
+
 const API_BASE = process.env.PLASMO_PUBLIC_API_BASE_URL || "https://noretry.vercel.app"
 const REQUEST_TIMEOUT_MS = 8000
-const PROJECT_PLANNING_TIMEOUT_MS = 90000
+const PROJECT_PLANNING_TIMEOUT_MS = PROJECT_PLANNING_CLIENT_TIMEOUT_MS
+const PROJECT_PLANNING_DRAFT_TIMEOUT_MS = PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS
+const PROXY_MAX_TIMEOUT_MS = Math.max(PROJECT_PLANNING_TIMEOUT_MS, PROJECT_PLANNING_DRAFT_TIMEOUT_MS, DEEP_ANALYSIS_V2_CLIENT_TIMEOUT_MS)
 const KIMI_API_KEY = process.env.PLASMO_PUBLIC_KIMI_API_KEY || ""
-const KIMI_MODEL = process.env.PLASMO_PUBLIC_KIMI_MODEL || "kimi-k2.6"
+const KIMI_MODEL = process.env.PLASMO_PUBLIC_KIMI_MODEL || "kimi-k2.7-code-highspeed"
 const DEEPSEEK_API_KEY = process.env.PLASMO_PUBLIC_DEEPSEEK_API_KEY || ""
-const DEEPSEEK_MODEL = process.env.PLASMO_PUBLIC_DEEPSEEK_MODEL || "deepseek-chat"
+const DEEPSEEK_MODEL = process.env.PLASMO_PUBLIC_DEEPSEEK_MODEL || "deepseek-v4-flash"
+const OPENAI_API_KEY = process.env.PLASMO_PUBLIC_OPENAI_API_KEY || ""
+const OPENAI_MODEL = process.env.PLASMO_PUBLIC_OPENAI_MODEL || "gpt-5.4-mini"
+const ACTION_ICON_SIZES = [16, 32, 48, 128] as const
+const ACTION_ICON_LOADING_FRAMES = 12
+const ACTION_ICON_ATTENTION_FRAMES = 8
+const ACTION_ICON_FRAME_MS = 120
+const ACTION_ICON_ATTENTION_FRAME_MS = 180
+const ACTION_ICON_ATTENTION_DEFAULT_MS = 9000
+
+let actionIconFrame = 0
+let actionIconTimer: ReturnType<typeof setInterval> | null = null
+let actionIconAttentionFrame = 0
+let actionIconAttentionTimer: ReturnType<typeof setInterval> | null = null
+const actionIconLoadingTokens = new Set<string>()
+const actionIconAttentionTokens = new Map<string, "onboarding" | "review">()
+const actionIconAttentionTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+function actionIconPath(name: string) {
+  return Object.fromEntries(ACTION_ICON_SIZES.map((size) => [size, `${name}-${size}.png`]))
+}
+
+function loadingActionIconPath(frame: number) {
+  return Object.fromEntries(
+    ACTION_ICON_SIZES.map((size) => [size, `action-icon-loading-${frame}-${size}.png`])
+  )
+}
+
+function attentionActionIconPath(kind: "onboarding" | "review", frame: number) {
+  return Object.fromEntries(
+    ACTION_ICON_SIZES.map((size) => [size, `action-icon-${kind}-pulse-${frame}-${size}.png`])
+  )
+}
+
+function setActionIcon(path: Record<string, string>) {
+  if (!chrome.action?.setIcon) return
+  try {
+    const maybePromise = chrome.action.setIcon({ path }) as unknown
+    if (maybePromise && typeof (maybePromise as Promise<void>).catch === "function") {
+      ;(maybePromise as Promise<void>).catch((error) => {
+        console.debug("[reeva AI][ActionIcon]", "failed to update action icon", error)
+      })
+    }
+  } catch (error) {
+    console.debug("[reeva AI][ActionIcon]", "failed to update action icon", error)
+  }
+}
+
+function setActionBadge(text = "", color = "#2563eb") {
+  if (!chrome.action?.setBadgeText) return
+  try {
+    chrome.action.setBadgeText({ text })
+    chrome.action.setBadgeBackgroundColor?.({ color })
+  } catch (error) {
+    console.debug("[reeva AI][ActionIcon]", "failed to update action badge", error)
+  }
+}
+
+function setIdleActionIcon() {
+  setActionIcon(actionIconPath("action-icon"))
+  setActionBadge("")
+}
+
+function setLoadingActionIconFrame() {
+  setActionIcon(loadingActionIconPath(actionIconFrame))
+  actionIconFrame = (actionIconFrame + 1) % ACTION_ICON_LOADING_FRAMES
+}
+
+function startActionIconLoading(token: string) {
+  actionIconLoadingTokens.add(token)
+  if (actionIconAttentionTimer) {
+    clearInterval(actionIconAttentionTimer)
+    actionIconAttentionTimer = null
+  }
+  if (actionIconTimer) return
+
+  setActionBadge("")
+  actionIconFrame = 0
+  setLoadingActionIconFrame()
+  actionIconTimer = setInterval(setLoadingActionIconFrame, ACTION_ICON_FRAME_MS)
+}
+
+function latestActionIconAttentionKind() {
+  const kinds = [...actionIconAttentionTokens.values()]
+  if (kinds.includes("review")) return "review"
+  return kinds[0] ?? null
+}
+
+function setAttentionActionIconFrame() {
+  const kind = latestActionIconAttentionKind()
+  if (!kind) {
+    stopActionIconAttentionTimer()
+    return
+  }
+  setActionIcon(attentionActionIconPath(kind, actionIconAttentionFrame))
+  setActionBadge(kind === "onboarding" ? "+" : "✓", kind === "onboarding" ? "#2563eb" : "#16a34a")
+  actionIconAttentionFrame = (actionIconAttentionFrame + 1) % ACTION_ICON_ATTENTION_FRAMES
+}
+
+function startActionIconAttentionTimer() {
+  if (actionIconLoadingTokens.size > 0 || actionIconAttentionTimer) return
+  actionIconAttentionFrame = 0
+  setAttentionActionIconFrame()
+  actionIconAttentionTimer = setInterval(setAttentionActionIconFrame, ACTION_ICON_ATTENTION_FRAME_MS)
+}
+
+function stopActionIconAttentionTimer() {
+  if (actionIconAttentionTimer) {
+    clearInterval(actionIconAttentionTimer)
+    actionIconAttentionTimer = null
+  }
+  if (actionIconLoadingTokens.size === 0) {
+    setIdleActionIcon()
+  }
+}
+
+function startActionIconAttention(token: string, kind: "onboarding" | "review", durationMs = ACTION_ICON_ATTENTION_DEFAULT_MS) {
+  actionIconAttentionTokens.set(token, kind)
+  const existingTimeout = actionIconAttentionTimeouts.get(token)
+  if (existingTimeout) clearTimeout(existingTimeout)
+  const timeout = setTimeout(() => stopActionIconAttention(token), Math.max(1200, durationMs))
+  actionIconAttentionTimeouts.set(token, timeout)
+  startActionIconAttentionTimer()
+}
+
+function stopActionIconAttention(token: string) {
+  actionIconAttentionTokens.delete(token)
+  const timeout = actionIconAttentionTimeouts.get(token)
+  if (timeout) clearTimeout(timeout)
+  actionIconAttentionTimeouts.delete(token)
+  if (actionIconAttentionTokens.size > 0) {
+    setAttentionActionIconFrame()
+    return
+  }
+  stopActionIconAttentionTimer()
+}
+
+function stopActionIconLoading(token: string) {
+  actionIconLoadingTokens.delete(token)
+  if (actionIconLoadingTokens.size > 0) return
+
+  if (actionIconTimer) {
+    clearInterval(actionIconTimer)
+    actionIconTimer = null
+  }
+  if (actionIconAttentionTokens.size > 0) {
+    startActionIconAttentionTimer()
+  } else {
+    setIdleActionIcon()
+  }
+}
 
 function getApiBases() {
   const bases = [API_BASE]
@@ -150,10 +318,56 @@ async function callDeepSeekJson(system: string, user: string, maxTokens: number)
   return parseLooseJson(text.replace(/```json|```/g, "").trim())
 }
 
+async function callOpenAiJson(system: string, user: string, maxTokens: number) {
+  if (!OPENAI_API_KEY) return null
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      instructions: `${system}\nReturn JSON only. Do not add markdown, comments, or explanation.`,
+      input: user,
+      temperature: 0.1,
+      max_output_tokens: maxTokens
+    })
+  })
+
+  if (!response.ok) {
+    throw new Error(`OpenAI request failed with ${response.status}`)
+  }
+
+  const json = (await response.json()) as {
+    output_text?: string
+    output?: Array<{
+      content?: Array<{
+        type?: string
+        text?: string
+      }>
+    }>
+  }
+  const directText = json.output_text?.trim()
+  const outputText =
+    directText ||
+    json.output
+      ?.flatMap((item) => item.content ?? [])
+      .filter((item) => item.type === "output_text" && item.text)
+      .map((item) => item.text?.trim() ?? "")
+      .join("\n")
+      .trim()
+
+  if (!outputText) return null
+  return parseLooseJson(outputText.replace(/```(?:json)?|```/g, "").trim())
+}
+
 async function callJsonWithFallback<T>(system: string, user: string, maxTokens: number, parser: (value: unknown) => T) {
   const providers = [
-    () => callKimiJson(system, user, maxTokens),
-    () => callDeepSeekJson(system, user, maxTokens)
+    () => callOpenAiJson(system, user, maxTokens),
+    () => callDeepSeekJson(system, user, maxTokens),
+    () => callKimiJson(system, user, maxTokens)
   ]
 
   for (const provider of providers) {
@@ -335,9 +549,58 @@ async function runAfterPipeline(payload: AfterPipelineRequest) {
   })
 }
 
-chrome.runtime.onMessage.addListener((message: ProxyRequestMessage | AfterPipelineMessage, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: ProxyRequestMessage | AfterPipelineMessage | CaptureVisibleTabMessage | ActionIconMessage, _sender, sendResponse) => {
   if (!message) {
     return false
+  }
+
+  if (message.type === "PROMPT_OPTIMIZER_ACTION_ICON") {
+    if (message.state === "loading") {
+      startActionIconLoading(message.token)
+    } else if (message.state === "attention") {
+      if (message.active === false) {
+        stopActionIconAttention(message.token)
+      } else {
+        startActionIconAttention(message.token, message.kind ?? "review", message.durationMs)
+      }
+    } else {
+      stopActionIconLoading(message.token)
+      stopActionIconAttention(message.token)
+    }
+    sendResponse({ ok: true })
+    return false
+  }
+
+  if (message.type === "PROMPT_OPTIMIZER_CAPTURE_VISIBLE_TAB") {
+    void (async () => {
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          chrome.tabs.captureVisibleTab({
+            format: "jpeg",
+            quality: 72
+          }, (capturedUrl) => {
+            const lastError = chrome.runtime.lastError
+            if (lastError) {
+              reject(new Error(lastError.message))
+              return
+            }
+            if (!capturedUrl) {
+              reject(new Error("Screenshot capture returned no image"))
+              return
+            }
+            resolve(capturedUrl)
+          })
+        })
+        sendResponse({ ok: true, dataUrl, mimeType: "image/jpeg" })
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : "Screenshot capture failed"
+        })
+      }
+    })()
+
+    return true
   }
 
   if (message.type === "PROMPT_OPTIMIZER_AFTER_PIPELINE") {
@@ -362,9 +625,15 @@ chrome.runtime.onMessage.addListener((message: ProxyRequestMessage | AfterPipeli
 
   void (async () => {
     let lastError: unknown = null
+    const maxTimeoutMs =
+      message.path === "/api/project-planning/draft"
+        ? PROJECT_PLANNING_DRAFT_TIMEOUT_MS
+        : message.path === "/api/review/deep-analysis-v2"
+          ? DEEP_ANALYSIS_V2_CLIENT_TIMEOUT_MS
+          : PROXY_MAX_TIMEOUT_MS
     const timeoutMs =
       typeof message.timeoutMs === "number" && Number.isFinite(message.timeoutMs) && message.timeoutMs > 0
-        ? Math.min(Math.max(message.timeoutMs, REQUEST_TIMEOUT_MS), PROJECT_PLANNING_TIMEOUT_MS)
+        ? Math.min(Math.max(message.timeoutMs, REQUEST_TIMEOUT_MS), maxTimeoutMs)
         : REQUEST_TIMEOUT_MS
 
     for (const base of getApiBases()) {

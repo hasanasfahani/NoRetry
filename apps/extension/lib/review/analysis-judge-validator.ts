@@ -1,6 +1,7 @@
 import type { AnalysisAnswerModel } from "./analysis-answer-model"
 import type { AnalysisJudgeResult } from "./analysis-llm-judge"
 import type { AnalysisRequestModel } from "./analysis-request-model"
+import { responseContradictsExclusion } from "./constraint-extractors"
 import {
   canonicalizeAnalysisUnit,
   detectNumericRange,
@@ -14,6 +15,71 @@ import type { ReviewAnalysisJudgment } from "./contracts"
 
 function normalize(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase()
+}
+
+function normalizeMemorySignal(value: string) {
+  return normalize(
+    value.replace(
+      /^(?:protected area|stable constraint|accepted assumption|preferred pattern|avoid this direction|current feature area|current phase):\s*/i,
+      ""
+    )
+  )
+}
+
+function codingLikeRequest(requestModel: AnalysisRequestModel) {
+  return [
+    "prompt_for_coding_tool",
+    "bug_fix",
+    "code_change",
+    "implementation_plan",
+    "spec",
+    "verification",
+    "code",
+    "debug"
+  ].includes(requestModel.artifactFamily)
+}
+
+function phaseScopedCodingRequest(requestModel: AnalysisRequestModel) {
+  if (!codingLikeRequest(requestModel)) return false
+  const prompt = normalize(requestModel.rawPrompt)
+  const currentState = normalize(requestModel.projectContextPack.currentState ?? "")
+  return (
+    /\bphase\s+\d+\b/.test(prompt) ||
+    /\bwait for my (?:approval|confirmation)\b/.test(prompt) ||
+    /\bstop\b/.test(prompt) ||
+    /\bcurrent focus:\s*phase\s+\d+\b/.test(currentState)
+  )
+}
+
+function isFeatureExclusionLabel(label: string) {
+  return /\b(?:ads?|advertisements?|cloud sync|accounts?|account creation|social|sharing|external devices?|external apps?|smart water|wearables?|notifications?|reminders?|integrations?)\b/i.test(
+    label
+  )
+}
+
+function isStabilityExpectationLabel(label: string) {
+  return /\b(?:no crashes?|crash[-\s]?free|errors?|exceptions?|bugs?)\b/i.test(label)
+}
+
+function preservedByOmissionPhaseGap(label: string, requestModel: AnalysisRequestModel, answerModel: AnalysisAnswerModel) {
+  if (!phaseScopedCodingRequest(requestModel)) return false
+  if (!(answerModel.hasCodeBlocks || answerModel.mentionedFiles.length > 0)) return false
+  if (isFeatureExclusionLabel(label)) {
+    return !responseContradictsExclusion(label, answerModel.rawAnswer)
+  }
+  if (isStabilityExpectationLabel(label)) {
+    return !/\b(?:crash(?:ed|es)?|runtime error|exception thrown|fatal error|still broken)\b/i.test(answerModel.rawAnswer)
+  }
+  return false
+}
+
+function labelTouchesProjectMemory(label: string, values: string[]) {
+  const normalizedLabel = normalize(label)
+  return values.some((value) => {
+    const signal = normalizeMemorySignal(value)
+    if (!signal) return false
+    return normalizedLabel.includes(signal) || signal.includes(normalizedLabel)
+  })
 }
 
 function hasExplicitMinimumLanguage(text: string) {
@@ -218,9 +284,13 @@ function isImpossibleGapLabel(label: string, requestModel: AnalysisRequestModel,
   const hasPerDayCalories = requestModel.semanticRequirements.some(
     (item) => item.dimension === "calories" && item.scope === "per_day"
   )
+  const protectedAreas = requestModel.projectContextPack.protectedAreas ?? []
+  const stableConstraints = requestModel.projectContextPack.stableConstraints ?? []
+  const acceptedAssumptions = requestModel.projectMemory?.acceptedAssumptions ?? []
   const wantsInstructionArtifact = /\bstep-by-step\b|\binstructions?\b|\bguide\b/.test(requestText)
   const lower = normalize(label)
   if (!lower) return true
+  if (preservedByOmissionPhaseGap(label, requestModel, answerModel)) return true
   if (/\bis present\b/.test(lower)) return true
   if (specificity.broadPromptLikely && /\bdeliverable type\b|\brequested deliverable\b|\bmore clearly\b/.test(lower)) return true
   if (!specificity.explicitVerificationRequested && /\bproof\b|\bverify\b|\bverification\b|\btest steps\b|\bregression\b/.test(lower)) return true
@@ -240,6 +310,14 @@ function isImpossibleGapLabel(label: string, requestModel: AnalysisRequestModel,
   if (requestModel.noSmallTalk && !answerModel.hasSmallTalk && /\bsmall[-\s]?talk\b/.test(lower)) return true
   if (requestModel.styleConstraints.includes("plain inline output") && /\bemail box\b|\bboxed\b|\bcontainer\b/.test(lower)) return true
   if (hasPerDayCalories && /\b1500\b|\b1800\b/.test(lower) && /\bper serving\b|\bcalorie target\b|\bcalories\b/.test(lower)) return true
+  if (
+    !/\bpreserve\b|\bdo not change\b|\bleave untouched\b|\bunrelated\b|\bscope\b|\bconstraint\b|\bassumption\b/i.test(lower) &&
+    (labelTouchesProjectMemory(label, protectedAreas) ||
+      labelTouchesProjectMemory(label, stableConstraints) ||
+      labelTouchesProjectMemory(label, acceptedAssumptions))
+  ) {
+    return true
+  }
   const quantitativeDimension = labelMapsToDimension(label)
   const labelRange = parseNumericRangeFromLabel(label)
   if (quantitativeDimension && labelRange) {
@@ -289,6 +367,13 @@ function shouldDefaultNoRetry(input: {
       judgment.usefulness >= 72 &&
       !/\bproof\b|\bverify\b|\bverification\b|\bexact\b|\bfiles?\b|\blines?\b|\bdiff\b|\bpatch\b/i.test(judgment.label)
   )
+
+  if (
+    input.requestModel.projectMemory?.currentPhase === "validation" ||
+    input.requestModel.projectContextPack.contextStatus === "stale"
+  ) {
+    return actionable.every((judgment) => /\bproof\b|\bverify\b|\bvalidation\b|\btest\b/i.test(judgment.label))
+  }
 
   return actionable.length === 0 && input.gaps.length <= 1
 }

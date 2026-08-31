@@ -1,4 +1,5 @@
 import {
+  assessAnalysisInput,
   buildAttemptIntentFromBefore,
   buildAttemptIntentFromSubmittedPrompt
 } from "@prompt-optimizer/shared"
@@ -11,6 +12,15 @@ import type {
 
 function toOptionalIntent(beforeIntent: AnalyzePromptResponse["intent"] | null | undefined): AnalyzePromptResponse["intent"] | undefined {
   return beforeIntent == null ? undefined : beforeIntent
+}
+
+function buildAnalysisInputMetadata(promptText: string) {
+  const assessment = assessAnalysisInput(promptText)
+  return {
+    analysis_input_size: assessment.analysisInputSize,
+    analysis_mode: assessment.analysisMode,
+    analysis_input_signals: assessment.signals
+  }
 }
 
 export function buildDraftAttemptInput(params: {
@@ -29,6 +39,7 @@ export function buildDraftAttemptInput(params: {
     platform,
     raw_prompt: promptText.trim(),
     optimized_prompt: optimizedPrompt.trim(),
+    ...buildAnalysisInputMetadata(promptText),
     intent: buildAttemptIntentFromBefore(
       promptText,
       optimizedPrompt,
@@ -49,8 +60,9 @@ export function buildSubmittedAttemptPatch(params: {
   return {
     raw_prompt: prompt,
     optimized_prompt: prompt,
+    ...buildAnalysisInputMetadata(prompt),
     intent: buildAttemptIntentFromSubmittedPrompt(prompt, normalizedIntent)
-  } satisfies Partial<Pick<Attempt, "raw_prompt" | "optimized_prompt" | "intent">>
+  } satisfies Partial<Pick<Attempt, "raw_prompt" | "optimized_prompt" | "intent" | "analysis_input_size" | "analysis_mode" | "analysis_input_signals">>
 }
 
 export function shouldReuseLatestSubmittedAttempt(params: {
@@ -82,6 +94,7 @@ export function buildFallbackSubmittedAttemptInput(params: {
     platform,
     raw_prompt: prompt,
     optimized_prompt: prompt,
+    ...buildAnalysisInputMetadata(prompt),
     intent: buildAttemptIntentFromSubmittedPrompt(prompt, normalizedIntent)
   }
 }

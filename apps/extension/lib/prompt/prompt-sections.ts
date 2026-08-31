@@ -23,6 +23,12 @@ function dedupeStrings(values: string[]) {
   return output
 }
 
+function stripEmbeddedAcceptanceTail(value: string) {
+  return value
+    .replace(/\s+(?:Success|Success criteria|Acceptance criteria)\s*:\s*[\s\S]*$/i, "")
+    .trim()
+}
+
 function renderConstraint(constraint: GoalConstraint) {
   switch (constraint.type) {
     case "exclusion":
@@ -54,7 +60,32 @@ function renderPreference(preference: GoalPreference) {
   return normalizeSentence(preference.value ? `${preference.label}: ${preference.value}` : preference.label)
 }
 
-export function buildPromptRenderSections(contract: GoalContract): PromptRenderSection[] {
+function looksTechnicalPrompt(contract: GoalContract) {
+  const combined = [
+    contract.userGoal,
+    contract.deliverableType ?? "",
+    ...contract.hardConstraints.map((item) => item.label),
+    ...contract.outputRequirements
+  ]
+    .join(" ")
+    .toLowerCase()
+
+  return /\b(replit|agent|code|coding|repo|repository|component|route|screen|api|database|schema|auth|frontend|backend|ui|ux|html|css|javascript|typescript|react|next|node|registration|form|dropdown|submit)\b/.test(
+    combined
+  )
+}
+
+export function buildPromptRenderSections(
+  contract: GoalContract,
+  options?: {
+    acceptanceCriteria?: string[]
+  }
+): PromptRenderSection[] {
+  const technicalPrompt = looksTechnicalPrompt(contract)
+  const acceptanceCriteria = technicalPrompt ? dedupeStrings(options?.acceptanceCriteria ?? []) : []
+  const taskGoal = acceptanceCriteria.length
+    ? stripEmbeddedAcceptanceTail(normalizeSentence(contract.userGoal))
+    : normalizeSentence(contract.userGoal)
   const keyRequirements = dedupeStrings([
     ...(contract.deliverableType === "html_file" ? ["Return the result as a full HTML file"] : []),
     ...contract.hardConstraints
@@ -84,10 +115,10 @@ export function buildPromptRenderSections(contract: GoalContract): PromptRenderS
       .map(renderPreference)
   )
 
-  return [
+  const sections: PromptRenderSection[] = [
     {
       title: "Task / goal",
-      items: [normalizeSentence(contract.userGoal)]
+      items: [taskGoal]
     },
     {
       title: "Key requirements",
@@ -98,23 +129,34 @@ export function buildPromptRenderSections(contract: GoalContract): PromptRenderS
       items: constraints
     },
     {
-      title: "Required inputs or ingredients",
+      title: technicalPrompt ? "Implementation guardrails" : "Required inputs or ingredients",
       items: requiredInputs
     },
     {
-      title: "Output format",
+      title: "Acceptance criteria",
+      items: acceptanceCriteria
+    },
+    {
+      title: technicalPrompt ? "Response expectations" : "Output format",
       items: outputFormat
     },
     {
       title: "Quality bar / style guardrails",
       items: style
     }
-  ].filter((section) => section.items.length)
+  ]
+
+  return sections.filter((section) => section.items.length)
 }
 
-export function buildPromptRenderPlan(contract: GoalContract): PromptRenderPlan {
+export function buildPromptRenderPlan(
+  contract: GoalContract,
+  options?: {
+    acceptanceCriteria?: string[]
+  }
+): PromptRenderPlan {
   return {
     contract,
-    sections: buildPromptRenderSections(contract)
+    sections: buildPromptRenderSections(contract, options)
   }
 }

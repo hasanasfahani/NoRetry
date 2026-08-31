@@ -6,28 +6,29 @@ function isVisibleElement(element: HTMLElement) {
 function readRichText(node: HTMLElement | null) {
   if (!node) return ""
 
-  const richContainers = node.querySelectorAll<HTMLElement>(
-    ".markdown, [class*='markdown'], [data-message-author-role], p, li, pre, code"
-  )
+  const roleScoped =
+    node.matches("[data-message-author-role]")
+      ? node
+      : node.querySelector<HTMLElement>('[data-message-author-role="assistant"], [data-message-author-role="user"]')
+  const scopedNode = roleScoped ?? node
+  const markdownNode = scopedNode.querySelector<HTMLElement>(".markdown, [class*='markdown']")
+  const readableNode = markdownNode ?? scopedNode
 
-  if (richContainers.length) {
-    const joined = Array.from(richContainers)
-      .map((element) => element.innerText.trim())
-      .filter(Boolean)
-      .join("\n")
-      .trim()
+  return readableNode.innerText.trim() || readableNode.textContent?.trim() || ""
+}
 
-    if (joined) return joined
-  }
-
-  return node.innerText.trim()
+function expandToConversationTurn(node: HTMLElement) {
+  return node.closest<HTMLElement>('article[data-testid^="conversation-turn-"]') ?? node
 }
 
 export function findLatestChatGptAssistantMessage() {
   const exactMatches = Array.from(document.querySelectorAll<HTMLElement>('[data-message-author-role="assistant"]'))
     .filter((node) => !node.closest("#prompt-optimizer-root"))
     .filter(isVisibleElement)
-  if (exactMatches.length) return exactMatches.at(-1) ?? null
+  if (exactMatches.length) {
+    const latest = exactMatches.at(-1)
+    return latest ? expandToConversationTurn(latest) : null
+  }
 
   const articleMatches = Array.from(document.querySelectorAll<HTMLElement>('article[data-testid^="conversation-turn-"]'))
     .filter((node) => !node.closest("#prompt-optimizer-root"))
@@ -46,7 +47,10 @@ export function findLatestChatGptUserMessage() {
   const exactMatches = Array.from(document.querySelectorAll<HTMLElement>('[data-message-author-role="user"]'))
     .filter((node) => !node.closest("#prompt-optimizer-root"))
     .filter(isVisibleElement)
-  if (exactMatches.length) return exactMatches.at(-1) ?? null
+  if (exactMatches.length) {
+    const latest = exactMatches.at(-1)
+    return latest ? expandToConversationTurn(latest) : null
+  }
 
   const articleMatches = Array.from(document.querySelectorAll<HTMLElement>('article[data-testid^="conversation-turn-"]'))
     .filter((node) => !node.closest("#prompt-optimizer-root"))

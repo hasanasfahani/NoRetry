@@ -1,8 +1,20 @@
 import type { AfterAnalysisResult, ResponsePreprocessorOutput, Stage1Output, Stage2Output, VerdictOutput } from "@prompt-optimizer/shared/src/schemas"
+import { hashDeepAnalysisV2Text, type DeepAnalysisV2Request, type DeepAnalysisV2Result } from "../deep-analysis-v2-contract"
 import type { GoalContract } from "../../goal/types"
+import type { ImportedProjectContextRecord } from "../../core/project-context"
+import type { StructuredProjectMemory } from "../../session/project-memory"
+import type { ProjectSettingsRecord } from "../../session/project-settings"
 import { normalizeGoalContract } from "../../goal/goal-normalizer"
 import type { ReviewContract as NormalizedReviewContract } from "../contracts"
 import { buildAnalysisPromptSection } from "../analysis-prompt-section"
+import { mapDeepAnalysisV2ToAfterAnalysisResult } from "../deep-analysis-v2-result-adapter"
+import {
+  getDeepAnalysisV2RolloutMode,
+  shouldApplyDeepAnalysisV2,
+  shouldRunDeepAnalysisV2,
+  type DeepAnalysisV2RolloutMode
+} from "../deep-analysis-v2-rollout"
+import { deriveReviewPhaseProgress, type ReviewPhaseProgress } from "../phase-progress"
 import { buildReviewContract } from "../review-contract-builder"
 import type { ReviewTarget } from "../types"
 import { isAnswerQualityTask, looksLikeAdviceRequestPrompt, looksLikeCreationRequestPrompt } from "./review-task-type"
@@ -18,6 +30,9 @@ export type ReviewAnalysisRunner = (input: ReviewAnalysisInput) => Promise<After
 export type ReviewAnalysisContext = {
   goalContract: GoalContract | null
   reviewContract: NormalizedReviewContract | null
+  deepAnalysisV2?: DeepAnalysisV2Result | null
+  deepAnalysisV2RolloutMode?: DeepAnalysisV2RolloutMode
+  deepAnalysisV2Applied?: boolean
   chosenChecklistSource: "decomposed" | "prompt_artifact" | "informational_generic" | "fallback_structured" | "backend"
   sanitizationChanges: string[]
 }
@@ -25,9 +40,11 @@ export type ReviewAnalysisContext = {
 type CreateReviewAnalysisRunnerInput = {
   analyzeAfterAttempt: (input: {
     attempt: ReviewTarget["attempt"]
-    response_summary: unknown
+    response_summary: ResponsePreprocessorOutput
     response_text_fallback: string
     deep_analysis: boolean
+    baseline_acceptance_criteria: string[]
+    baseline_acceptance_checklist: AfterAnalysisResult["acceptance_checklist"]
     project_context: string
     current_state: string
     error_summary: string
@@ -39,10 +56,13 @@ type CreateReviewAnalysisRunnerInput = {
     analysis: AfterAnalysisResult,
     responseMessageId?: string | null
   ) => Promise<unknown>
-  preprocessResponse: (responseText: string) => unknown
+  preprocessResponse: (responseText: string) => ResponsePreprocessorOutput
   getProjectMemoryContext: () => {
     projectContext: string
     currentState: string
+    importedContext?: ImportedProjectContextRecord | null
+    structuredMemory?: StructuredProjectMemory | null
+    settings?: ProjectSettingsRecord | null
   }
   collectChangedFilesSummary: () => string[]
   collectVisibleErrorSummary: () => string
@@ -51,6 +71,34 @@ type CreateReviewAnalysisRunnerInput = {
     intent: "DEBUG" | "BUILD" | "REFACTOR" | "EXPLAIN" | "DESIGN_UI" | "OTHER"
     answers: Record<string, string | string[]>
   }) => Promise<{ improved_prompt: string }>
+  interpretNextMovePrompt?: (input: {
+    prompt: string
+    answers: Record<string, string>
+    taskType: ReviewTarget["taskType"]
+  }) => Promise<string | null>
+  analyzeDeepAnalysisV2?: (input: DeepAnalysisV2Request) => Promise<DeepAnalysisV2Result>
+  getDeepAnalysisV2PreflightResult?: (input: {
+    target: ReviewTarget
+    promptText: string
+    projectContext: string
+    currentState: string
+  }) => DeepAnalysisV2Result | null
+  getDeepAnalysisV2ContextOverride?: (input: {
+    target: ReviewTarget
+    promptText: string
+    projectContext: string
+    currentState: string
+  }) => {
+    promptText: string
+    projectContext?: string
+    currentState?: string
+    source?: string
+  } | null
+  transformDeepAnalysisV2Result?: (input: {
+    analysis: DeepAnalysisV2Result
+    target: ReviewTarget
+    promptText: string
+  }) => DeepAnalysisV2Result
 }
 
 type RuntimeSignal = {
@@ -59,13 +107,414 @@ type RuntimeSignal = {
   verified: boolean
 }
 
+function traceDeepAnalysisV2(event: string, detail: Record<string, unknown> = {}) {
+  console.info("[reeva AI][DeepAnalysisV2Trace]", {
+    event,
+    ...detail
+  })
+}
+
+function promptTextForTarget(target: ReviewTarget) {
+  return target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || ""
+}
+
+function buildDeepAnalysisV2Request(input: {
+  target: ReviewTarget
+  promptText: string
+  projectContext: string
+  currentState: string
+}): DeepAnalysisV2Request {
+  return {
+    promptText: input.promptText,
+    responseText: input.target.responseText,
+    projectContext: input.projectContext,
+    currentState: input.currentState,
+    analysisModeHint: "standard",
+    taskType: input.target.taskType,
+    surface: input.target.attempt.platform,
+    threadId: input.target.threadIdentity,
+    messageId: input.target.responseIdentity,
+    submittedPromptHash: hashDeepAnalysisV2Text(input.promptText),
+    assistantAnswerHash: hashDeepAnalysisV2Text(input.target.responseText)
+  }
+}
+
+function localCaptureTextLengths(input: {
+  promptText: string
+  responseText: string
+}) {
+  return {
+    submittedPromptLength: input.promptText.trim().length,
+    assistantAnswerLength: input.responseText.trim().length
+  }
+}
+
+function deepAnalysisMissingInputClaimText(analysis: DeepAnalysisV2Result) {
+  return [
+    analysis.userExplanation,
+    analysis.recommendedNextMove,
+    analysis.generatedPrompt,
+    analysis.assistantSuggestedNextMove,
+    ...analysis.requirements,
+    ...analysis.nextStepRequirements,
+    ...analysis.actionableMissingItems,
+    ...analysis.blockedScope,
+    ...analysis.classificationAudit,
+    ...analysis.requirementMatches.flatMap((match) => [
+      match.requirementText,
+      ...match.evidence,
+      match.note
+    ])
+  ]
+    .filter(Boolean)
+    .join("\n")
+}
+
+function claimsMissingAssistantAnswer(text: string) {
+  return (
+    /\bno\s+(?:actual\s+)?assistant\s+(?:answer|response)\s+(?:was\s+)?provided\b/i.test(text) ||
+    /\bassistant\s+(?:answer|response)\s+(?:was\s+)?(?:not\s+)?(?:provided|missing|unavailable)\b/i.test(text) ||
+    /\bprovide\b[\s\S]{0,80}\b(?:assistant'?s?\s+)?(?:response|answer)\b/i.test(text) ||
+    /\bwithout\s+(?:any\s+)?(?:assistant\s+)?(?:answer|response)\s+to\s+evaluate\b/i.test(text) ||
+    /\bcannot\s+(?:assess|evaluate|compare|determine)[\s\S]{0,120}\b(?:assistant\s+)?(?:answer|response|content)\b/i.test(text) ||
+    /\bmissing\s+required\s+inputs?\b/i.test(text)
+  )
+}
+
+function claimsMissingUserPrompt(text: string) {
+  return (
+    /\bno\s+(?:actual\s+)?(?:user|submitted|original)\s+prompt\s+(?:was\s+)?(?:actually\s+)?(?:submitted|provided)\b/i.test(text) ||
+    /\b(?:user|submitted|original)\s+prompt\s+(?:was\s+)?(?:not\s+)?(?:provided|missing|unavailable)\b/i.test(text) ||
+    /\bprovide\b[\s\S]{0,80}\b(?:original\s+)?user\s+prompt\b/i.test(text) ||
+    /\bonly\s+(?:the\s+)?(?:schema|rules|schema\/rules|schema\s+and\s+rules)[\s\S]{0,80}\b(?:provided|json)\b/i.test(text) ||
+    /\bwithout\s+(?:the\s+)?actual\s+(?:user\s+)?prompt\b/i.test(text) ||
+    /\bneed\s+the\s+actual\s+content\s+to\s+compare\b/i.test(text) ||
+    /\binput\.checklistItems\b/i.test(text) ||
+    /\bmissing\s+required\s+inputs?\b/i.test(text)
+  )
+}
+
+function normalizeDeepAnalysisV2LocalCaptureConsistency(input: {
+  analysis: DeepAnalysisV2Result
+  request: DeepAnalysisV2Request
+}) {
+  const lengths = localCaptureTextLengths({
+    promptText: input.request.promptText,
+    responseText: input.request.responseText
+  })
+  const analysisWithLengths: DeepAnalysisV2Result = {
+    ...input.analysis,
+    submittedPromptLength: lengths.submittedPromptLength,
+    assistantAnswerLength: lengths.assistantAnswerLength
+  }
+  const claimText = deepAnalysisMissingInputClaimText(input.analysis)
+  const contradictsAssistantCapture =
+    lengths.assistantAnswerLength >= 24 && claimsMissingAssistantAnswer(claimText)
+  const contradictsPromptCapture =
+    lengths.submittedPromptLength >= 24 && claimsMissingUserPrompt(claimText)
+
+  if (!contradictsAssistantCapture && !contradictsPromptCapture) {
+    return {
+      analysis: analysisWithLengths,
+      contradicted: false,
+      reasons: [] as string[]
+    }
+  }
+
+  const reasons = [
+    contradictsAssistantCapture ? "assistant_answer_capture_present" : "",
+    contradictsPromptCapture ? "submitted_prompt_capture_present" : ""
+  ].filter(Boolean)
+  const message =
+    "Deep Analysis v2 returned an inconsistent missing-input result, but reeva AI captured the submitted prompt and assistant answer. Retry the analysis instead of acting on this result."
+  const failureReason = `provider_missing_input_contradicted_by_local_capture: ${reasons.join(", ")}`
+
+  return {
+    analysis: {
+      ...analysisWithLengths,
+      analysisState: "v2_unavailable" as const,
+      overallStatus: "unavailable" as const,
+      confidence: "low" as const,
+      userExplanation: message,
+      recommendedNextMove: message,
+      assistantSuggestedNextMove: null,
+      nextStepSource: "unavailable" as const,
+      nextStepRequirements: [],
+      actionableMissingItems: [],
+      blockedScope: ["Do not use this review result until Deep Analysis is retried."],
+      promptIntent: "review_before_advancing" as const,
+      generatedPrompt: "",
+      requirements: [],
+      requirementMatches: [],
+      classificationAudit: [
+        ...analysisWithLengths.classificationAudit,
+        failureReason
+      ].slice(0, 8),
+      providerMetadata: {
+        ...analysisWithLengths.providerMetadata,
+        failureMessage: [
+          analysisWithLengths.providerMetadata.failureMessage,
+          failureReason
+        ].filter(Boolean).join(" | ")
+      }
+    },
+    contradicted: true,
+    reasons
+  }
+}
+
+function deepAnalysisV2MatchesTarget(input: {
+  analysis: DeepAnalysisV2Result
+  target: ReviewTarget
+  promptText: string
+}) {
+  const promptHash = hashDeepAnalysisV2Text(input.promptText)
+  const answerHash = hashDeepAnalysisV2Text(input.target.responseText)
+  if (input.analysis.submittedPromptHash && input.analysis.submittedPromptHash !== promptHash) return false
+  if (input.analysis.assistantAnswerHash && input.analysis.assistantAnswerHash !== answerHash) return false
+  if (input.analysis.threadId && input.analysis.threadId !== input.target.threadIdentity) return false
+  if (input.analysis.messageId && input.target.responseIdentity && input.analysis.messageId !== input.target.responseIdentity) return false
+  return true
+}
+
+function buildLocalDeepAnalysisV2Identity(input: {
+  target: ReviewTarget
+  promptText: string
+  reason: string
+}) {
+  const now = new Date().toISOString()
+  const promptHash = hashDeepAnalysisV2Text(input.promptText)
+  const answerHash = hashDeepAnalysisV2Text(input.target.responseText)
+
+  return {
+    now,
+    promptHash,
+    answerHash,
+    analysisId: hashDeepAnalysisV2Text([
+      "deep_analysis_v2",
+      input.reason,
+      input.target.threadIdentity,
+      input.target.responseIdentity,
+      promptHash,
+      answerHash,
+      now
+    ].join("::"))
+  }
+}
+
+function buildLargeInputCheckpointPrompt(input: {
+  phaseProgress?: ReviewPhaseProgress | null
+} = {}) {
+  const phaseProgress = input.phaseProgress ?? null
+  const activePhase = phaseProgress?.activePhaseIndex !== null && phaseProgress?.activePhaseIndex !== undefined
+    ? phaseProgress.phases[phaseProgress.activePhaseIndex] ?? null
+    : null
+  const nextPhase = phaseProgress?.nextPhaseIndex !== null && phaseProgress?.nextPhaseIndex !== undefined
+    ? phaseProgress.phases[phaseProgress.nextPhaseIndex] ?? null
+    : null
+  const knownPhaseSection = phaseProgress?.hasPhasePlan
+    ? [
+        "Known PRD phase context:",
+        activePhase ? `- Current phase: ${activePhase.title}` : "",
+        activePhase?.goal ? `- Current phase goal: ${activePhase.goal}` : "",
+        nextPhase ? `- Next unstarted phase from the PRD: ${nextPhase.title}` : "",
+        nextPhase?.goal ? `- Next phase goal: ${nextPhase.goal}` : "",
+        nextPhase
+          ? "- If the current phase is complete and you did not already provide next-step details, use the next unstarted PRD phase above."
+          : "- If this is the final phase, say there is no later PRD phase and provide final validation/launch readiness details only."
+      ].filter(Boolean)
+    : []
+
+  return [
+    "Before we move to the next phase, confirm whether the current phase is fully complete.",
+    knownPhaseSection.length ? "" : "",
+    ...knownPhaseSection,
+    "",
+    "Check the current phase against the original PRD and answer:",
+    "",
+    "1. Completed requirements",
+    "- List each requirement completed",
+    "- Include concrete evidence for each",
+    "",
+    "2. Missing or incomplete requirements",
+    "- List anything not completed yet",
+    "- Explain what remains",
+    "",
+    "3. Out-of-scope confirmation",
+    "- Confirm you did not start later phases or forbidden scope",
+    "",
+    "4. Validation proof",
+    "- Confirm whether acceptance criteria and validation proof were met",
+    "- If not, state exactly what proof is still needed",
+    "",
+    "5. Next step details",
+    "If the current phase is complete, share the full detailed requirements for the next step/phase:",
+    "- phase name",
+    "- goal",
+    "- build scope",
+    "- out of scope",
+    "- data/state needed",
+    "- deliverables",
+    "- acceptance criteria",
+    "- validation proof expected",
+    "",
+    "Do not implement the next phase yet.",
+    "Wait for my confirmation."
+  ].join("\n")
+}
+
+function buildLargeInputCheckpointDeepAnalysisV2(input: {
+  target: ReviewTarget
+  promptText: string
+  phaseProgress?: ReviewPhaseProgress | null
+}): DeepAnalysisV2Result {
+  const identity = buildLocalDeepAnalysisV2Identity({
+    target: input.target,
+    promptText: input.promptText,
+    reason: "large_input_checkpoint"
+  })
+  const generatedPrompt = buildLargeInputCheckpointPrompt({
+    phaseProgress: input.phaseProgress ?? null
+  })
+  const activePhase =
+    input.phaseProgress?.activePhaseIndex !== null && input.phaseProgress?.activePhaseIndex !== undefined
+      ? input.phaseProgress.phases[input.phaseProgress.activePhaseIndex] ?? null
+      : null
+  const nextPhase =
+    input.phaseProgress?.nextPhaseIndex !== null && input.phaseProgress?.nextPhaseIndex !== undefined
+      ? input.phaseProgress.phases[input.phaseProgress.nextPhaseIndex] ?? null
+      : null
+
+  return {
+    version: "deep-analysis-v2.v1",
+    analysisId: identity.analysisId,
+    analysisVersion: "deep_analysis_v2",
+    analysisState: "v2_ready",
+    analysisMode: "large_input_checkpoint",
+    threadId: input.target.threadIdentity,
+    messageId: input.target.responseIdentity,
+    submittedPromptHash: identity.promptHash,
+    assistantAnswerHash: identity.answerHash,
+    surface: input.target.attempt.platform,
+    createdAt: identity.now,
+    completedAt: identity.now,
+    requirements: [
+      {
+        id: "large_input_phase_checkpoint",
+        text: activePhase
+          ? `Confirm ${activePhase.title} against the PRD before implementing more.`
+          : "Confirm the current phase against the PRD before implementing more.",
+        source: "submitted_prompt"
+      }
+    ],
+    requirementMatches: [
+      {
+        requirementId: "large_input_phase_checkpoint",
+        requirementText: activePhase
+          ? `Confirm ${activePhase.title} against the PRD before implementing more.`
+          : "Confirm the current phase against the PRD before implementing more.",
+        status: "unclear",
+        evidence: [],
+        note: "The submitted prompt is large enough that the next step should be a compact phase checkpoint."
+      }
+    ],
+    ignoredExternalValidation: [],
+    actionableMissingItems: [],
+    phaseAdvanceBasis: "large_input_checkpoint",
+    phaseCompletionClaimed: false,
+    classificationAudit: [],
+    overallStatus: "needs_confirmation",
+    assistantSuggestedNextMove: null,
+    recommendedNextMove:
+      nextPhase
+        ? `Ask the assistant to confirm current phase completion, validation proof, and detailed requirements for ${nextPhase.title} before implementing more.`
+        : "Ask the assistant to confirm current phase completion, validation proof, and detailed next-step requirements before implementing more.",
+    nextStepSource: "system_inferred",
+    nextStepRequirements: [],
+    blockedScope: ["next phase implementation"],
+    promptIntent: "confirm_missing_requirements",
+    generatedPrompt,
+    confidence: "high",
+    userExplanation:
+      "This is a large PRD-style input, so Deep Analysis v2 is using a checkpoint prompt instead of sending the full prompt through normal analysis.",
+    providerMetadata: {
+      provider: "none",
+      latencyMs: 0,
+      timedOut: false,
+      usedFallback: false,
+      providerAttempted: "none",
+      failureMessage: "Large input checkpoint generated without a provider call."
+    }
+  }
+}
+
+function buildLocalUnavailableDeepAnalysisV2(input: {
+  target: ReviewTarget
+  promptText: string
+  reason: string
+  message: string
+  state?: "v2_unavailable" | "stale"
+}): DeepAnalysisV2Result {
+  const identity = buildLocalDeepAnalysisV2Identity({
+    target: input.target,
+    promptText: input.promptText,
+    reason: input.reason
+  })
+  return {
+    version: "deep-analysis-v2.v1",
+    analysisId: identity.analysisId,
+    analysisVersion: "deep_analysis_v2",
+    analysisState: input.state ?? "v2_unavailable",
+    analysisMode: "standard",
+    threadId: input.target.threadIdentity,
+    messageId: input.target.responseIdentity,
+    submittedPromptHash: identity.promptHash,
+    assistantAnswerHash: identity.answerHash,
+    surface: input.target.attempt.platform,
+    createdAt: identity.now,
+    completedAt: identity.now,
+    requirements: [],
+    requirementMatches: [],
+    ignoredExternalValidation: [],
+    actionableMissingItems: [],
+    phaseAdvanceBasis: "",
+    phaseCompletionClaimed: false,
+    classificationAudit: [],
+    overallStatus: "unavailable",
+    assistantSuggestedNextMove: null,
+    recommendedNextMove: input.message,
+    nextStepSource: "unavailable",
+    nextStepRequirements: [],
+    blockedScope: [],
+    promptIntent: "review_before_advancing",
+    generatedPrompt:
+      "Review the previous answer against my original requirement. Check if it stayed within scope, avoided backend/storage work, confirmed completion, and suggested the next phase.",
+    confidence: "low",
+    userExplanation: input.message,
+    providerMetadata: {
+      provider: "none",
+      timedOut: false,
+      usedFallback: false,
+      fallbackReason: "provider_error",
+      failureMessage: `${input.reason}: ${input.message}`
+    }
+  }
+}
+
 type DecomposedChecklistEntry = {
   label: string
   status: "met" | "not_sure" | "missed"
 }
 
+type ReviewPromptStrategy = AfterAnalysisResult["prompt_strategy"]
+
+function normalizeReviewPromptStrategy(strategy: ReviewPromptStrategy | "retry_cleanly"): ReviewPromptStrategy {
+  return strategy === "retry_cleanly" ? "fix_missing" : strategy
+}
+
 const REVIEW_ANALYSIS_CONTEXT_SYMBOL = Symbol("review-analysis-context")
 const REVIEW_NEXT_MOVE_REFINE_TIMEOUT_MS = 2500
+const REVIEW_NEXT_MOVE_INTERPRETER_TIMEOUT_MS = 30000
 
 const GOAL_STOPWORDS = new Set([
   "the",
@@ -1710,7 +2159,7 @@ function deriveDeepStatusFromChecklist(
     return {
       status: "WRONG_DIRECTION" as const,
       confidence: "low" as const,
-      promptStrategy: "retry_cleanly" as const
+      promptStrategy: "fix_missing" as const
     }
   }
 
@@ -1871,6 +2320,15 @@ function buildGroundedDeepResult(
     status: derived.status,
     taskType: target.taskType
   })
+  const safePromptStrategy = normalizeReviewPromptStrategy(promptStrategy)
+  const nextPromptExplanation =
+    derived.status === "SUCCESS"
+      ? "The visible checklist is confirmed; use this only to validate before moving on."
+      : "The next prompt focuses only on the unresolved checklist items."
+  const expectedOutcome =
+    derived.status === "SUCCESS"
+      ? "The assistant provides final validation evidence or confirms no retry is needed."
+      : "The assistant addresses the missing or unclear requirements without expanding scope."
 
   return {
     ...result,
@@ -1880,7 +2338,9 @@ function buildGroundedDeepResult(
     findings: [...normalizedGoalNote, ...groundedFindings].filter(Boolean).slice(0, 3),
     issues: proofBackedMissing.slice(0, 6),
     next_prompt: nextPrompt,
-    prompt_strategy: promptStrategy,
+    prompt_strategy: safePromptStrategy,
+    next_prompt_explanation: nextPromptExplanation,
+    expected_outcome: expectedOutcome,
     stage_1: {
       ...result.stage_1,
       claimed_evidence: checkedArtifacts,
@@ -1903,7 +2363,9 @@ function buildGroundedDeepResult(
     },
     next_prompt_output: {
       next_prompt: nextPrompt,
-      prompt_strategy: promptStrategy
+      prompt_strategy: safePromptStrategy,
+      next_prompt_explanation: nextPromptExplanation,
+      expected_outcome: expectedOutcome
     },
     acceptance_checklist: mappedChecklist
   }
@@ -2018,10 +2480,10 @@ function buildDebugContinuationResult(
 ): AfterAnalysisResult {
   const promptText = target.attempt.raw_prompt || target.attempt.optimized_prompt || target.attempt.intent.goal || ""
   const runtimeSignals = buildExtensionRuntimeSignals(promptText, target.responseText)
-  const checklist =
+  const checklist: AfterAnalysisResult["acceptance_checklist"] =
     runtimeSignals?.map((signal) => ({
       label: signal.label,
-      status: signal.verified ? "met" : "not_sure"
+      status: signal.verified ? ("met" as const) : ("not_sure" as const)
     })) ?? buildGenericDebugChecklist(target.responseText)
 
   const missingRuntime = checklist.filter((item) => item.status !== "met").map((item) => `${item.label} is still unverified.`)
@@ -2063,6 +2525,8 @@ function buildDebugContinuationResult(
     issues: missingRuntime.length ? missingRuntime.slice(0, 5) : result.issues,
     next_prompt: nextPrompt,
     prompt_strategy: "narrow_scope",
+    next_prompt_explanation: "Ask for runtime proof before applying more changes.",
+    expected_outcome: "The assistant confirms the live state and narrows the next diagnostic step.",
     stage_1: {
       ...result.stage_1,
       claimed_evidence: codeEvidence.length ? codeEvidence : result.stage_1.claimed_evidence,
@@ -2085,7 +2549,9 @@ function buildDebugContinuationResult(
     },
     next_prompt_output: {
       next_prompt: nextPrompt,
-      prompt_strategy: "narrow_scope"
+      prompt_strategy: "narrow_scope",
+      next_prompt_explanation: "Ask for runtime proof before applying more changes.",
+      expected_outcome: "The assistant confirms the live state and narrows the next diagnostic step."
     },
     acceptance_checklist: checklist
   }
@@ -2095,13 +2561,16 @@ async function buildInformationalReviewResult(input: {
   target: ReviewTarget
   mode: "quick" | "deep"
   responseSummary: ResponsePreprocessorOutput
+  importedContext?: ImportedProjectContextRecord | null
+  projectMemory?: StructuredProjectMemory | null
+  projectSettings?: ProjectSettingsRecord | null
   refineNextMovePrompt?: (input: {
     prompt: string
     answers: Record<string, string>
     taskType: ReviewTarget["taskType"]
   }) => Promise<string | null>
 }): Promise<AfterAnalysisResult> {
-  const { target, mode, responseSummary, refineNextMovePrompt } = input
+  const { target, mode, responseSummary, importedContext, projectMemory, projectSettings, refineNextMovePrompt } = input
   const isPromptArtifact = isGeneratedPromptArtifact({
     promptText: target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || "",
     responseText: target.responseText,
@@ -2142,11 +2611,12 @@ async function buildInformationalReviewResult(input: {
     Boolean(normalizedReviewContract) &&
     ((normalizedReviewContract?.requirements.length ?? 0) >= 3 || softwareLikePrompt || broadExplanatoryPrompt)
 
-  if (useNormalizedReviewContract && normalizedReviewContract) {
+  if (useNormalizedReviewContract && normalizedReviewContract && goalContract) {
     return buildInformationalReviewResultFromContract({
       target,
       mode,
       responseSummary,
+      projectMemory,
       reviewContract: normalizedReviewContract,
       goalContract,
       refineNextMovePrompt
@@ -2527,29 +2997,71 @@ async function buildInformationalReviewResult(input: {
     taskFamily: target.taskType,
     goalContract,
     reviewContract: normalizedReviewContract,
+    importedContext: importedContext ?? null,
+    projectMemory: projectMemory ?? null,
+    projectSettings: projectSettings ?? null,
     attemptAcceptanceCriteria: target.attempt.intent.acceptance_criteria ?? [],
     refineNextMovePrompt
   })
   const followUpPrompt = analysisPromptSection.promptText
+  const promptStrategy: ReviewPromptStrategy = success ? "validate" : "fix_missing"
+  const nextPromptExplanation = success
+    ? "Use this prompt to validate the answer before adding more scope."
+    : "Use this prompt to address the remaining visible gaps without widening scope."
+  const expectedOutcome = success
+    ? "The assistant provides concrete confirmation or validation evidence."
+    : "The assistant fixes or explains the missing requirements only."
 
   return {
     status,
     confidence,
+    popup_state: success ? "SAFE_TO_PROCEED" : "NEEDS_REFINEMENT",
+    review_mode_label: mode === "deep" ? "Deep review" : "Quick read",
+    review_mode_explainer: "Reviews the visible answer against the submitted request.",
+    confidence_label: confidence === "high" ? "High" : confidence === "medium" ? "Medium" : "Low",
+    confidence_trend: "flat",
     confidence_reason: verdict.confidence_reason,
+    confidence_reasons: [verdict.confidence_reason].filter(Boolean).slice(0, 3),
     inspection_depth: mode === "deep" ? "targeted_text" : "summary_only",
+    decision: success ? "Safe to proceed" : "Needs refinement",
+    decision_display_label: success ? "Looks good" : "Needs refinement",
+    delta_from_quick: "",
+    recommended_action: success ? "VALIDATE_FIRST" : "RESTART_WITH_PROMPT",
+    why_bullets: findings.slice(0, 3),
+    next_action: success ? "Validate before adding scope." : "Address the visible gaps.",
     findings,
     issues,
     next_prompt: followUpPrompt,
-    prompt_strategy: success ? "validate" : "retry_cleanly",
+    prompt_strategy: promptStrategy,
+    next_prompt_explanation: nextPromptExplanation,
+    expected_outcome: expectedOutcome,
     stage_1: stage1,
     stage_2: stage2,
     verdict,
     next_prompt_output: {
       next_prompt: analysisPromptSection.copyPromptText,
-      prompt_strategy: success ? "validate" : "retry_cleanly"
+      prompt_strategy: promptStrategy,
+      next_prompt_explanation: nextPromptExplanation,
+      expected_outcome: expectedOutcome
     },
     acceptance_checklist: checklist,
+    checked_artifact_types: [],
+    checked_artifacts: stage2.addressed_criteria.slice(0, 8),
+    unchecked_artifacts: stage2.missing_criteria.slice(0, 8),
+    blocked_or_unproven_items: issues.slice(0, 6),
+    deep_criterion_verifications: [],
+    contradiction_count: 0,
+    review_contract: {
+      version: "v1",
+      target_signature: "",
+      goal: promptText || "Review answer",
+      criteria: []
+    },
     response_summary: responseSummary,
+    helpful_feedback: {
+      helpful: null,
+      next_prompt_success: null
+    },
     used_fallback_intent: false,
     token_usage_total: 0
   }
@@ -2580,7 +3092,43 @@ export function getReviewAnalysisContext(result: AfterAnalysisResult): ReviewAna
   const context = (result as AfterAnalysisResult & {
     [REVIEW_ANALYSIS_CONTEXT_SYMBOL]?: ReviewAnalysisContext
   })[REVIEW_ANALYSIS_CONTEXT_SYMBOL]
-  return context ?? null
+  if (context) return context
+  const deepAnalysisV2 = (result as AfterAnalysisResult & {
+    deep_analysis_v2_snapshot?: DeepAnalysisV2Result
+  }).deep_analysis_v2_snapshot
+  if (deepAnalysisV2) {
+    return {
+      goalContract: null,
+      reviewContract: null,
+      deepAnalysisV2,
+      deepAnalysisV2RolloutMode: "on",
+      deepAnalysisV2Applied: true,
+      chosenChecklistSource: "backend",
+      sanitizationChanges: []
+    }
+  }
+  return null
+}
+
+function attachDeepAnalysisV2ShadowContext(input: {
+  result: AfterAnalysisResult
+  deepAnalysisV2: DeepAnalysisV2Result | null
+  rolloutMode: DeepAnalysisV2RolloutMode
+}) {
+  if (!input.deepAnalysisV2 || input.rolloutMode !== "shadow") {
+    return input.result
+  }
+
+  const existingContext = getReviewAnalysisContext(input.result)
+  return attachReviewAnalysisContext(input.result, {
+    goalContract: existingContext?.goalContract ?? null,
+    reviewContract: existingContext?.reviewContract ?? null,
+    deepAnalysisV2: input.deepAnalysisV2,
+    deepAnalysisV2RolloutMode: input.rolloutMode,
+    deepAnalysisV2Applied: false,
+    chosenChecklistSource: existingContext?.chosenChecklistSource ?? "backend",
+    sanitizationChanges: existingContext?.sanitizationChanges ?? []
+  })
 }
 
 async function buildInformationalReviewResultFromContract(input: {
@@ -2589,13 +3137,16 @@ async function buildInformationalReviewResultFromContract(input: {
   responseSummary: ResponsePreprocessorOutput
   reviewContract: NormalizedReviewContract
   goalContract: GoalContract
+  importedContext?: ImportedProjectContextRecord | null
+  projectMemory?: StructuredProjectMemory | null
+  projectSettings?: ProjectSettingsRecord | null
   refineNextMovePrompt?: (input: {
     prompt: string
     answers: Record<string, string>
     taskType: ReviewTarget["taskType"]
   }) => Promise<string | null>
 }): Promise<AfterAnalysisResult> {
-  const { target, mode, responseSummary, reviewContract, goalContract, refineNextMovePrompt } = input
+  const { target, mode, responseSummary, reviewContract, goalContract, importedContext, projectMemory, projectSettings, refineNextMovePrompt } = input
   const topFailures = reviewContract.topFailures.slice(0, 8)
   const topPasses = reviewContract.topPasses.slice(0, 3)
   const success = topFailures.length === 0
@@ -2631,6 +3182,9 @@ async function buildInformationalReviewResultFromContract(input: {
     taskFamily: target.taskType,
     goalContract,
     reviewContract,
+    importedContext: importedContext ?? null,
+    projectMemory: projectMemory ?? null,
+    projectSettings: projectSettings ?? null,
     attemptAcceptanceCriteria: target.attempt.intent.acceptance_criteria ?? [],
     refineNextMovePrompt
   })
@@ -2641,11 +3195,19 @@ async function buildInformationalReviewResultFromContract(input: {
     promptNote: analysisPromptSection.promptNote,
     copyPromptText: analysisPromptSection.copyPromptText,
     nextMoveShort: analysisPromptSection.nextMoveShort,
+    phaseProgress: analysisPromptSection.debug.smart.phaseProgress ?? null,
     analysisDebug: analysisPromptSection.debug
   }
   const followUpPrompt = success
     ? analysisPromptSection.copyPromptText
     : analysisPromptSection.copyPromptText
+  const promptStrategy: ReviewPromptStrategy = success ? "validate" : "fix_missing"
+  const nextPromptExplanation = success
+    ? "Use this prompt to validate the answer before adding more scope."
+    : "Use this prompt to resolve the decomposed requirements that are still failing."
+  const expectedOutcome = success
+    ? "The assistant confirms the answer remains aligned with the request."
+    : "The assistant addresses only the failed or contradicted requirements."
 
   const stage1: Stage1Output = {
     assistant_action_summary:
@@ -2701,24 +3263,57 @@ async function buildInformationalReviewResultFromContract(input: {
   return attachReviewAnalysisContext({
     status,
     confidence: reviewContract.confidence,
+    popup_state: success ? "SAFE_TO_PROCEED" : "NEEDS_REFINEMENT",
+    review_mode_label: mode === "deep" ? "Deep review" : "Quick read",
+    review_mode_explainer: "Reviews the visible answer against decomposed request requirements.",
+    confidence_label:
+      reviewContract.confidence === "high" ? "High" : reviewContract.confidence === "medium" ? "Medium" : "Low",
+    confidence_trend: "flat",
     confidence_reason: confidenceReason,
+    confidence_reasons: [confidenceReason].filter(Boolean).slice(0, 3),
     inspection_depth: mode === "deep" ? "targeted_text" : "summary_only",
+    decision: success ? "Safe to proceed" : contradictionCount > 0 ? "Needs refinement" : "Not enough proof",
+    decision_display_label: success ? "Looks good" : "Needs refinement",
+    delta_from_quick: "",
+    recommended_action: success ? "VALIDATE_FIRST" : "RESTART_WITH_PROMPT",
+    why_bullets: findings.slice(0, 3),
+    next_action: success ? "Validate before adding scope." : "Address the failed requirements.",
     findings,
     issues,
     next_prompt: followUpPrompt,
-    prompt_strategy: success ? "validate" : "retry_cleanly",
+    prompt_strategy: promptStrategy,
+    next_prompt_explanation: nextPromptExplanation,
+    expected_outcome: expectedOutcome,
     stage_1: stage1,
     stage_2: stage2,
     verdict,
     next_prompt_output: {
       next_prompt: analysisPromptSection.copyPromptText,
-      prompt_strategy: success ? "validate" : "retry_cleanly"
+      prompt_strategy: promptStrategy,
+      next_prompt_explanation: nextPromptExplanation,
+      expected_outcome: expectedOutcome
     },
     acceptance_checklist: effectiveReviewContract.requirements.map((item) => ({
       label: item.label,
       status: mapReviewRequirementStatusToChecklistStatus(item.status)
     })),
+    checked_artifact_types: [],
+    checked_artifacts: topPasses.map((item) => item.label).slice(0, 8),
+    unchecked_artifacts: topFailures.map((item) => item.label).slice(0, 8),
+    blocked_or_unproven_items: issues.slice(0, 6),
+    deep_criterion_verifications: [],
+    contradiction_count: contradictionCount,
+    review_contract: {
+      version: "v1",
+      target_signature: "",
+      goal: goalContract.userGoal || "Review answer",
+      criteria: []
+    },
     response_summary: responseSummary,
+    helpful_feedback: {
+      helpful: null,
+      next_prompt_success: null
+    },
     used_fallback_intent: false,
     token_usage_total: 0
   }, {
@@ -2731,8 +3326,10 @@ async function buildInformationalReviewResultFromContract(input: {
 
 export function buildReviewTargetKey(target: ReviewTarget) {
   return [
+    target.attempt.platform,
     target.threadIdentity,
     target.attempt.attempt_id,
+    target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || "no-prompt",
     target.responseIdentity || "no-response-id",
     target.normalizedResponseText
   ].join("::")
@@ -2793,12 +3390,44 @@ async function refineNextMoveWithTimeout(
   }
 }
 
+async function interpretNextMoveWithTimeout(
+  interpretNextMovePrompt: NonNullable<CreateReviewAnalysisRunnerInput["interpretNextMovePrompt"]>,
+  input: {
+    prompt: string
+    answers: Record<string, string>
+    taskType: ReviewTarget["taskType"]
+  }
+) {
+  const timeoutPromise = new Promise<null>((resolve) => {
+    globalThis.setTimeout(() => resolve(null), REVIEW_NEXT_MOVE_INTERPRETER_TIMEOUT_MS)
+  })
+
+  try {
+    return await Promise.race([interpretNextMovePrompt(input), timeoutPromise])
+  } catch {
+    return null
+  }
+}
+
+function buildNextMoveInterpreter(input: CreateReviewAnalysisRunnerInput, mode: "quick" | "deep") {
+  if (mode !== "deep") return undefined
+  if (input.interpretNextMovePrompt) {
+    return ({ prompt, answers, taskType }: { prompt: string; answers: Record<string, string>; taskType: ReviewTarget["taskType"] }) =>
+      interpretNextMoveWithTimeout(input.interpretNextMovePrompt!, { prompt, answers, taskType })
+  }
+  if (input.refinePrompt) {
+    return ({ prompt, answers, taskType }: { prompt: string; answers: Record<string, string>; taskType: ReviewTarget["taskType"] }) =>
+      refineNextMoveWithTimeout(input.refinePrompt!, { prompt, answers, taskType })
+  }
+  return undefined
+}
+
 export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInput): ReviewAnalysisRunner {
-  return async function runReviewAnalysis({ target, mode }) {
+  return async function runReviewAnalysis({ target, mode, quickBaseline }) {
     const projectMemory = input.getProjectMemoryContext()
     const responseSummary = input.preprocessResponse(target.responseText) as ResponsePreprocessorOutput
     const changedFiles = input.collectChangedFilesSummary()
-    const promptText = target.attempt.optimized_prompt || target.attempt.raw_prompt || target.attempt.intent.goal || ""
+    const promptText = promptTextForTarget(target)
     const implementationSignals =
       responseSummary.has_code_blocks ||
       responseSummary.change_claims.length > 0 ||
@@ -2828,26 +3457,379 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
       responseText: effectiveTarget.responseText,
       responseSummary
     })
+    const deepAnalysisV2RolloutMode = getDeepAnalysisV2RolloutMode()
+        let shadowDeepAnalysisV2: DeepAnalysisV2Result | null = null
+
+    if (
+      mode === "deep" &&
+      (input.analyzeDeepAnalysisV2 || effectiveTarget.attempt.analysis_mode === "large_input_checkpoint") &&
+      shouldRunDeepAnalysisV2(deepAnalysisV2RolloutMode)
+    ) {
+      try {
+        const deepAnalysisV2Override =
+          input.getDeepAnalysisV2ContextOverride?.({
+            target: effectiveTarget,
+            promptText,
+            projectContext: projectMemory.projectContext,
+            currentState: projectMemory.currentState
+          }) ?? null
+        const deepAnalysisV2PromptText = deepAnalysisV2Override?.promptText ?? promptText
+        const deepAnalysisV2ProjectContext = deepAnalysisV2Override?.projectContext ?? projectMemory.projectContext
+        const deepAnalysisV2CurrentState = deepAnalysisV2Override?.currentState ?? projectMemory.currentState
+        const request = buildDeepAnalysisV2Request({
+          target: effectiveTarget,
+          promptText: deepAnalysisV2PromptText,
+          projectContext: deepAnalysisV2ProjectContext,
+          currentState: deepAnalysisV2CurrentState
+        })
+        traceDeepAnalysisV2("v2_requested", {
+          rolloutMode: deepAnalysisV2RolloutMode,
+          threadId: request.threadId,
+          messageId: request.messageId,
+          submittedPromptHash: request.submittedPromptHash,
+          assistantAnswerHash: request.assistantAnswerHash,
+          contextOverrideSource: deepAnalysisV2Override?.source ?? null
+        })
+        const shouldUseLargeInputCheckpoint =
+          effectiveTarget.attempt.analysis_mode === "large_input_checkpoint" &&
+          (!deepAnalysisV2Override || !input.analyzeDeepAnalysisV2)
+        const largeInputPhaseProgress =
+          shouldUseLargeInputCheckpoint
+            ? deriveReviewPhaseProgress({
+                promptText: deepAnalysisV2PromptText,
+                responseText: effectiveTarget.responseText,
+                importedContext: projectMemory.importedContext ?? null,
+                projectMemory: projectMemory.structuredMemory ?? null
+              })
+            : null
+        const preflightDeepAnalysisV2 =
+          input.getDeepAnalysisV2PreflightResult?.({
+            target: effectiveTarget,
+            promptText: deepAnalysisV2PromptText,
+            projectContext: deepAnalysisV2ProjectContext,
+            currentState: deepAnalysisV2CurrentState
+          }) ?? null
+        const deepAnalysisV2 =
+          preflightDeepAnalysisV2 ??
+          (shouldUseLargeInputCheckpoint
+            ? buildLargeInputCheckpointDeepAnalysisV2({
+                target: effectiveTarget,
+                promptText: deepAnalysisV2PromptText,
+                phaseProgress: largeInputPhaseProgress
+              })
+            : await input.analyzeDeepAnalysisV2!(request))
+        if (preflightDeepAnalysisV2) {
+          traceDeepAnalysisV2("v2_result_validated", {
+            analysisId: deepAnalysisV2.analysisId,
+            state: deepAnalysisV2.analysisState,
+            providerSkipped: true,
+            reason: "project_tracker_waiting_for_fresh_answer"
+          })
+        }
+        if (shouldUseLargeInputCheckpoint) {
+          traceDeepAnalysisV2("v2_result_validated", {
+            analysisId: deepAnalysisV2.analysisId,
+            state: deepAnalysisV2.analysisState,
+            analysisMode: effectiveTarget.attempt.analysis_mode,
+            providerSkipped: true,
+            activePhase: largeInputPhaseProgress?.activePhaseLabel ?? null,
+            nextPhase: largeInputPhaseProgress?.nextPhaseLabel ?? null
+          })
+        }
+        traceDeepAnalysisV2(
+          !preflightDeepAnalysisV2 &&
+            deepAnalysisV2.providerMetadata.provider === "none" &&
+            effectiveTarget.attempt.analysis_mode !== "large_input_checkpoint"
+            ? "v2_provider_failed"
+            : "v2_provider_success",
+          {
+            analysisId: deepAnalysisV2.analysisId,
+            provider: deepAnalysisV2.providerMetadata.provider,
+            latencyMs: deepAnalysisV2.providerMetadata.latencyMs,
+            state: deepAnalysisV2.analysisState,
+            failureReason: deepAnalysisV2.providerMetadata.fallbackReason,
+            analysisMode: effectiveTarget.attempt.analysis_mode,
+            contextOverrideSource: deepAnalysisV2Override?.source ?? null
+          }
+        )
+        if (!deepAnalysisV2MatchesTarget({ analysis: deepAnalysisV2, target: effectiveTarget, promptText: deepAnalysisV2PromptText })) {
+          traceDeepAnalysisV2("v2_marked_stale", {
+            analysisId: deepAnalysisV2.analysisId,
+            reason: "v2_stale_discarded",
+            expectedPromptHash: request.submittedPromptHash,
+            actualPromptHash: deepAnalysisV2.submittedPromptHash,
+            expectedAnswerHash: request.assistantAnswerHash,
+            actualAnswerHash: deepAnalysisV2.assistantAnswerHash
+          })
+          const staleAnalysis = buildLocalUnavailableDeepAnalysisV2({
+            target: effectiveTarget,
+            promptText: deepAnalysisV2PromptText,
+            reason: "v2_stale_discarded",
+            message: "Deep Analysis v2 result was discarded because it no longer matched the visible prompt/answer.",
+            state: "stale"
+          })
+          shadowDeepAnalysisV2 = staleAnalysis
+          if (shouldApplyDeepAnalysisV2(deepAnalysisV2RolloutMode)) {
+            const staleResult = attachReviewAnalysisContext(
+              mapDeepAnalysisV2ToAfterAnalysisResult({
+                analysis: staleAnalysis,
+                responseText: effectiveTarget.responseText
+              }),
+              {
+                goalContract: null,
+                reviewContract: null,
+                deepAnalysisV2: staleAnalysis,
+                deepAnalysisV2RolloutMode,
+                deepAnalysisV2Applied: true,
+                chosenChecklistSource: "backend",
+                sanitizationChanges: []
+              }
+            )
+            try {
+              await input.attachAnalysisResult(target.attempt.attempt_id, target.responseText, staleResult, target.responseIdentity)
+              traceDeepAnalysisV2("v2_saved_to_admin", {
+                analysisId: staleAnalysis.analysisId,
+                attemptId: target.attempt.attempt_id,
+                stale: true
+              })
+            } catch (error) {
+              traceDeepAnalysisV2("v2_marked_unavailable", {
+                analysisId: staleAnalysis.analysisId,
+                reason: "v2_save_failed",
+                message: error instanceof Error ? error.message : "unknown"
+              })
+              throw error
+            }
+            return staleResult
+          }
+        }
+        const normalizedDeepAnalysisV2 =
+          input.transformDeepAnalysisV2Result?.({
+            analysis: deepAnalysisV2,
+            target: effectiveTarget,
+            promptText: deepAnalysisV2PromptText
+          }) ?? deepAnalysisV2
+        const captureConsistency = normalizeDeepAnalysisV2LocalCaptureConsistency({
+          analysis: normalizedDeepAnalysisV2,
+          request
+        })
+        let finalDeepAnalysisV2 = captureConsistency.analysis
+        if (captureConsistency.contradicted) {
+          traceDeepAnalysisV2("v2_marked_unavailable", {
+            analysisId: captureConsistency.analysis.analysisId,
+            reason: "provider_missing_input_contradicted_by_local_capture",
+            submittedPromptLength: captureConsistency.analysis.submittedPromptLength,
+            assistantAnswerLength: captureConsistency.analysis.assistantAnswerLength,
+            contradictionReasons: captureConsistency.reasons
+          })
+
+          if (!preflightDeepAnalysisV2 && !shouldUseLargeInputCheckpoint && input.analyzeDeepAnalysisV2) {
+            const recoveryRequest: DeepAnalysisV2Request = {
+              ...request,
+              analysisModeHint: "missing_input_recovery"
+            }
+            traceDeepAnalysisV2("v2_requested", {
+              rolloutMode: deepAnalysisV2RolloutMode,
+              threadId: recoveryRequest.threadId,
+              messageId: recoveryRequest.messageId,
+              submittedPromptHash: recoveryRequest.submittedPromptHash,
+              assistantAnswerHash: recoveryRequest.assistantAnswerHash,
+              contextOverrideSource: deepAnalysisV2Override?.source ?? null,
+              recoveryReason: "provider_missing_input_contradicted_by_local_capture"
+            })
+
+            try {
+              const recoveryDeepAnalysisV2 = await input.analyzeDeepAnalysisV2(recoveryRequest)
+              traceDeepAnalysisV2(
+                recoveryDeepAnalysisV2.providerMetadata.provider === "none" ? "v2_provider_failed" : "v2_provider_success",
+                {
+                  analysisId: recoveryDeepAnalysisV2.analysisId,
+                  provider: recoveryDeepAnalysisV2.providerMetadata.provider,
+                  latencyMs: recoveryDeepAnalysisV2.providerMetadata.latencyMs,
+                  state: recoveryDeepAnalysisV2.analysisState,
+                  failureReason: recoveryDeepAnalysisV2.providerMetadata.fallbackReason,
+                  analysisMode: "missing_input_recovery",
+                  contextOverrideSource: deepAnalysisV2Override?.source ?? null
+                }
+              )
+
+              if (deepAnalysisV2MatchesTarget({ analysis: recoveryDeepAnalysisV2, target: effectiveTarget, promptText: deepAnalysisV2PromptText })) {
+                const normalizedRecoveryDeepAnalysisV2 =
+                  input.transformDeepAnalysisV2Result?.({
+                    analysis: recoveryDeepAnalysisV2,
+                    target: effectiveTarget,
+                    promptText: deepAnalysisV2PromptText
+                  }) ?? recoveryDeepAnalysisV2
+                const recoveryCaptureConsistency = normalizeDeepAnalysisV2LocalCaptureConsistency({
+                  analysis: normalizedRecoveryDeepAnalysisV2,
+                  request: recoveryRequest
+                })
+                if (recoveryCaptureConsistency.contradicted) {
+                  traceDeepAnalysisV2("v2_marked_unavailable", {
+                    analysisId: recoveryCaptureConsistency.analysis.analysisId,
+                    reason: "provider_missing_input_contradicted_by_local_capture",
+                    submittedPromptLength: recoveryCaptureConsistency.analysis.submittedPromptLength,
+                    assistantAnswerLength: recoveryCaptureConsistency.analysis.assistantAnswerLength,
+                    contradictionReasons: recoveryCaptureConsistency.reasons,
+                    recovery: true
+                  })
+                } else {
+                  finalDeepAnalysisV2 = recoveryCaptureConsistency.analysis
+                }
+              } else {
+                traceDeepAnalysisV2("v2_marked_stale", {
+                  analysisId: recoveryDeepAnalysisV2.analysisId,
+                  reason: "v2_stale_discarded",
+                  expectedPromptHash: recoveryRequest.submittedPromptHash,
+                  actualPromptHash: recoveryDeepAnalysisV2.submittedPromptHash,
+                  expectedAnswerHash: recoveryRequest.assistantAnswerHash,
+                  actualAnswerHash: recoveryDeepAnalysisV2.assistantAnswerHash,
+                  recovery: true
+                })
+              }
+            } catch (error) {
+              traceDeepAnalysisV2("v2_marked_unavailable", {
+                analysisId: captureConsistency.analysis.analysisId,
+                reason: "missing_input_recovery_failed",
+                message: error instanceof Error ? error.message : "unknown"
+              })
+            }
+          }
+        }
+        traceDeepAnalysisV2("v2_result_validated", {
+          analysisId: finalDeepAnalysisV2.analysisId,
+          state: finalDeepAnalysisV2.analysisState,
+          contextOverrideSource: deepAnalysisV2Override?.source ?? null
+        })
+        shadowDeepAnalysisV2 = finalDeepAnalysisV2
+
+        if (!shouldApplyDeepAnalysisV2(deepAnalysisV2RolloutMode)) {
+          console.debug("[reeva AI][DeepAnalysisV2]", "shadow result captured; legacy deep analysis remains user-facing")
+        } else {
+          const mappedResult = mapDeepAnalysisV2ToAfterAnalysisResult({
+            analysis: finalDeepAnalysisV2,
+            responseText: effectiveTarget.responseText
+          })
+          traceDeepAnalysisV2("v2_mapped_to_popup", {
+            analysisId: finalDeepAnalysisV2.analysisId,
+            status: mappedResult.status
+          })
+          const result = attachReviewAnalysisContext(
+            mappedResult,
+            {
+              goalContract: null,
+              reviewContract: null,
+              deepAnalysisV2: finalDeepAnalysisV2,
+              deepAnalysisV2RolloutMode,
+              deepAnalysisV2Applied: true,
+              chosenChecklistSource: "backend",
+              sanitizationChanges: []
+            }
+          )
+
+          try {
+            await input.attachAnalysisResult(
+              target.attempt.attempt_id,
+              target.responseText,
+              result,
+              target.responseIdentity
+            )
+            traceDeepAnalysisV2("v2_saved_to_admin", {
+              analysisId: finalDeepAnalysisV2.analysisId,
+              attemptId: target.attempt.attempt_id
+            })
+          } catch (error) {
+            traceDeepAnalysisV2("v2_marked_unavailable", {
+              analysisId: finalDeepAnalysisV2.analysisId,
+              reason: "v2_save_failed",
+              message: error instanceof Error ? error.message : "unknown"
+            })
+            throw error
+          }
+
+          return result
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "unknown"
+        const unavailableReason = /schema|parse|invalid json|validation/i.test(reason)
+          ? "v2_schema_invalid"
+          : /save/i.test(reason)
+            ? "v2_save_failed"
+            : "v2_mapping_failed"
+        if (unavailableReason === "v2_schema_invalid") {
+          traceDeepAnalysisV2("v2_schema_invalid", {
+            message: reason,
+            rolloutMode: deepAnalysisV2RolloutMode
+          })
+        }
+        traceDeepAnalysisV2("v2_marked_unavailable", {
+          reason: unavailableReason,
+          message: reason,
+          rolloutMode: deepAnalysisV2RolloutMode
+        })
+        if (shouldApplyDeepAnalysisV2(deepAnalysisV2RolloutMode)) {
+          const unavailableAnalysis = buildLocalUnavailableDeepAnalysisV2({
+            target: effectiveTarget,
+            promptText,
+            reason: unavailableReason,
+            message: `Deep Analysis v2 could not be applied after the provider call: ${reason}`
+          })
+          const unavailableResult = attachReviewAnalysisContext(
+            mapDeepAnalysisV2ToAfterAnalysisResult({
+              analysis: unavailableAnalysis,
+              responseText: effectiveTarget.responseText
+            }),
+            {
+              goalContract: null,
+              reviewContract: null,
+              deepAnalysisV2: unavailableAnalysis,
+              deepAnalysisV2RolloutMode,
+              deepAnalysisV2Applied: true,
+              chosenChecklistSource: "backend",
+              sanitizationChanges: []
+            }
+          )
+          await input.attachAnalysisResult(
+            target.attempt.attempt_id,
+            target.responseText,
+            unavailableResult,
+            target.responseIdentity
+          )
+          traceDeepAnalysisV2("v2_saved_to_admin", {
+            analysisId: unavailableAnalysis.analysisId,
+            attemptId: target.attempt.attempt_id,
+            unavailable: true
+          })
+          return unavailableResult
+        }
+        console.debug("[reeva AI][DeepAnalysisV2]", "falling back to legacy deep analysis", { reason })
+      }
+    }
 
     if (promptArtifactReview || isAnswerQualityTask(effectiveTarget.taskType)) {
       const informationalResult = await buildInformationalReviewResult({
         target: effectiveTarget,
         mode,
         responseSummary,
-        refineNextMovePrompt:
-          mode === "deep" && input.refinePrompt
-            ? ({ prompt, answers, taskType }) => refineNextMoveWithTimeout(input.refinePrompt!, { prompt, answers, taskType })
-            : undefined
+        importedContext: projectMemory.importedContext ?? null,
+        projectMemory: projectMemory.structuredMemory ?? null,
+        projectSettings: projectMemory.settings ?? null,
+        refineNextMovePrompt: buildNextMoveInterpreter(input, mode)
+      })
+      const result = attachDeepAnalysisV2ShadowContext({
+        result: informationalResult,
+        deepAnalysisV2: shadowDeepAnalysisV2,
+        rolloutMode: deepAnalysisV2RolloutMode
       })
 
       await input.attachAnalysisResult(
         target.attempt.attempt_id,
         target.responseText,
-        informationalResult,
+        result,
         target.responseIdentity
       )
 
-      return informationalResult
+      return result
     }
 
     const rawResult = await input.analyzeAfterAttempt({
@@ -2855,6 +3837,8 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
       response_summary: responseSummary,
       response_text_fallback: target.responseText,
       deep_analysis: mode === "deep",
+      baseline_acceptance_criteria: quickBaseline?.acceptance_checklist.map((item) => item.label) ?? [],
+      baseline_acceptance_checklist: quickBaseline?.acceptance_checklist ?? [],
       project_context: projectMemory.projectContext,
       current_state: projectMemory.currentState,
       error_summary: input.collectVisibleErrorSummary(),
@@ -2889,25 +3873,34 @@ export function createReviewAnalysisRunner(input: CreateReviewAnalysisRunnerInpu
         target: effectiveTarget,
         mode,
         responseSummary,
-        refineNextMovePrompt:
-          mode === "deep" && input.refinePrompt
-            ? ({ prompt, answers, taskType }) => refineNextMoveWithTimeout(input.refinePrompt!, { prompt, answers, taskType })
-            : undefined
+        importedContext: projectMemory.importedContext ?? null,
+        projectMemory: projectMemory.structuredMemory ?? null,
+        projectSettings: projectMemory.settings ?? null,
+        refineNextMovePrompt: buildNextMoveInterpreter(input, mode)
+      })
+      const result = attachDeepAnalysisV2ShadowContext({
+        result: informationalResult,
+        deepAnalysisV2: shadowDeepAnalysisV2,
+        rolloutMode: deepAnalysisV2RolloutMode
       })
 
       await input.attachAnalysisResult(
         target.attempt.attempt_id,
         target.responseText,
-        informationalResult,
+        result,
         target.responseIdentity
       )
 
-      return informationalResult
+      return result
     }
-    const result =
-      mode === "deep"
-        ? buildGroundedDeepResult(intermediateResult, target, responseSummary)
-        : intermediateResult
+    const result = attachDeepAnalysisV2ShadowContext({
+      result:
+        mode === "deep"
+          ? buildGroundedDeepResult(intermediateResult, target, responseSummary)
+          : intermediateResult,
+      deepAnalysisV2: shadowDeepAnalysisV2,
+      rolloutMode: deepAnalysisV2RolloutMode
+    })
 
     await input.attachAnalysisResult(
       target.attempt.attempt_id,

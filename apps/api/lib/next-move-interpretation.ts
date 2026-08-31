@@ -2,6 +2,7 @@ import * as z from "zod"
 import { callDeepSeekJson } from "./deepseek"
 import { runtimeFlags } from "./env"
 import { callKimiJson } from "./kimi"
+import { callOpenAiJson } from "./openai"
 import { trimForBudget } from "./cost-control"
 
 export const NextMoveInterpretationRequestSchema = z.object({
@@ -15,9 +16,9 @@ export type NextMoveInterpretationRequest = z.infer<typeof NextMoveInterpretatio
 export type NextMoveInterpretationResponse = {
   output: string | null
   ai_available: boolean
-  provider: "kimi" | "deepseek" | "none"
+  provider: "openai" | "kimi" | "deepseek" | "none"
   attemptedProviders: Array<{
-    provider: "kimi" | "deepseek"
+    provider: "openai" | "kimi" | "deepseek"
     status: "success" | "empty" | "failed"
   }>
 }
@@ -58,6 +59,7 @@ export async function runNextMoveInterpretation(
   )
 
   const providers = [
+    { name: "openai" as const, call: () => callOpenAiJson(NEXT_MOVE_INTERPRETER_SYSTEM_PROMPT, userPrompt, 520) },
     { name: "kimi" as const, call: () => callKimiJson(NEXT_MOVE_INTERPRETER_SYSTEM_PROMPT, userPrompt, 520) },
     { name: "deepseek" as const, call: () => callDeepSeekJson(NEXT_MOVE_INTERPRETER_SYSTEM_PROMPT, userPrompt, 520) }
   ]
