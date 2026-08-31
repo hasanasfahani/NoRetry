@@ -27,4 +27,3 @@ export type AssistantNextMoveInterpretation = {
   suggestsCompletion: boolean
   confidenceLevel: AssistantInterpreterConfidence
 }
-
