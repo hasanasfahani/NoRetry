@@ -865,9 +865,9 @@ async function main() {
     assert.equal(ordinaryCompletionWithMissingResult.overallStatus, "needs_confirmation")
     assert.equal(ordinaryCompletionWithMissingResult.phaseAdvanceBasis, "")
     assert.equal(ordinaryCompletionWithMissingResult.promptIntent, "confirm_missing_requirements")
-    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /^Complete only the missing requirements/)
-    assert.doesNotMatch(ordinaryCompletionWithMissingResult.generatedPrompt, /suggest (?:what )?the next step/i)
-    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /do not begin additional work/i)
+    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /^Before we move forward, confirm these requirements/)
+    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /suggest (?:what )?the next step/i)
+    assert.match(ordinaryCompletionWithMissingResult.generatedPrompt, /Do not add new scope yet/i)
 
     const staleMissingIdsOutput = JSON.stringify({
       verdict: "partial",
