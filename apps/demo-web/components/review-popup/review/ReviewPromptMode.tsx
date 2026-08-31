@@ -80,8 +80,61 @@ export function ReviewPromptMode(props: ReviewPromptModeProps) {
 
   return (
     <>
-      <SectionCard title="Planning goal" subtitle="Your current unsent prompt now anchors the next-step tree.">
-        <p style={styles.goal}>{props.state.planningGoal}</p>
+      <SectionCard title="Planning brief" subtitle="reeva AI inferred this PM-style brief from your typed request and will tighten it as you answer.">
+        <p style={styles.goal}>{props.state.requestBrief?.goal ?? props.state.planningGoal}</p>
+        {props.state.requestBrief ? (
+          <div style={styles.briefGrid}>
+            {props.state.requestBrief.scope.length ? (
+              <div style={styles.briefSection}>
+                <p style={styles.briefLabel}>Scope</p>
+                <div style={styles.briefList}>
+                  {props.state.requestBrief.scope.slice(0, 3).map((item) => (
+                    <p key={`scope-${item}`} style={styles.briefItem}>
+                      {item}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {props.state.requestBrief.constraints.length ? (
+              <div style={styles.briefSection}>
+                <p style={styles.briefLabel}>Constraints</p>
+                <div style={styles.briefList}>
+                  {props.state.requestBrief.constraints.slice(0, 3).map((item) => (
+                    <p key={`constraint-${item}`} style={styles.briefItem}>
+                      {item}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {props.state.requestBrief.assumptions.length ? (
+              <div style={styles.briefSection}>
+                <p style={styles.briefLabel}>Assumptions for now</p>
+                <div style={styles.briefList}>
+                  {props.state.requestBrief.assumptions.slice(0, 2).map((item) => (
+                    <p key={`assumption-${item}`} style={styles.briefItem}>
+                      {item}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div style={styles.riskWrap}>
+              <span style={styles.riskChip(props.state.requestBrief.riskLevel)}>
+                {props.state.requestBrief.riskLevel === "high"
+                  ? "High risk"
+                  : props.state.requestBrief.riskLevel === "medium"
+                    ? "Medium risk"
+                    : "Low risk"}
+              </span>
+              <p style={styles.riskCopy}>{props.state.requestBrief.riskReason}</p>
+            </div>
+          </div>
+        ) : null}
       </SectionCard>
 
       {visibleQuestions.length ? (
@@ -222,6 +275,62 @@ const styles = {
     lineHeight: 1.55,
     color: "#f7fbff",
     fontWeight: 700
+  } satisfies CSSProperties,
+  briefGrid: {
+    display: "grid",
+    gap: 12
+  } satisfies CSSProperties,
+  briefSection: {
+    display: "grid",
+    gap: 6
+  } satisfies CSSProperties,
+  briefLabel: {
+    margin: 0,
+    fontSize: 12,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase",
+    color: "rgba(196, 213, 255, 0.74)",
+    fontWeight: 800
+  } satisfies CSSProperties,
+  briefList: {
+    display: "grid",
+    gap: 6
+  } satisfies CSSProperties,
+  briefItem: {
+    margin: 0,
+    fontSize: 14,
+    lineHeight: 1.5,
+    color: "rgba(235, 243, 255, 0.86)"
+  } satisfies CSSProperties,
+  riskWrap: {
+    display: "grid",
+    gap: 8
+  } satisfies CSSProperties,
+  riskChip: (risk: "low" | "medium" | "high") =>
+    ({
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: "fit-content",
+      padding: "6px 10px",
+      borderRadius: 999,
+      background:
+        risk === "high"
+          ? "rgba(248,113,113,0.18)"
+          : risk === "medium"
+            ? "rgba(250,204,21,0.18)"
+            : "rgba(74,222,128,0.18)",
+      color: risk === "high" ? "#fecaca" : risk === "medium" ? "#fde68a" : "#bbf7d0",
+      fontSize: 12,
+      fontWeight: 800,
+      letterSpacing: "0.04em",
+      textTransform: "uppercase"
+    }) satisfies CSSProperties,
+  riskCopy: {
+    margin: 0,
+    fontSize: 13,
+    lineHeight: 1.5,
+    color: "rgba(215, 228, 255, 0.72)"
   } satisfies CSSProperties,
   copy: {
     margin: 0,

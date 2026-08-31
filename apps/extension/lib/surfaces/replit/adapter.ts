@@ -5,6 +5,7 @@ import {
   createEmptyUserPromptSnapshot,
   createPanelMountContext,
   createThreadSnapshot,
+  getGenericAnswerCompletionState,
   type SurfaceAdapter
 } from "../adapter"
 import {
@@ -12,7 +13,9 @@ import {
   collectVisibleErrorSummary,
   collectVisibleOutputSnippet,
   findPromptInput,
+  findPromptInputNearSubmitButton,
   findSubmitButton,
+  findVisiblePromptSubmitButton,
   readPromptValue,
   writePromptValue
 } from "../../replit"
@@ -21,6 +24,7 @@ import {
   getDeepArtifactTelemetry,
   getGlobalPopupArtifactTelemetry
 } from "../../storage"
+import { resolveReplitAnswerCompletionState } from "./completion-state"
 import type { ArtifactContext, ArtifactRecord, ReviewContract } from "@prompt-optimizer/shared"
 
 function isVisibleElement(element: HTMLElement) {
@@ -46,6 +50,16 @@ function isEditorLikeElement(element: HTMLElement) {
       ].join(",")
     )
   )
+}
+
+function looksLikeWorkspaceChrome(text: string) {
+  return /\blibrary\b|\bfile tree\b|\btasks\b|\bmain version\b|\bnew task\b|\bshow previous messages\b|\bitems read\b|\bagent usage\b/i.test(
+    text
+  )
+}
+
+function looksLikeConversationShell(text: string) {
+  return /\bskip to content\b|\bprompt strength hub\b|\bshow previous messages\b|\bmessages? & \d+ actions\b/i.test(text)
 }
 
 function findConversationContainer(promptInput: HTMLElement | null) {
@@ -123,6 +137,48 @@ function readRichText(node: HTMLElement | null) {
   }
 
   return node.innerText.trim()
+}
+
+function uniqueNonEmptyText(values: string[]) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
+}
+
+function readResponseClusterText(node: HTMLElement | null) {
+  if (!node) return ""
+
+  const primaryText = readRichText(node)
+  if (!primaryText) return ""
+
+  if (!/\boutput file\b|\bcheckpoint made\b|\bworked for\b|\bopen\b/i.test(primaryText)) {
+    return primaryText
+  }
+
+  const nodeRect = node.getBoundingClientRect()
+  const nearbyTexts: string[] = [primaryText]
+  const candidates = collectAssistantCandidates()
+
+  for (const candidate of candidates) {
+    if (candidate === node) continue
+
+    const rect = candidate.getBoundingClientRect()
+    const horizontallyAligned = horizontalOverlapRatio(rect, nodeRect) > 0.55
+    const verticalGap =
+      rect.top > nodeRect.bottom
+        ? rect.top - nodeRect.bottom
+        : nodeRect.top > rect.bottom
+          ? nodeRect.top - rect.bottom
+          : 0
+
+    if (!horizontallyAligned || verticalGap > 180) continue
+
+    const text = readRichText(candidate)
+    if (!text || text.length < 12) continue
+    if (looksLikeWorkspaceChrome(text) && !/\boutput file\b|\bcheckpoint made\b|\bopen\b/i.test(text)) continue
+
+    nearbyTexts.push(text)
+  }
+
+  return uniqueNonEmptyText(nearbyTexts).join("\n\n")
 }
 
 function buildDomPath(node: HTMLElement | null) {
@@ -509,6 +565,10 @@ function collectAssistantCandidates() {
       const lowerText = text.toLowerCase()
       const hint = `${selector} ${(element.getAttribute("data-testid") || "").toLowerCase()} ${(element.className || "").toString().toLowerCase()}`
 
+      if (looksLikeConversationShell(text) && !/\boutput file\b|\bcheckpoint made\b|\bworked for\b/i.test(text)) continue
+      if (looksLikeWorkspaceChrome(text) && !/\boutput file\b|\bopen\b|\bcheckpoint made\b|\bworked for\b/i.test(text)) continue
+      if (rect.width >= window.innerWidth * 0.92 && rect.height >= window.innerHeight * 0.72) continue
+
       let score = rect.bottom
       const childTextLength = Array.from(element.children).reduce(
         (sum, child) => sum + (((child as HTMLElement).innerText || "").trim().length || 0),
@@ -535,6 +595,12 @@ function collectAssistantCandidates() {
       if (hint.includes("markdown")) score += 60
       if (element.querySelector("pre, code")) score += 120
       if (element.querySelector(".markdown, [class*='markdown']")) score += 70
+      if (/\boutput file\b/i.test(text)) score += 260
+      if (/\bcheckpoint made\b/i.test(text)) score += 150
+      if (/\bworked for\b/i.test(text)) score += 110
+      if (/\bopen\b/i.test(text) && /\bpreview\b|\bchanges\b/i.test(text)) score += 120
+      if (/\.(?:md|txt|json|ts|tsx|js|jsx|css|html|py|sql)\b/i.test(text)) score += 120
+      if (/\b(project overview|requirements|architecture|handoff)\b/i.test(lowerText)) score += 80
       if (text.length > 80) score += 50
       if (text.length > 180) score += 40
       if (childTextLength > text.length * 0.6) score += 30
@@ -551,6 +617,7 @@ function collectAssistantCandidates() {
       if (oversizedRegion) score -= 220
       if (rect.left < window.innerWidth * 0.18) score -= 90
       if (rect.left < window.innerWidth * 0.28 && rect.width < window.innerWidth * 0.45) score -= 70
+      if ((selector === "main section" || selector === "main div" || selector === "main article") && text.length > 800) score -= 220
 
       candidates.set(element, Math.max(candidates.get(element) ?? 0, score))
     }
@@ -595,14 +662,20 @@ export const replitSurfaceAdapter: SurfaceAdapter = {
     }
   },
   writeDraftPrompt(text: string) {
-    const input = findPromptInput()
+    const visibleSubmitButton = findVisiblePromptSubmitButton()
+    const input = findPromptInput() ?? (visibleSubmitButton ? findPromptInputNearSubmitButton(visibleSubmitButton) : null)
     if (!input) return false
-    writePromptValue(input, text)
-    return true
+    return writePromptValue(input, text)
   },
   getLatestAssistantResponse() {
-    const node = collectAssistantCandidates()[0] ?? null
-    const text = readRichText(node) || collectVisibleOutputSnippet()
+    const candidates = collectAssistantCandidates()
+    const prioritizedNode =
+      candidates.find((candidate) => {
+        const text = readRichText(candidate)
+        return /\boutput file\b|\bcheckpoint made\b|\bworked for\b|\bopen\b/i.test(text)
+      }) ?? null
+    const node = prioritizedNode ?? candidates[0] ?? null
+    const text = readResponseClusterText(node) || collectVisibleOutputSnippet()
     if (!node || !text) return createEmptyAssistantResponseSnapshot()
 
     return {
@@ -612,8 +685,37 @@ export const replitSurfaceAdapter: SurfaceAdapter = {
       node
     }
   },
+  getAnswerCompletionState() {
+    const assistantExists = this.getLatestAssistantResponse().exists
+    const submitButton = this.getDraftPrompt().submitButton ?? findVisiblePromptSubmitButton()
+    const genericState = getGenericAnswerCompletionState({
+      assistantExists,
+      submitButton
+    })
+
+    return resolveReplitAnswerCompletionState({
+      genericState,
+      assistantExists,
+      submitButtonVisible: Boolean(submitButton && isVisibleElement(submitButton)),
+      submitButtonLabel:
+        submitButton?.getAttribute("aria-label") ||
+        submitButton?.getAttribute("title") ||
+        submitButton?.innerText ||
+        ""
+    })
+  },
   getLatestUserPrompt() {
-    return createEmptyUserPromptSnapshot()
+    const input = findPromptInput()
+    if (!input) return createEmptyUserPromptSnapshot()
+
+    const text = readPromptValue(input).trim()
+    if (!text) return createEmptyUserPromptSnapshot()
+
+    return {
+      exists: true,
+      text,
+      node: input
+    }
   },
   getThread() {
     const url = new URL(window.location.href)

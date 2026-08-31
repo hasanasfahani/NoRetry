@@ -3,9 +3,17 @@ import type { ReviewPopupViewModel } from "../../../components/review-popup/revi
 import type { PopupAction, PopupTone } from "../../../components/review-popup/shared/types"
 import type { ReviewContract } from "../contracts"
 import { guardrailList, guardrailText } from "../guardrails"
+import { buildNextMoveDecision, type NextMoveDecision } from "../next-move-decision"
 import type { ReviewPopupMode } from "../types"
 import type { ReviewTaskType } from "../services/review-task-type"
 import { isAnswerQualityTask } from "../services/review-task-type"
+import { isNoRetryAnalysisResult, isNoRetryPromptText } from "../no-retry"
+import {
+  workflowStateActionLabel,
+  workflowStateHelper,
+  workflowStateLabel,
+  workflowStateTone
+} from "../workflow-state"
 
 const PROMPT_QUALITY_CHECKLIST_LABELS = new Set([
   "The generated prompt preserves the user’s core goal",
@@ -123,7 +131,7 @@ function confidenceLabel(confidence: AfterAnalysisResult["confidence"], qualityT
 
   switch (confidence) {
     case "high":
-      return "Verified"
+      return "Response reviewed"
     case "medium":
       return "Not proven"
     default:
@@ -377,12 +385,202 @@ function buildQuickToDeepDelta(quick: AfterAnalysisResult | null, deep: AfterAna
     : "Deep review kept the same checklist but judged it with stronger proof standards."
 }
 
-function buildPromptActions(onSubmitPrompt: () => void): PopupAction[] {
-  return [{ id: "submit", label: "Submit prompt", kind: "primary", onClick: onSubmitPrompt }]
+function buildPromptActions(actionLabel: string, onSubmitPrompt: () => void): PopupAction[] {
+  return [{ id: "submit", label: actionLabel, kind: "primary", onClick: onSubmitPrompt }]
 }
 
-function isNoRetryPrompt(prompt: string) {
-  return /^no retry needed\./i.test(prompt.trim())
+function decisionAlignedPromptNote(input: {
+  nextMoveDecision: NextMoveDecision
+  fallbackNote: string
+}) {
+  const { nextMoveDecision, fallbackNote } = input
+  if (nextMoveDecision.assistantPrompt.mode === "informational_only") {
+    return fallbackNote || "No follow-up prompt is needed right now."
+  }
+
+  switch (nextMoveDecision.recommendation.kind) {
+    case "start_next_phase":
+      return "Use this prompt to continue only with the next approved step."
+    case "continue_optional_enhancement":
+      return "Use this prompt only if you want to take the assistant’s optional follow-up step."
+    case "finish_missing_requirements":
+      return "Use this prompt to finish the current step without broadening scope."
+    case "clarify_product_decision":
+      return "Use this prompt to answer the assistant’s question before building more."
+    case "review_before_advancing":
+      return "Use this prompt to ask for proof or a safer validation step before continuing."
+    case "fix_quality_issues":
+      return "Use this prompt to tighten only the unclear parts."
+    default:
+      return fallbackNote
+  }
+}
+
+function resolvePromptPresentation(input: {
+  nextMoveDecision: NextMoveDecision
+  fallbackLabel: string
+  fallbackPrompt: string
+  fallbackNote: string
+  hidePromptAction: boolean
+  onCopyPrompt: () => void
+}) {
+  const assistantPrompt = input.nextMoveDecision.assistantPrompt
+  const promptLabel = assistantPrompt.title || input.fallbackLabel
+  const prompt = assistantPrompt.body ?? input.fallbackPrompt
+  const promptNote = decisionAlignedPromptNote({
+    nextMoveDecision: input.nextMoveDecision,
+    fallbackNote: input.fallbackNote
+  })
+  const promptActions =
+    input.hidePromptAction || assistantPrompt.mode === "informational_only" || !prompt.trim()
+      ? []
+      : buildPromptActions(input.nextMoveDecision.recommendation.primaryCtaLabel, input.onCopyPrompt)
+
+  return {
+    promptLabel,
+    prompt,
+    promptNote,
+    promptActions
+  }
+}
+
+type SimpleNextPromptDecisionDebug = NonNullable<
+  NonNullable<ReviewContract["analysisDebug"]>["smart"]["simpleNextPromptDecision"]
+>
+
+function buildSimpleNextMoveDecisionForPopup(input: {
+  simpleDecision: SimpleNextPromptDecisionDebug
+  decisionText: string
+}): NextMoveDecision {
+  const missingCount = input.simpleDecision.requirementCheck.missingConfirmation.length
+  const missingSummary = input.simpleDecision.requirementCheck.missingConfirmation
+    .slice(0, 3)
+    .map((item) => item.text)
+    .join("; ")
+
+  if (input.simpleDecision.status === "needs_confirmation") {
+    return {
+      status: "incomplete",
+      recommendation: {
+        kind: "finish_missing_requirements",
+        title: "Confirm missing requirements",
+        message:
+          missingCount > 0
+            ? `The answer still needs confirmation for ${missingCount} requested item${missingCount === 1 ? "" : "s"}.`
+            : "The answer still needs confirmation before moving forward.",
+        nextStepGuidance: missingSummary ? `Ask the assistant to confirm: ${missingSummary}.` : undefined,
+        primaryCtaLabel: "Confirm requirements"
+      },
+      reason: input.decisionText,
+      confidence: 0.9,
+      assistantPrompt: {
+        title: "Confirm missing requirements",
+        body: input.simpleDecision.optimizedPrompt,
+        mode: input.simpleDecision.optimizedPrompt.trim() ? "review_first" : "informational_only"
+      }
+    }
+  }
+
+  return {
+    status: "ready_for_next_phase",
+    recommendation: {
+      kind: "start_next_phase",
+      title: "Ready for next step",
+      message: "The answer confirms the requested requirements. Use the optimized prompt to continue with the best next step.",
+      nextStepGuidance: input.simpleDecision.assistantSuggestedNextMove?.normalizedText
+        ? `Assistant suggested: ${input.simpleDecision.assistantSuggestedNextMove.normalizedText}.`
+        : undefined,
+      primaryCtaLabel: "Submit next prompt"
+    },
+    reason: input.decisionText,
+    confidence: 0.92,
+    assistantPrompt: {
+      title: "Next step prompt",
+      body: input.simpleDecision.optimizedPrompt,
+      mode: input.simpleDecision.optimizedPrompt.trim() ? "review_first" : "informational_only"
+    }
+  }
+}
+
+function simpleStatusBadge(simpleDecision: SimpleNextPromptDecisionDebug): ReviewPopupViewModel["statusBadge"] {
+  if (simpleDecision.status === "needs_confirmation") {
+    return { label: "Needs confirmation", tone: "warning" }
+  }
+
+  return { label: "Looks good", tone: "success" }
+}
+
+function simpleDecisionText(simpleDecision: SimpleNextPromptDecisionDebug) {
+  return simpleDecision.status === "needs_confirmation"
+    ? "Some requested requirements still need confirmation."
+    : "The answer matches the requested requirements."
+}
+
+function simpleRecommendedAction(simpleDecision: SimpleNextPromptDecisionDebug) {
+  return simpleDecision.status === "needs_confirmation"
+    ? "Ask the assistant to confirm the missing points before moving forward."
+    : "Use the optimized prompt to continue with the best next step."
+}
+
+function simpleConfidenceNote(simpleDecision: SimpleNextPromptDecisionDebug) {
+  return simpleDecision.status === "needs_confirmation"
+    ? "The simplified requirement check found requested items that were not clearly confirmed."
+    : "The simplified requirement check found direct confirmation for the requested items."
+}
+
+function simpleMissingItems(simpleDecision: SimpleNextPromptDecisionDebug) {
+  return simpleDecision.requirementCheck.missingConfirmation.map((item) => item.text)
+}
+
+function simpleCheckedItems(simpleDecision: SimpleNextPromptDecisionDebug) {
+  return simpleDecision.requirementCheck.confirmed
+    .map((item) => item.evidence[0] || item.text)
+    .filter(Boolean)
+    .slice(0, 5)
+}
+
+function simpleWhyItems(simpleDecision: SimpleNextPromptDecisionDebug) {
+  if (simpleDecision.status === "needs_confirmation") {
+    return simpleMissingItems(simpleDecision).slice(0, 3)
+  }
+
+  return simpleCheckedItems(simpleDecision).slice(0, 3)
+}
+
+function simpleProofSummary(simpleDecision: SimpleNextPromptDecisionDebug) {
+  const confirmedCount = simpleDecision.requirementCheck.confirmed.length
+  const missingCount = simpleDecision.requirementCheck.missingConfirmation.length
+
+  if (missingCount > 0) {
+    return `${missingCount} requested item${missingCount === 1 ? "" : "s"} still need confirmation.`
+  }
+
+  return `${confirmedCount} requested item${confirmedCount === 1 ? " is" : "s are"} confirmed.`
+}
+
+function simpleChecklistRows(
+  simpleDecision: SimpleNextPromptDecisionDebug,
+  mode: ReviewPopupMode
+): ReviewPopupViewModel["checklistRows"] {
+  return [...simpleDecision.requirementCheck.confirmed, ...simpleDecision.requirementCheck.missingConfirmation].map(
+    (item) => ({
+      id: `${mode}-simple-${item.id}`,
+      label: `${item.text} (${item.status === "confirmed" ? "Confirmed" : "Needs confirmation"})`,
+      status: item.status === "confirmed" ? "verified" : "missing"
+    })
+  )
+}
+
+function simpleRequirementMatchSummary(
+  simpleDecision: SimpleNextPromptDecisionDebug,
+  mode: ReviewPopupMode
+): NonNullable<ReviewPopupViewModel["requirementMatchSummary"]> {
+  return {
+    status: simpleDecision.requirementCheck.status,
+    confirmedCount: simpleDecision.requirementCheck.confirmed.length,
+    missingCount: simpleDecision.requirementCheck.missingConfirmation.length,
+    rows: simpleChecklistRows(simpleDecision, mode)
+  }
 }
 
 function deriveSmartStatusBadge(params: {
@@ -390,7 +588,7 @@ function deriveSmartStatusBadge(params: {
   fallbackStatus: AfterAnalysisResult["status"]
   contract?: ReviewContract | null
 }) {
-  if (isNoRetryPrompt(params.promptText)) {
+  if (isNoRetryPromptText(params.promptText)) {
     return { label: "Looks good", tone: "success" as const }
   }
 
@@ -424,6 +622,71 @@ function deriveSmartStatusBadge(params: {
           ? ("warning" as const)
           : ("danger" as const)
   }
+}
+
+function workflowPromptLabel(contract?: ReviewContract | null) {
+  const state = contract?.analysisDebug?.smart?.workflowState
+  if (!state) return null
+  return workflowStateActionLabel(state)
+}
+
+function workflowStatusBadge(contract?: ReviewContract | null) {
+  const state = contract?.analysisDebug?.smart?.workflowState
+  if (!state) return null
+  return {
+    label: workflowStateLabel(state),
+    tone: workflowStateTone(state)
+  }
+}
+
+function workflowHelperLine(contract?: ReviewContract | null) {
+  const state = contract?.analysisDebug?.smart?.workflowState
+  if (!state) return ""
+  return workflowStateHelper(state)
+}
+
+function workflowMeansSafeToProceed(
+  state:
+    | NonNullable<NonNullable<ReviewContract["analysisDebug"]>["smart"]["workflowState"]>
+    | null
+    | undefined
+) {
+  return state === "safe_to_proceed" || state === "done"
+}
+
+function buildNextMoveInterpreterNote(
+  debug: ReviewContract["analysisDebug"] | null | undefined,
+  mode: ReviewPopupMode
+) {
+  if (mode !== "deep") return ""
+
+  const source = debug?.smart?.assistantNextStepSignalSource ?? "none"
+  const agreement = debug?.smart?.assistantNextStepSignalAgreement ?? "none"
+
+  if (source === "ai") {
+    if (agreement === "agree") {
+      return "Next-step interpretation: AI and the local fallback agree on the assistant’s latest intent."
+    }
+    if (agreement === "disagree") {
+      return "Next-step interpretation: using the AI read of the assistant’s latest intent; the local fallback interpreted it differently."
+    }
+    return "Next-step interpretation: using the AI read of the assistant’s latest intent."
+  }
+
+  if (source === "local_heuristic") {
+    if (agreement === "disagree") {
+      return "Next-step interpretation: using the local fallback because the AI signal was weak or uncertain."
+    }
+    if (agreement === "local_only") {
+      return "Next-step interpretation: using the local fallback because no AI interpretation was available."
+    }
+    if (agreement === "agree") {
+      return "Next-step interpretation: using the local fallback, and the AI read supports the same next move."
+    }
+    return "Next-step interpretation: using the local fallback for this answer."
+  }
+
+  return ""
 }
 
 function mapContractChecklistStatus(status: ReviewContract["requirements"][number]["status"]): ReviewPopupViewModel["checklistRows"][number]["status"] {
@@ -481,42 +744,127 @@ export function mapAfterAnalysisToReviewViewModel(input: {
   const contract = reviewContract && isAnswerQualityTask(taskType) ? reviewContract : null
 
   if (contract) {
+    const rawSimpleNextPromptDecision = contract.analysisDebug?.smart?.simpleNextPromptDecision ?? null
+    const simpleNextPromptDecision =
+      contract.analysisDebug?.smart?.simpleNextPromptApplied === false ? null : rawSimpleNextPromptDecision
     const guardedDecision = guardrailText(contract.overallDecision, contract.taskFamily) || contract.overallDecision
     const guardedRecommendation = guardrailText(contract.recommendation, contract.taskFamily) || contract.recommendation
     const guardedPromptText =
+      simpleNextPromptDecision?.optimizedPrompt ||
       guardrailText(contract.copyPromptText || contract.promptText, contract.taskFamily) ||
       guardrailText(contract.promptText, contract.taskFamily) ||
       contract.nextMoveShort
-    const statusBadge = deriveSmartStatusBadge({
-      promptText: guardedPromptText,
-      fallbackStatus: result.status,
-      contract
+    const noRetryRecommended =
+      result.status !== "FAILED" &&
+      result.status !== "WRONG_DIRECTION" &&
+      (isNoRetryAnalysisResult(result, contract) || isNoRetryPromptText(guardedPromptText))
+    const proceedWithoutRetry = simpleNextPromptDecision
+      ? simpleNextPromptDecision.status === "ready_for_next_prompt"
+      : noRetryRecommended || workflowMeansSafeToProceed(contract.analysisDebug?.smart?.workflowState)
+    const phaseProgress = contract.phaseProgress ?? contract.analysisDebug?.smart?.phaseProgress ?? null
+    const canAdvancePhase = Boolean(
+      phaseProgress?.hasPhasePlan && !phaseProgress.isFinalPhase && phaseProgress.nextPhaseIndex !== null
+    )
+    const statusBadge =
+      simpleNextPromptDecision
+        ? simpleStatusBadge(simpleNextPromptDecision)
+        : proceedWithoutRetry
+          ? { label: "Looks good", tone: "success" as const }
+          : workflowStatusBadge(contract) ||
+            deriveSmartStatusBadge({
+              promptText: guardedPromptText,
+              fallbackStatus: result.status,
+              contract
+            })
+    const hidePromptAction = simpleNextPromptDecision ? false : proceedWithoutRetry && !canAdvancePhase
+    const resolvedPromptLabel =
+      simpleNextPromptDecision?.status === "needs_confirmation"
+        ? "Confirm missing requirements"
+        : simpleNextPromptDecision?.status === "ready_for_next_prompt"
+          ? "Next step prompt"
+          : proceedWithoutRetry
+            ? "Nothing critical missing — safe to proceed"
+            : workflowPromptLabel(contract) ||
+              guardrailText(contract.promptLabel, contract.taskFamily) ||
+              "Next best move"
+    const nextMoveDecision = simpleNextPromptDecision
+      ? buildSimpleNextMoveDecisionForPopup({
+          simpleDecision: simpleNextPromptDecision,
+          decisionText: proceedWithoutRetry ? "The answer matches the requested requirements." : guardedDecision
+        })
+      : buildNextMoveDecision({
+          analysisStatus: result.status,
+          confidence: contract.confidence,
+          workflowState: contract.analysisDebug?.smart?.workflowState ?? null,
+          noRetryRecommended: proceedWithoutRetry,
+          decisionText: proceedWithoutRetry ? "Nothing critical is missing — safe to proceed." : guardedDecision,
+          recommendationText: proceedWithoutRetry ? "Continue without retrying this answer." : guardedRecommendation,
+          promptLabel: resolvedPromptLabel,
+          promptText: guardedPromptText,
+          phaseProgress,
+          assistantSuggestedNextStep: contract.analysisDebug?.smart?.assistantSuggestedNextStep ?? null,
+          assistantNextStepSignal: contract.analysisDebug?.smart?.assistantNextStepSignal ?? null
+        })
+    const promptPresentation = resolvePromptPresentation({
+      nextMoveDecision,
+      fallbackLabel: resolvedPromptLabel,
+      fallbackPrompt: guardedPromptText,
+      fallbackNote: simpleNextPromptDecision
+        ? guardrailText(contract.promptNote, contract.taskFamily) || contract.promptNote
+        : noRetryRecommended ? "No follow-up is needed." : guardrailText(contract.promptNote, contract.taskFamily) || "",
+      hidePromptAction,
+      onCopyPrompt
     })
-    const hidePromptAction = isNoRetryPrompt(guardedPromptText)
+    const simpleFinalDecisionText = simpleNextPromptDecision ? simpleDecisionText(simpleNextPromptDecision) : null
+    const simpleFinalRecommendedAction = simpleNextPromptDecision ? simpleRecommendedAction(simpleNextPromptDecision) : null
+    const simpleFinalMissingItems = simpleNextPromptDecision ? simpleMissingItems(simpleNextPromptDecision) : null
+    const simpleFinalWhyItems = simpleNextPromptDecision ? simpleWhyItems(simpleNextPromptDecision) : null
+    const simpleFinalCheckedItems = simpleNextPromptDecision ? simpleCheckedItems(simpleNextPromptDecision) : null
+    const simpleFinalProofSummary = simpleNextPromptDecision ? simpleProofSummary(simpleNextPromptDecision) : null
+    const simpleFinalChecklistRows = simpleNextPromptDecision ? simpleChecklistRows(simpleNextPromptDecision, mode) : null
+    const requirementMatchSummary = simpleNextPromptDecision
+      ? simpleRequirementMatchSummary(simpleNextPromptDecision, mode)
+      : null
     return {
       state: isDeep ? "deep_review" : "quick_review",
       mode,
       eyebrow: isDeep ? "Reality check" : "Quick review",
       title: "AI Answer Check",
       statusBadge,
-      decision: guardedDecision,
-      recommendedAction: guardedRecommendation,
-      promptLabel: guardrailText(contract.promptLabel, contract.taskFamily) || "Next best move",
-      prompt: guardedPromptText,
-      promptNote: guardrailText(contract.promptNote, contract.taskFamily) || "",
-      promptActions: hidePromptAction ? [] : buildPromptActions(onCopyPrompt),
-      confidenceLabel: `Confidence: ${contract.confidence === "high" ? "Usable" : contract.confidence === "medium" ? "Needs review" : "Weak"}`,
-      confidenceNote: guardrailText(contract.confidenceNote, contract.taskFamily) || contract.confidenceNote,
+      decision: simpleFinalDecisionText ?? (proceedWithoutRetry ? "Nothing critical is missing — safe to proceed." : guardedDecision),
+      recommendedAction:
+        simpleFinalRecommendedAction ?? (proceedWithoutRetry ? "Continue without retrying this answer." : guardedRecommendation),
+      requirementMatchSummary,
+      nextMoveDecision,
+      nextMoveInterpreterNote: buildNextMoveInterpreterNote(contract.analysisDebug ?? null, mode),
+      promptLabel: promptPresentation.promptLabel,
+      prompt: promptPresentation.prompt,
+      promptNote: promptPresentation.promptNote,
+      workflowState: contract.analysisDebug?.smart?.workflowState ?? null,
+      workflowHelper: workflowHelperLine(contract),
+      promptActions: promptPresentation.promptActions,
+      confidenceLabel: `Confidence: ${simpleNextPromptDecision?.status === "needs_confirmation" ? "Needs confirmation" : proceedWithoutRetry ? "Usable" : contract.confidence === "high" ? "Usable" : contract.confidence === "medium" ? "Needs review" : "Weak"}`,
+      confidenceNote: simpleNextPromptDecision
+        ? simpleConfidenceNote(simpleNextPromptDecision)
+        : proceedWithoutRetry
+        ? "The validated next move is to continue without a retry."
+        : guardrailText(contract.confidenceNote, contract.taskFamily) || contract.confidenceNote,
       confidenceReasons: guardrailList(contract.confidenceReasons, contract.taskFamily),
-      missingItems: guardrailList(contract.missingItems, contract.taskFamily),
-      whyItems: guardrailList(contract.whyItems, contract.taskFamily),
-      proofSummary: guardrailText(contract.proofSummary, contract.taskFamily) || contract.proofSummary,
-      checkedArtifacts: guardrailList(contract.checkedItems, contract.taskFamily),
-      uncheckedArtifacts: guardrailList(contract.uncheckedItems, contract.taskFamily),
-      checklistRows: contract.requirements.map((item) => ({
+      missingItems: simpleFinalMissingItems ?? (proceedWithoutRetry ? [] : guardrailList(contract.missingItems, contract.taskFamily)),
+      whyItems: simpleFinalWhyItems ?? guardrailList(contract.whyItems, contract.taskFamily),
+      proofSummary: simpleFinalProofSummary ?? (proceedWithoutRetry
+        ? "The visible answer covers the requested parts."
+        : guardrailText(contract.proofSummary, contract.taskFamily) || contract.proofSummary),
+      checkedArtifacts: simpleFinalCheckedItems ?? guardrailList(contract.checkedItems, contract.taskFamily),
+      uncheckedArtifacts: simpleNextPromptDecision
+        ? simpleFinalMissingItems?.length ? simpleFinalMissingItems : ["No critical missing items found."]
+        : proceedWithoutRetry ? ["No critical missing items found."] : guardrailList(contract.uncheckedItems, contract.taskFamily),
+      checklistRows: simpleFinalChecklistRows ?? contract.requirements.map((item) => ({
         id: `${mode}-${item.id}`,
-        label: `${item.label} (${item.status === "pass" ? "Confirmed" : item.status === "unclear" ? "Unclear" : "Missing"})`,
-        status: mapContractChecklistStatus(item.status)
+        label: proceedWithoutRetry
+          ? `${item.label} (Covered)`
+          : `${item.label} (${item.status === "pass" ? "Confirmed" : item.status === "unclear" ? "Unclear" : "Missing"})`,
+        status: proceedWithoutRetry ? "verified" : mapContractChecklistStatus(item.status)
       })),
       quickToDeepDelta: isDeep ? buildQuickToDeepDelta(quickBaseline, result, true) : "",
       feedbackPrompt: guardrailText(contract.feedbackPrompt, contract.taskFamily) || contract.feedbackPrompt
@@ -524,43 +872,109 @@ export function mapAfterAnalysisToReviewViewModel(input: {
   }
 
   const informationalTask = usesAnswerQualityWording(result, taskType)
-  const noFollowUpNeeded = informationalTask && result.status === "SUCCESS"
   const guardTaskFamily = informationalTask ? taskType : "debug"
   const copyAlignedPrompt = (result.next_prompt_output?.next_prompt || result.next_prompt || "").trim()
+  const noRetryRecommended =
+    result.status !== "FAILED" &&
+    result.status !== "WRONG_DIRECTION" &&
+    (isNoRetryAnalysisResult(result) || isNoRetryPromptText(copyAlignedPrompt))
+  const proceedWithoutRetry = noRetryRecommended || (informationalTask && result.status === "SUCCESS")
+  const phaseProgress = reviewContract?.phaseProgress ?? reviewContract?.analysisDebug?.smart?.phaseProgress ?? null
+  const canAdvancePhase = Boolean(phaseProgress?.hasPhasePlan && !phaseProgress.isFinalPhase && phaseProgress.nextPhaseIndex !== null)
+  const noRetryPromptText =
+    copyAlignedPrompt && isNoRetryPromptText(copyAlignedPrompt)
+      ? copyAlignedPrompt
+      : "No retry needed. The visible answer already covers the requested parts."
   const informationalPrompt = informationalTask
-    ? guardrailText(noFollowUpNeeded ? "Nothing critical missing — safe to proceed." : copyAlignedPrompt, guardTaskFamily) || ""
-    : noFollowUpNeeded ? "Nothing critical missing — safe to proceed." : copyAlignedPrompt
-  const hidePromptAction = noFollowUpNeeded || isNoRetryPrompt(informationalPrompt)
+    ? guardrailText(
+        noRetryRecommended ? noRetryPromptText : proceedWithoutRetry ? "Nothing critical missing — safe to proceed." : copyAlignedPrompt,
+        guardTaskFamily
+      ) || ""
+    : noRetryRecommended ? noRetryPromptText : proceedWithoutRetry ? "Nothing critical missing — safe to proceed." : copyAlignedPrompt
+  const hidePromptAction = proceedWithoutRetry && !canAdvancePhase
+  const statusBadge = proceedWithoutRetry
+    ? { label: "Looks good", tone: "success" as const }
+    : {
+        label: isDeep ? deepStatusLabel(result.status, informationalTask) : quickStatusLabel(result.status, informationalTask),
+        tone: toneForStatus(result.status)
+      }
+  const decision = proceedWithoutRetry
+    ? noRetryRecommended
+      ? "No retry needed — the visible answer covers the requested parts"
+      : "Nothing critical is missing — safe to proceed."
+    : informationalTask
+      ? guardrailText(buildDecision(result, mode, taskType, informationalTask), guardTaskFamily) || buildDecision(result, mode, taskType, informationalTask)
+      : buildDecision(result, mode, taskType, informationalTask)
+  const recommendedAction = proceedWithoutRetry
+    ? "Continue without retrying this answer."
+    : informationalTask
+      ? guardrailText(buildRecommendation(result, mode, taskType, informationalTask), guardTaskFamily) || buildRecommendation(result, mode, taskType, informationalTask)
+      : buildRecommendation(result, mode, taskType, informationalTask)
+  const promptNote = proceedWithoutRetry
+    ? "No follow-up is needed for this answer."
+    : informationalTask
+      ? isDeep
+        ? "Deep checks for missing steps, ambiguity, and major omissions."
+        : "Quick checks whether the answer is direct, clear, and usable."
+      : isDeep
+        ? "Deep uses the same checklist with stronger proof expectations."
+        : "Quick is a fast directional read."
+  const checklistRows: ReviewPopupViewModel["checklistRows"] = result.acceptance_checklist
+    .filter((item) => !informationalTask || Boolean(guardrailText(item.label, guardTaskFamily)))
+    .map((item, index) => ({
+      id: `${mode}-${index}-${item.label}`,
+      label: proceedWithoutRetry
+        ? `${informationalTask ? guardrailText(item.label, guardTaskFamily) || item.label : item.label} (Covered)`
+        : informationalTask
+          ? `${guardrailText(item.label, guardTaskFamily) || item.label} (${item.status === "met" ? "Confirmed" : item.status === "not_sure" ? "Not proven" : "Missing"})`
+          : checklistLabel(item, mode, taskType),
+      status: proceedWithoutRetry ? "verified" as const : markerForChecklist(item.status, mode, taskType)
+    }))
+  const resolvedPromptLabel = informationalTask
+    ? guardrailText(proceedWithoutRetry ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action", guardTaskFamily) || "Next best move"
+    : proceedWithoutRetry ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action"
+  const nextMoveDecision = buildNextMoveDecision({
+    analysisStatus: result.status,
+    confidence: result.confidence,
+    workflowState: null,
+    noRetryRecommended: proceedWithoutRetry,
+    decisionText: decision,
+    recommendationText: recommendedAction,
+    promptLabel: resolvedPromptLabel,
+    promptText: informationalPrompt,
+    phaseProgress,
+    assistantSuggestedNextStep: reviewContract?.analysisDebug?.smart?.assistantSuggestedNextStep ?? null,
+    assistantNextStepSignal: reviewContract?.analysisDebug?.smart?.assistantNextStepSignal ?? null
+  })
+
+  const promptPresentation = resolvePromptPresentation({
+    nextMoveDecision,
+    fallbackLabel: resolvedPromptLabel,
+    fallbackPrompt: informationalPrompt,
+    fallbackNote: promptNote,
+    hidePromptAction,
+    onCopyPrompt
+  })
 
   return {
     state: isDeep ? "deep_review" : "quick_review",
     mode,
     eyebrow: isDeep ? "Reality check" : "Quick review",
     title: "AI Answer Check",
-    statusBadge: {
-      label: isDeep ? deepStatusLabel(result.status, informationalTask) : quickStatusLabel(result.status, informationalTask),
-      tone: toneForStatus(result.status)
-    },
-    decision: informationalTask
-      ? guardrailText(buildDecision(result, mode, taskType, informationalTask), guardTaskFamily) || buildDecision(result, mode, taskType, informationalTask)
-      : buildDecision(result, mode, taskType, informationalTask),
-    recommendedAction: informationalTask
-      ? guardrailText(buildRecommendation(result, mode, taskType, informationalTask), guardTaskFamily) || buildRecommendation(result, mode, taskType, informationalTask)
-      : buildRecommendation(result, mode, taskType, informationalTask),
-    promptLabel: informationalTask
-      ? guardrailText(noFollowUpNeeded ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action", guardTaskFamily) || "Next best move"
-      : noFollowUpNeeded ? "Nothing critical missing — safe to proceed" : isDeep ? "Next best move" : "Suggested action",
-    prompt: informationalPrompt,
-    promptNote: informationalTask
-      ? isDeep
-        ? "Deep checks for missing steps, ambiguity, and major omissions."
-        : "Quick checks whether the answer is direct, clear, and usable."
-      : isDeep
-        ? "Deep uses the same checklist with stronger proof expectations."
-        : "Quick is a fast directional read.",
-    promptActions: hidePromptAction ? [] : buildPromptActions(onCopyPrompt),
-    confidenceLabel: `Confidence: ${confidenceLabel(result.confidence, informationalTask)}`,
-    confidenceNote: result.confidence_reason || (
+    statusBadge,
+    decision,
+    recommendedAction,
+    requirementMatchSummary: null,
+    nextMoveDecision,
+    nextMoveInterpreterNote: buildNextMoveInterpreterNote(reviewContract?.analysisDebug ?? null, mode),
+    promptLabel: promptPresentation.promptLabel,
+    prompt: promptPresentation.prompt,
+    promptNote: promptPresentation.promptNote,
+    promptActions: promptPresentation.promptActions,
+    workflowState: null,
+    workflowHelper: "",
+    confidenceLabel: `Confidence: ${proceedWithoutRetry ? "Usable" : confidenceLabel(result.confidence, informationalTask)}`,
+    confidenceNote: proceedWithoutRetry ? "The validated next move is to continue without a retry." : result.confidence_reason || (
       informationalTask
         ? isDeep
           ? "Deep review is stricter about clarity and completeness."
@@ -572,9 +986,11 @@ export function mapAfterAnalysisToReviewViewModel(input: {
     confidenceReasons: informationalTask
       ? guardrailList(result.confidence_reason ? [result.confidence_reason] : [], guardTaskFamily)
       : result.confidence_reason ? [result.confidence_reason] : [],
-    missingItems: informationalTask ? guardrailList(buildMissingItems(result, mode, taskType), guardTaskFamily) : buildMissingItems(result, mode, taskType),
+    missingItems: proceedWithoutRetry ? [] : informationalTask ? guardrailList(buildMissingItems(result, mode, taskType), guardTaskFamily) : buildMissingItems(result, mode, taskType),
     whyItems: informationalTask ? guardrailList(buildWhyItems(result), guardTaskFamily) : buildWhyItems(result),
-    proofSummary: taskType === "debug"
+    proofSummary: proceedWithoutRetry
+      ? "The visible answer covers the requested parts."
+      : taskType === "debug"
       ? "Code was changed, but real results aren’t shown"
       : informationalTask
       ? isDeep
@@ -584,16 +1000,10 @@ export function mapAfterAnalysisToReviewViewModel(input: {
         ? "What’s explained vs what’s actually proven"
         : "Based on what the answer claims, not what’s proven",
     checkedArtifacts: informationalTask ? guardrailList(buildProofChecked(result, mode, taskType, informationalTask), guardTaskFamily) : buildProofChecked(result, mode, taskType, informationalTask),
-    uncheckedArtifacts: informationalTask ? guardrailList(buildProofMissing(result, mode, taskType, informationalTask), guardTaskFamily) : buildProofMissing(result, mode, taskType, informationalTask),
-    checklistRows: result.acceptance_checklist
-      .filter((item) => !informationalTask || Boolean(guardrailText(item.label, guardTaskFamily)))
-      .map((item, index) => ({
-      id: `${mode}-${index}-${item.label}`,
-      label: informationalTask
-        ? `${guardrailText(item.label, guardTaskFamily) || item.label} (${item.status === "met" ? "Confirmed" : item.status === "not_sure" ? "Not proven" : "Missing"})`
-        : checklistLabel(item, mode, taskType),
-      status: markerForChecklist(item.status, mode, taskType)
-    })),
+    uncheckedArtifacts: proceedWithoutRetry
+      ? ["No critical missing items found."]
+      : informationalTask ? guardrailList(buildProofMissing(result, mode, taskType, informationalTask), guardTaskFamily) : buildProofMissing(result, mode, taskType, informationalTask),
+    checklistRows,
     quickToDeepDelta: isDeep ? buildQuickToDeepDelta(quickBaseline, result, informationalTask) : "",
     feedbackPrompt: isDeep ? "Did this deeper review feel more useful?" : "Did this review help you avoid a bad retry?"
   }
@@ -608,8 +1018,12 @@ export function buildReviewLoadingViewModel(mode: ReviewPopupMode): ReviewPopupV
     statusBadge: { label: "Preparing", tone: "info" },
     decision: "Checking if this answer actually holds up",
     recommendedAction: "Hold for a moment while the latest answer is checked.",
+    requirementMatchSummary: null,
+    nextMoveDecision: null,
     promptLabel: "Prompt preview",
     prompt: "",
+    workflowState: null,
+    workflowHelper: "",
     promptActions: [],
     confidenceLabel: "Confidence: Pending",
     confidenceNote: "No verdict yet.",
@@ -634,8 +1048,12 @@ export function buildReviewErrorViewModel(message: string, mode: ReviewPopupMode
     statusBadge: { label: "Review unavailable", tone: "danger" },
     decision: "Couldn’t verify this answer safely",
     recommendedAction: message,
+    requirementMatchSummary: null,
+    nextMoveDecision: null,
     promptLabel: "Prompt preview",
     prompt: "",
+    workflowState: null,
+    workflowHelper: "",
     promptActions: [],
     confidenceLabel: "Confidence: Low",
     confidenceNote: "The review could not be completed safely.",

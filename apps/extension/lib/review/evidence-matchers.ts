@@ -2,6 +2,7 @@ import type { ResponsePreprocessorOutput } from "@prompt-optimizer/shared/src/sc
 import type { GoalConstraint } from "../goal/types"
 import {
   hasCalorieInfo,
+  hasCodeArtifactResponse,
   hasCssSignals,
   hasFullHtmlFile,
   hasHtmlStructure,
@@ -32,6 +33,18 @@ export type EvidenceMatchResult = {
 
 function normalize(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase()
+}
+
+function isFeatureExclusionTarget(target: string) {
+  const normalized = normalize(target)
+  return /\bads?\b|\badvertisements?\b|\bcloud sync\b|\baccount(?: creation)?\b|\bsocial\b|\bsharing\b|\bexternal devices?\b|\bexternal apps?\b|\bsmart water\b|\bwearables?\b|\bnotifications?\b|\breminders?\b|\bintegrations?\b/.test(
+    normalized
+  )
+}
+
+function isStabilityExclusionTarget(target: string) {
+  const normalized = normalize(target)
+  return /\bcrash(?:es)?\b|\berrors?\b|\bexceptions?\b|\bbugs?\b/.test(normalized)
 }
 
 function hasDailyBudgetScope(text: string) {
@@ -143,6 +156,23 @@ export function matchConstraintEvidence(constraint: GoalConstraint, responseText
     const target = String(constraint.value ?? constraint.label)
     const contradicted = responseContradictsExclusion(target, responseText)
     const preserved = responsePreservesExclusion(target, responseText)
+    const codeArtifactLike =
+      hasCodeArtifactResponse(responseText, responseSummary) || responseSummary.has_code_blocks || responseSummary.mentioned_files.length > 0
+
+    if (!contradicted && codeArtifactLike && isFeatureExclusionTarget(target)) {
+      return {
+        status: "pass",
+        evidence: [`Response does not introduce ${target}.`]
+      }
+    }
+
+    if (!contradicted && codeArtifactLike && isStabilityExclusionTarget(target)) {
+      return {
+        status: "unclear",
+        evidence: []
+      }
+    }
+
     return {
       status: contradicted ? "contradicted" : preserved ? "pass" : "unclear",
       evidence: contradicted ? [`Response still includes or mentions ${target}.`] : preserved ? [`Response explicitly avoids ${target}.`] : []

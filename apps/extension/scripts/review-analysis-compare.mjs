@@ -420,12 +420,27 @@ The service worker was broadcasting { type: "AUTH_STATE_CHANGED", authState: ...
       if (testCase.name === "budget-and-serving-range") {
         assert.doesNotMatch(debug.smart.nextMove, /budget|cost|serving count|time limit/i)
       }
+      if (testCase.name === "coding-prompt-scope") {
+        assert.equal(debug.smart.strategy.mode, "plan_first")
+        assert.equal(debug.smart.workflowState, "plan_requested")
+        assert.match(debug.smart.nextMove, /Before making broader changes, return a short plan|What I understood/i)
+      }
+      if (testCase.name === "bug-fix-proof") {
+        assert.equal(debug.smart.strategy.mode, "plan_first")
+        assert.equal(debug.smart.workflowState, "plan_requested")
+        assert.match(debug.smart.nextMove, /Validation plan|Before making broader changes, return a short plan/i)
+      }
+      if (testCase.name === "broad-change-summary") {
+        assert.equal(debug.smart.workflowState, "safe_to_proceed")
+      }
       summaries.push({
         name: testCase.name,
         selectedPath: debug.selectedPath,
         promptVersion: debug.promptVersion,
         baselineNextMove: debug.baseline.nextMove,
         smartNextMove: debug.smart.nextMove,
+        smartWorkflowState: debug.smart.workflowState,
+        smartStrategy: debug.smart.strategy,
         comparisonSummary: debug.comparisonSummary
       })
     }

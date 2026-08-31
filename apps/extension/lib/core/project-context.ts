@@ -19,6 +19,29 @@ Return only markdown in this exact structure:
 
 Keep it concise, specific, and based only on what is already known in this project/thread. Do not invent details.`
 
+export type ImportedProjectContextSummary = {
+  presentSections: string[]
+  constraints: string[]
+  relevantFiles: string[]
+  blockers: string[]
+  repeatedBugs: string[]
+  fixAttempts: string[]
+  aiDriftPatterns: string[]
+  userIntent: string[]
+  definitionOfDone: string[]
+}
+
+export type ParsedProjectHandoff = {
+  rawMarkdown: string
+  projectContext: string
+  currentState: string
+  summary: ImportedProjectContextSummary
+}
+
+export type ImportedProjectContextRecord = ParsedProjectHandoff & {
+  parsedAt: string
+}
+
 function slugifyProjectLabel(value: string) {
   return value
     .trim()
@@ -105,32 +128,179 @@ export function buildProjectHandoffMarkdown(projectContext: string, currentState
   ].join("\n")
 }
 
-export function parseProjectHandoffMarkdown(raw: string) {
-  const text = raw.trim()
-  if (!text) {
-    return { projectContext: "", currentState: "" }
+function normalizeSectionTitle(value: string) {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+}
+
+function extractBulletLines(text: string) {
+  return text
+    .split(/\n+/)
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+\.)\s*/, "").trim())
+    .filter(Boolean)
+}
+
+function summarizeLines(text: string, matcher: RegExp, limit = 4) {
+  const seen = new Set<string>()
+  const items: string[] = []
+
+  for (const line of extractBulletLines(text)) {
+    if (!matcher.test(line)) continue
+    const key = line.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    items.push(line)
+    if (items.length >= limit) break
   }
 
-  const overviewMatch = text.match(/#\s*Project Overview\s*([\s\S]*?)(?=\n#\s*Current State\b|$)/i)
-  const currentStateMatch = text.match(/#\s*Current State\s*([\s\S]*)$/i)
+  return items
+}
 
-  const projectContext = (overviewMatch?.[1] ?? "")
-    .trim()
-    .replace(/^\s*-\s*/gm, "- ")
-    .trim()
+function extractSectionMap(text: string) {
+  const matches = [...text.matchAll(/^#\s+(.+?)\s*$/gm)]
+  if (!matches.length) return new Map<string, { title: string; content: string }>()
 
-  const currentState = (currentStateMatch?.[1] ?? "")
-    .trim()
-    .replace(/^\s*-\s*/gm, "- ")
-    .trim()
+  const sections = new Map<string, { title: string; content: string }>()
 
-  if (projectContext || currentState) {
-    return { projectContext, currentState }
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index]
+    const title = match[1]?.trim() ?? ""
+    const start = match.index! + match[0].length
+    const end = index + 1 < matches.length ? matches[index + 1].index! : text.length
+    const content = text.slice(start, end).trim()
+    if (!title || !content) continue
+    sections.set(normalizeSectionTitle(title), { title, content })
+  }
+
+  return sections
+}
+
+function buildCombinedMarkdownSections(
+  sections: Map<string, { title: string; content: string }>,
+  orderedTitles: string[]
+) {
+  const present = orderedTitles
+    .map((title) => sections.get(normalizeSectionTitle(title)))
+    .filter((section): section is { title: string; content: string } => Boolean(section))
+
+  if (!present.length) return ""
+  if (present.length === 1) return present[0].content.trim()
+
+  return present.map((section) => `## ${section.title}\n${section.content.trim()}`).join("\n\n").trim()
+}
+
+function buildImportedProjectContextSummary(
+  sections: Map<string, { title: string; content: string }>,
+  projectContext: string,
+  currentState: string
+): ImportedProjectContextSummary {
+  const constraints = summarizeLines(
+    sections.get("constraints")?.content ?? projectContext,
+    /\bconstraint|requirement|non-negotiable|must|should stay|keep|preserve|avoid\b/i,
+    5
+  )
+  const relevantFiles = summarizeLines(
+    sections.get("relevant files")?.content ?? projectContext,
+    /\.[a-z0-9]+$|\/|component|module|file|screen|page|route|service|hook|store/i,
+    6
+  )
+  const blockers = summarizeLines(
+    sections.get("current state")?.content ?? currentState,
+    /\bblocker|blocked|waiting|stuck|need\b/i,
+    4
+  )
+  const repeatedBugs = extractBulletLines(sections.get("repeated bugs")?.content ?? "").slice(0, 5)
+  const fixAttempts = extractBulletLines(sections.get("fix attempts")?.content ?? "").slice(0, 5)
+  const aiDriftPatterns = extractBulletLines(sections.get("ai drift patterns")?.content ?? "").slice(0, 5)
+  const userIntent = extractBulletLines(sections.get("user intent to preserve")?.content ?? "").slice(0, 5)
+  const definitionOfDone = extractBulletLines(
+    sections.get("definition of done")?.content ?? sections.get("project overview")?.content ?? ""
+  ).slice(0, 4)
+
+  return {
+    presentSections: [...sections.values()].map((section) => section.title),
+    constraints,
+    relevantFiles,
+    blockers,
+    repeatedBugs,
+    fixAttempts,
+    aiDriftPatterns,
+    userIntent,
+    definitionOfDone
+  }
+}
+
+export function parseProjectHandoffMarkdown(raw: string): ParsedProjectHandoff {
+  const text = raw.trim()
+  if (!text) {
+    return {
+      rawMarkdown: "",
+      projectContext: "",
+      currentState: "",
+      summary: {
+        presentSections: [],
+        constraints: [],
+        relevantFiles: [],
+        blockers: [],
+        repeatedBugs: [],
+        fixAttempts: [],
+        aiDriftPatterns: [],
+        userIntent: [],
+        definitionOfDone: []
+      }
+    }
+  }
+
+  const sections = extractSectionMap(text)
+  const projectContext = buildCombinedMarkdownSections(sections, [
+    "Project Overview",
+    "Architecture",
+    "Constraints",
+    "Relevant Files",
+    "User Intent To Preserve",
+    "Definition Of Done"
+  ])
+  const currentState = buildCombinedMarkdownSections(sections, [
+    "Current State",
+    "Repeated Bugs",
+    "Fix Attempts",
+    "AI Drift Patterns"
+  ])
+
+  if (projectContext || currentState || sections.size > 0) {
+    return {
+      rawMarkdown: text,
+      projectContext,
+      currentState,
+      summary: buildImportedProjectContextSummary(sections, projectContext, currentState)
+    }
   }
 
   const paragraphs = text.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean)
   return {
+    rawMarkdown: text,
     projectContext: paragraphs[0] ?? "",
-    currentState: paragraphs.slice(1).join("\n\n")
+    currentState: paragraphs.slice(1).join("\n\n"),
+    summary: {
+      presentSections: ["Freeform"],
+      constraints: summarizeLines(text, /\bconstraint|requirement|must|keep\b/i, 5),
+      relevantFiles: summarizeLines(text, /\.[a-z0-9]+$|\/|component|module|file|screen|page|route|service|hook|store/i, 6),
+      blockers: summarizeLines(text, /\bblocker|blocked|waiting|stuck|need\b/i, 4),
+      repeatedBugs: [],
+      fixAttempts: [],
+      aiDriftPatterns: [],
+      userIntent: [],
+      definitionOfDone: summarizeLines(text, /\bdone|complete|success|working\b/i, 4)
+    }
+  }
+}
+
+export function buildImportedProjectContextRecord(raw: string, parsedAt = new Date().toISOString()): ImportedProjectContextRecord {
+  const parsed = parseProjectHandoffMarkdown(raw)
+  return {
+    ...parsed,
+    parsedAt
   }
 }

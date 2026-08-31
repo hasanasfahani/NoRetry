@@ -2,7 +2,7 @@ import type { AnalysisAnswerModel } from "./analysis-answer-model"
 import type { AnalysisRequestModel } from "./analysis-request-model"
 import type { ReviewAnalysisJudgment } from "./contracts"
 
-export const ANALYSIS_JUDGE_PROMPT_VERSION = "analysis-smart-judge.v2.1"
+export const ANALYSIS_JUDGE_PROMPT_VERSION = "analysis-smart-judge.v2.2"
 
 export type AnalysisJudgeConfidence = "high" | "medium" | "low"
 
@@ -45,6 +45,8 @@ export function buildAnalysisJudgePrompt(params: {
     "Prefer `unclear` over guessing. Do not invent missing requirements. Preserve anything clearly met.",
     "Judge the literal request first. Do not silently raise the bar because the topic looks technical or software-related.",
     "For broad or underspecified prompts, prefer `noRetryNeeded: true` when the answer is directionally correct and reasonably complete.",
+    "Treat project memory and the packed imported project context as real collaboration context. Use them to protect stable constraints, accepted assumptions, protected areas, relevant files, definition of done, user intent, preferred patterns, and known bad directions when judging scope and safety.",
+    "If the answer drifts into areas the project memory says to protect or avoid, that should count against the answer even when the raw prompt is brief.",
     "Use the structured models below, not raw paraphrase.",
     `Request model:\n${JSON.stringify(requestModel, null, 2)}`,
     `Answer model:\n${JSON.stringify(answerModel, null, 2)}`,

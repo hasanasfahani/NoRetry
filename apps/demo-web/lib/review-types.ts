@@ -1,3 +1,4 @@
+import type { RequestBrief } from "@prompt-optimizer/shared/src/request-brief"
 import type { AfterAnalysisResult, AnalyzePromptResponse, Attempt, ClarificationQuestion } from "@prompt-optimizer/shared/src/schemas"
 
 export type ReviewPopupMode = "quick" | "deep"
@@ -11,6 +12,7 @@ export type ReviewPromptModeState = {
   sessionKey: string | null
   sourcePrompt: string
   planningGoal: string
+  requestBrief: RequestBrief | null
   planningAttempt: Attempt | null
   analysisSeed: AfterAnalysisResult | null
   localAnalysis: AnalyzePromptResponse | null

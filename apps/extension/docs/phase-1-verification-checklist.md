@@ -42,8 +42,8 @@ This checklist validates the Phase 1 architecture goal:
 
 7. Prompt write-back
    - Generate a next prompt in AFTER.
-   - Click `Submit Prompt`.
-   - Expect the drafted prompt to be inserted into the host prompt input with line breaks preserved.
+   - Click `Copy Prompt`.
+   - Expect the drafted prompt to be copied with line breaks preserved for manual paste.
 
 ## Replit
 
@@ -81,8 +81,8 @@ This checklist validates the Phase 1 architecture goal:
 
 7. Prompt write-back
    - Generate a next prompt in AFTER.
-   - Click `Submit Prompt`.
-   - Expect the drafted prompt to be inserted into the host prompt input with line breaks preserved.
+   - Click `Copy Prompt`.
+   - Expect the drafted prompt to be copied with line breaks preserved for manual paste.
 
 ## Planner Flow (both surfaces)
 

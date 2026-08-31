@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next"
 import { callDeepSeekText } from "../../../api/lib/deepseek"
 import { callKimiText } from "../../../api/lib/kimi"
+import { callOpenAiText } from "../../../api/lib/openai"
 
 function buildDemoAnswerSystemPrompt() {
   return [
@@ -29,6 +30,7 @@ async function generateDemoAnswer(prompt: string) {
   const systemPrompt = buildDemoAnswerSystemPrompt()
   const maxTokens = computeMaxTokens(prompt)
   const providers = [
+    () => callOpenAiText(systemPrompt, prompt, maxTokens),
     () => callKimiText(systemPrompt, prompt, maxTokens),
     () => callDeepSeekText(systemPrompt, prompt, maxTokens)
   ]

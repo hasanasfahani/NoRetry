@@ -15,21 +15,27 @@ import {
   buildOrderedAnsweredPath,
   buildPlannerAdvanceResult,
   buildPlannerBranchContext,
+  findNextUnansweredQuestionIndexInHistory,
   mergeUniqueQuestions,
   prunePlannerBranch,
   resolvePlannerAnswer,
   shouldRebuildPlannerBranch
 } from "../../core/after-orchestration"
+import type { ImportedProjectContextRecord } from "../../core/project-context"
 import type { ReviewPromptModeState } from "../types"
 import {
   buildPromptModePromptContract,
   buildPromptModePromptPlan,
+  buildPromptModeFallbackQuestions,
+  buildPromptModeRequestBrief,
   buildPromptModeQuestionRequest,
   buildPromptModeSeedAnalysis,
   buildPromptModeSessionKey,
   selectPromptModeQuestions
 } from "../services/review-prompt-mode"
 import { normalizeGoalContract } from "../../goal/goal-normalizer"
+import type { StructuredProjectMemory } from "../../session/project-memory"
+import type { ProjectSettingsRecord } from "../../session/project-settings"
 
 type PromptModeOpenInput = {
   promptText: string
@@ -40,7 +46,13 @@ type CreateReviewPromptModeOrchestratorInput = {
   getPlatform: () => Attempt["platform"]
   getSurface: () => PromptSurface
   getSessionSummary: () => Partial<SessionSummary> | null
-  getProjectMemoryContext: () => { projectContext: string; currentState: string }
+  getProjectMemoryContext: () => {
+    projectContext: string
+    currentState: string
+    importedContext?: ImportedProjectContextRecord | null
+    structuredMemory?: StructuredProjectMemory | null
+    settings?: ProjectSettingsRecord | null
+  }
   extendQuestions: (input: ReturnType<typeof buildPromptModeQuestionRequest>) => Promise<ExtendQuestionsResponse>
   refinePrompt: (input: {
     prompt: string
@@ -73,7 +85,9 @@ function buildInitialState(): ReviewPromptModeState {
     popupState: "idle",
     sessionKey: null,
     sourcePrompt: "",
+    nextMoveInitialChoice: null,
     planningGoal: "",
+    requestBrief: null,
     goalContract: null,
     promptContract: null,
     planningAttempt: null,
@@ -87,6 +101,8 @@ function buildInitialState(): ReviewPromptModeState {
     answerState: {},
     otherAnswerState: {},
     isLoadingQuestions: false,
+    branchReadyToGenerate: false,
+    branchStatusMessage: null,
     isGeneratingPrompt: false,
     promptDraft: "",
     promptReady: false,
@@ -111,6 +127,35 @@ function mapTaskTypeToPromptIntent(taskType: Attempt["intent"]["task_type"]) {
   }
 }
 
+function findNextExistingQuestionState(params: {
+  questionHistory: ClarificationQuestion[]
+  questionLevels: Record<string, number>
+  startIndex: number
+  answerState: Record<string, string | string[]>
+  otherAnswerState: Record<string, string>
+  otherOption: string
+}) {
+  const nextHistoryIndex = findNextUnansweredQuestionIndexInHistory({
+    questionHistory: params.questionHistory,
+    startIndex: params.startIndex,
+    answerState: params.answerState,
+    otherAnswerState: params.otherAnswerState,
+    otherOption: params.otherOption
+  })
+
+  if (nextHistoryIndex < 0) return null
+
+  const nextHistoryQuestion = params.questionHistory[nextHistoryIndex]
+  const nextLevel = nextHistoryQuestion ? params.questionLevels[nextHistoryQuestion.id] ?? 1 : 1
+  const currentLevelQuestions = params.questionHistory.filter((question) => (params.questionLevels[question.id] ?? 1) === nextLevel)
+
+  return {
+    currentLevel: nextLevel,
+    currentLevelQuestions,
+    activeQuestionIndex: nextHistoryIndex
+  }
+}
+
 export function createReviewPromptModeOrchestrator(input: CreateReviewPromptModeOrchestratorInput) {
   let requestId = 0
   let state = buildInitialState()
@@ -130,6 +175,13 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
   async function requestNextQuestions(params: {
     promptText: string
     localAnalysis: AnalyzePromptResponse
+    requestBrief?: ReviewPromptModeState["requestBrief"]
+    goalContract?: ReviewPromptModeState["goalContract"]
+    importedContext?: ImportedProjectContextRecord | null
+    structuredMemory?: StructuredProjectMemory | null
+    settings?: ProjectSettingsRecord | null
+    projectContext?: string
+    currentState?: string
     existingQuestions: ClarificationQuestion[]
     answerState: Record<string, string | string[]>
     otherAnswerState: Record<string, string>
@@ -138,6 +190,13 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       buildPromptModeQuestionRequest({
         promptText: params.promptText,
         localAnalysis: params.localAnalysis,
+        requestBrief: params.requestBrief ?? null,
+        goalContract: params.goalContract ?? null,
+        importedContext: params.importedContext ?? null,
+        settings: params.settings ?? null,
+        structuredMemory: params.structuredMemory ?? null,
+        projectContext: params.projectContext ?? "",
+        currentState: params.currentState ?? "",
         existingQuestions: params.existingQuestions,
         answerState: params.answerState,
         otherAnswerState: params.otherAnswerState,
@@ -168,6 +227,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     console.debug("[reeva AI][ReviewPromptMode]", "open", {
       promptLength: promptText.length
     })
+    const memoryContext = input.getProjectMemoryContext()
     const seed = buildPromptModeSeedAnalysis({
       promptText,
       platform: input.getPlatform(),
@@ -178,6 +238,17 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       promptText,
       taskFamily: mapTaskTypeToPromptIntent(seed.planningAttempt.intent.task_type).toLowerCase()
     })
+    const requestBrief = buildPromptModeRequestBrief({
+      sourcePrompt: promptText,
+      localAnalysis: seed.localAnalysis,
+      goalContract,
+      importedContext: memoryContext.importedContext ?? null,
+      settings: memoryContext.settings ?? null,
+      structuredMemory: memoryContext.structuredMemory ?? null,
+      projectContext: memoryContext.projectContext,
+      currentState: memoryContext.currentState,
+      constraints: (seed.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
+    })
 
     emit({
       ...buildInitialState(),
@@ -185,6 +256,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       sessionKey,
       sourcePrompt: promptText,
       planningGoal: promptText,
+      requestBrief,
       goalContract,
       planningAttempt: seed.planningAttempt,
       analysisSeed: seed.seedAnalysis,
@@ -196,6 +268,13 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       const result = await requestNextQuestions({
         promptText,
         localAnalysis: seed.localAnalysis,
+        requestBrief,
+        goalContract,
+        importedContext: memoryContext.importedContext ?? null,
+        settings: memoryContext.settings ?? null,
+        structuredMemory: memoryContext.structuredMemory ?? null,
+        projectContext: memoryContext.projectContext,
+        currentState: memoryContext.currentState,
         existingQuestions: [],
         answerState: {},
         otherAnswerState: {}
@@ -206,9 +285,18 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       const returnedQuestions = getReturnedQuestions(result)
       const selectedQuestions = selectPromptModeQuestions({
         goalContract,
+        requestBrief,
         localAnalysis: seed.localAnalysis,
         questions: returnedQuestions,
-        promptText
+        promptText,
+        importedContext: memoryContext.importedContext ?? null,
+        settings: memoryContext.settings ?? null,
+        structuredMemory: memoryContext.structuredMemory ?? null,
+        projectContext: memoryContext.projectContext,
+        currentState: memoryContext.currentState,
+        existingQuestions: [],
+        answerState: {},
+        otherAnswerState: {}
       })
       const nextState = buildInitialPlannerState(selectedQuestions, 1)
 
@@ -218,6 +306,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         sessionKey,
         sourcePrompt: promptText,
         planningGoal: promptText,
+        requestBrief,
         goalContract,
         planningAttempt: seed.planningAttempt,
         analysisSeed: seed.seedAnalysis,
@@ -242,11 +331,12 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         sessionKey,
         sourcePrompt: promptText,
         planningGoal: promptText,
+        requestBrief,
         goalContract,
         planningAttempt: seed.planningAttempt,
         analysisSeed: seed.seedAnalysis,
         localAnalysis: seed.localAnalysis,
-        errorMessage: error instanceof Error ? error.message : "reeva AI couldn't start the prompt tree safely."
+        errorMessage: error instanceof Error ? error.message : "reeva AI couldn't start the next-move guide safely."
       })
     }
   }
@@ -258,12 +348,37 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
   }
 
   function setOtherAnswer(question: ClarificationQuestion, value: string) {
+    const nextOtherAnswerState = {
+      ...state.otherAnswerState,
+      [question.id]: value
+    }
+    const requestBrief =
+      state.localAnalysis && state.sourcePrompt
+        ? buildPromptModeRequestBrief({
+            sourcePrompt: state.sourcePrompt,
+            localAnalysis: state.localAnalysis,
+            goalContract: state.goalContract,
+            importedContext: input.getProjectMemoryContext().importedContext ?? null,
+            settings: input.getProjectMemoryContext().settings ?? null,
+            structuredMemory: input.getProjectMemoryContext().structuredMemory ?? null,
+            projectContext: input.getProjectMemoryContext().projectContext,
+            currentState: input.getProjectMemoryContext().currentState,
+            answeredPath: buildOrderedAnsweredPath({
+              questionHistory: state.questionHistory,
+              answerState: state.answerState,
+              otherAnswerState: nextOtherAnswerState,
+              otherOption: OTHER_OPTION
+            }),
+            constraints: (state.planningAttempt?.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
+          })
+        : state.requestBrief
     patch({
-      otherAnswerState: {
-        ...state.otherAnswerState,
-        [question.id]: value
-      },
+      otherAnswerState: nextOtherAnswerState,
+      requestBrief,
       promptReady: false
+      ,
+      branchReadyToGenerate: false,
+      branchStatusMessage: null
     })
   }
 
@@ -276,6 +391,28 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       otherAnswerState: state.otherAnswerState
     })
 
+    const answeredPath = buildOrderedAnsweredPath({
+      questionHistory: pruned.keptHistory,
+      answerState: pruned.answerState,
+      otherAnswerState: pruned.otherAnswerState,
+      otherOption: OTHER_OPTION
+    })
+    const requestBrief =
+      state.localAnalysis && state.sourcePrompt
+        ? buildPromptModeRequestBrief({
+            sourcePrompt: state.sourcePrompt,
+            localAnalysis: state.localAnalysis,
+            goalContract: state.goalContract,
+            importedContext: input.getProjectMemoryContext().importedContext ?? null,
+            settings: input.getProjectMemoryContext().settings ?? null,
+            structuredMemory: input.getProjectMemoryContext().structuredMemory ?? null,
+            projectContext: input.getProjectMemoryContext().projectContext,
+            currentState: input.getProjectMemoryContext().currentState,
+            answeredPath,
+            constraints: (state.planningAttempt?.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
+          })
+        : state.requestBrief
+
     emit({
       ...state,
       questionHistory: pruned.keptHistory,
@@ -285,10 +422,13 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       otherAnswerState: pruned.otherAnswerState,
       questionLevels: pruned.questionLevels,
       activeQuestionIndex: pruned.activeQuestionIndex,
+      requestBrief,
       promptContract: null,
       promptDraft: "",
       promptReady: false,
       isLoadingQuestions: false,
+      branchReadyToGenerate: false,
+      branchStatusMessage: null,
       errorMessage: null
     })
   }
@@ -320,23 +460,76 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       otherOption: OTHER_OPTION
     })
 
+    const answeredQuestionsForBrief =
+      advance.kind === "advance_local"
+        ? mergeUniqueQuestions(visibleHistory, visibleLevelQuestions)
+        : advance.askedQuestions
+
+    const nextRequestBrief = buildPromptModeRequestBrief({
+      sourcePrompt: state.sourcePrompt,
+      localAnalysis: state.localAnalysis,
+      goalContract: state.goalContract,
+      importedContext: input.getProjectMemoryContext().importedContext ?? null,
+      settings: input.getProjectMemoryContext().settings ?? null,
+      structuredMemory: input.getProjectMemoryContext().structuredMemory ?? null,
+      projectContext: input.getProjectMemoryContext().projectContext,
+      currentState: input.getProjectMemoryContext().currentState,
+      answeredPath: buildOrderedAnsweredPath({
+        questionHistory: answeredQuestionsForBrief,
+        answerState: advance.mergedAnswers,
+        otherAnswerState: state.otherAnswerState,
+        otherOption: OTHER_OPTION
+      }),
+      constraints: (state.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
+    })
+
     patch({
       answerState: advance.mergedAnswers,
+      requestBrief: nextRequestBrief,
       promptReady: false,
       promptContract: null,
-      promptDraft: ""
+      promptDraft: "",
+      branchReadyToGenerate: false,
+      branchStatusMessage: null
     })
 
     if (advance.kind === "advance_local") {
       const nextQuestion = visibleLevelQuestions[advance.nextIndex]
       patch({
-        activeQuestionIndex: nextQuestion
-          ? findHistoryIndexForQuestion({
+          activeQuestionIndex: nextQuestion
+            ? findHistoryIndexForQuestion({
               questionId: nextQuestion.id,
               history: visibleHistory,
               fallbackIndex: advance.nextIndex
             })
           : advance.nextIndex
+          ,
+          branchReadyToGenerate: false,
+          branchStatusMessage: null
+      })
+      return
+    }
+
+    const currentHistoryIndex = state.questionHistory.findIndex((question) => question.id === questionId)
+    const nextHistoryIndex = findNextUnansweredQuestionIndexInHistory({
+      questionHistory: state.questionHistory,
+      startIndex: currentHistoryIndex,
+      answerState: advance.mergedAnswers,
+      otherAnswerState: state.otherAnswerState,
+      otherOption: OTHER_OPTION
+    })
+
+    if (nextHistoryIndex >= 0) {
+      const nextHistoryQuestion = state.questionHistory[nextHistoryIndex]
+      const nextLevel = nextHistoryQuestion ? state.questionLevels[nextHistoryQuestion.id] ?? state.currentLevel : state.currentLevel
+      patch({
+        answerState: advance.mergedAnswers,
+        currentLevelQuestions: state.questionHistory.filter((question) => (state.questionLevels[question.id] ?? 1) === nextLevel),
+        currentLevel: nextLevel,
+        activeQuestionIndex: nextHistoryIndex,
+        isLoadingQuestions: false,
+        branchReadyToGenerate: false,
+        branchStatusMessage: null
       })
       return
     }
@@ -351,9 +544,17 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     })
 
     try {
+      const memoryContext = input.getProjectMemoryContext()
       const result = await requestNextQuestions({
         promptText: state.sourcePrompt,
         localAnalysis: state.localAnalysis,
+        requestBrief: nextRequestBrief,
+        goalContract: state.goalContract,
+        importedContext: memoryContext.importedContext ?? null,
+        settings: memoryContext.settings ?? null,
+        structuredMemory: memoryContext.structuredMemory ?? null,
+        projectContext: memoryContext.projectContext,
+        currentState: memoryContext.currentState,
         existingQuestions: advance.askedQuestions,
         answerState: advance.mergedAnswers,
         otherAnswerState: state.otherAnswerState
@@ -363,27 +564,55 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       const returnedQuestions = getReturnedQuestions(result)
       const selectedQuestions = selectPromptModeQuestions({
         goalContract: state.goalContract,
+        requestBrief: nextRequestBrief,
         localAnalysis: state.localAnalysis,
         questions: returnedQuestions,
-        promptText: state.sourcePrompt
+        promptText: state.sourcePrompt,
+        importedContext: memoryContext.importedContext ?? null,
+        settings: memoryContext.settings ?? null,
+        structuredMemory: memoryContext.structuredMemory ?? null,
+        projectContext: memoryContext.projectContext,
+        currentState: memoryContext.currentState,
+        existingQuestions: advance.askedQuestions,
+        answerState: advance.mergedAnswers,
+        otherAnswerState: state.otherAnswerState
       })
-      if (selectedQuestions.length) {
+      const fallbackQuestions = selectedQuestions.length
+        ? []
+        : buildPromptModeFallbackQuestions({
+            promptText: state.sourcePrompt,
+            localAnalysis: state.localAnalysis,
+            goalContract: state.goalContract,
+            requestBrief: nextRequestBrief,
+            importedContext: memoryContext.importedContext ?? null,
+            settings: memoryContext.settings ?? null,
+            structuredMemory: memoryContext.structuredMemory ?? null,
+            projectContext: memoryContext.projectContext,
+            currentState: memoryContext.currentState,
+            existingQuestions: advance.askedQuestions
+          }).questionHistory
+      const nextQuestions = selectedQuestions.length ? selectedQuestions : fallbackQuestions
+
+      if (nextQuestions.length) {
         const nextLevel = Math.max(advance.currentLevel + 1, state.currentLevel + 1)
         patch({
-          questionHistory: mergeUniqueQuestions(state.questionHistory, selectedQuestions),
-          currentLevelQuestions: selectedQuestions,
+          questionHistory: mergeUniqueQuestions(state.questionHistory, nextQuestions),
+          currentLevelQuestions: nextQuestions,
           questionLevels: {
             ...state.questionLevels,
-            ...buildLevelMap(selectedQuestions, nextLevel)
+            ...buildLevelMap(nextQuestions, nextLevel)
           },
           currentLevel: nextLevel,
           activeQuestionIndex: advance.askedQuestions.length,
-          isLoadingQuestions: false
+          isLoadingQuestions: false,
+          branchReadyToGenerate: false,
+          branchStatusMessage: null
         })
         console.debug("[reeva AI][ReviewPromptMode]", "branch advanced", {
           sessionKey: state.sessionKey,
           nextLevel,
-          questionCount: selectedQuestions.length
+          questionCount: nextQuestions.length,
+          source: selectedQuestions.length ? "ai" : "fallback"
         })
         return
       }
@@ -394,7 +623,9 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
           history: visibleHistory,
           fallbackIndex: Math.min(state.activeQuestionIndex, Math.max(0, visibleLevelQuestions.length - 1))
         }),
-        isLoadingQuestions: false
+        isLoadingQuestions: false,
+        branchReadyToGenerate: true,
+        branchStatusMessage: "reeva AI has enough context from this branch. The Generate Next Move prompt button is ready below."
       })
     } catch {
       if (request !== requestId) return
@@ -405,13 +636,37 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
   }
 
   function setAnswerDraft(question: ClarificationQuestion, value: string | string[]) {
+    const nextAnswerState = {
+      ...state.answerState,
+      [question.id]: value
+    }
+    const requestBrief =
+      state.localAnalysis
+        ? buildPromptModeRequestBrief({
+            sourcePrompt: state.sourcePrompt,
+            localAnalysis: state.localAnalysis,
+            goalContract: state.goalContract,
+            importedContext: input.getProjectMemoryContext().importedContext ?? null,
+            settings: input.getProjectMemoryContext().settings ?? null,
+            structuredMemory: input.getProjectMemoryContext().structuredMemory ?? null,
+            projectContext: input.getProjectMemoryContext().projectContext,
+            currentState: input.getProjectMemoryContext().currentState,
+            answeredPath: buildOrderedAnsweredPath({
+              questionHistory: state.questionHistory,
+              answerState: nextAnswerState,
+              otherAnswerState: state.otherAnswerState,
+              otherOption: OTHER_OPTION
+            }),
+            constraints: (state.planningAttempt?.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
+          })
+        : state.requestBrief
     patch({
-      answerState: {
-        ...state.answerState,
-        [question.id]: value
-      },
+      answerState: nextAnswerState,
+      requestBrief,
       promptReady: false,
-      promptDraft: ""
+      promptDraft: "",
+      branchReadyToGenerate: false,
+      branchStatusMessage: null
     })
   }
 
@@ -428,6 +683,30 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     })
 
     setAnswerDraft(question, value)
+
+    if (value !== OTHER_OPTION) {
+      const questionIndex = state.questionHistory.findIndex((item) => item.id === question.id)
+      const optimisticAnswerState = {
+        ...state.answerState,
+        [question.id]: nextResolvedValue
+      }
+      const nextExisting = findNextExistingQuestionState({
+        questionHistory: state.questionHistory,
+        questionLevels: state.questionLevels,
+        startIndex: questionIndex,
+        answerState: optimisticAnswerState,
+        otherAnswerState: state.otherAnswerState,
+        otherOption: OTHER_OPTION
+      })
+
+      if (nextExisting) {
+        patch({
+          currentLevel: nextExisting.currentLevel,
+          currentLevelQuestions: nextExisting.currentLevelQuestions,
+          activeQuestionIndex: nextExisting.activeQuestionIndex
+        })
+      }
+    }
 
     if (
       shouldRebuildPlannerBranch({
@@ -458,8 +737,15 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     const activeQuestion = state.questionHistory[state.activeQuestionIndex] ?? state.currentLevelQuestions[state.activeQuestionIndex]
     if (!activeQuestion) return
 
+    const rawValue = state.answerState[activeQuestion.id]
     const typedOther = state.otherAnswerState[activeQuestion.id]?.trim()
-    if (!typedOther) return
+    const resolvedSelection = resolvePlannerAnswer(rawValue, state.otherAnswerState[activeQuestion.id], OTHER_OPTION)
+
+    if (Array.isArray(rawValue) && !rawValue.includes(OTHER_OPTION)) {
+      if (!resolvedSelection) return
+    } else if (!typedOther) {
+      return
+    }
 
     const branchContext = buildPlannerBranchContext({
       questionId: activeQuestion.id,
@@ -467,19 +753,41 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       questionLevels: state.questionLevels
     })
 
-    const previousValue = state.answerState[activeQuestion.id]
-    const previousResolvedValue = resolvePlannerAnswer(previousValue, state.otherAnswerState[activeQuestion.id], OTHER_OPTION)
+    const previousResolvedValue = resolvePlannerAnswer(rawValue, state.otherAnswerState[activeQuestion.id], OTHER_OPTION)
+    const nextResolvedValue = Array.isArray(rawValue) && !rawValue.includes(OTHER_OPTION) ? resolvedSelection : typedOther
+
+    const currentQuestionIndex = state.questionHistory.findIndex((item) => item.id === activeQuestion.id)
+    const optimisticAnswerState = {
+      ...state.answerState,
+      [activeQuestion.id]: nextResolvedValue
+    }
+    const nextExisting = findNextExistingQuestionState({
+      questionHistory: state.questionHistory,
+      questionLevels: state.questionLevels,
+      startIndex: currentQuestionIndex,
+      answerState: optimisticAnswerState,
+      otherAnswerState: state.otherAnswerState,
+      otherOption: OTHER_OPTION
+    })
+
+    if (nextExisting) {
+      patch({
+        currentLevel: nextExisting.currentLevel,
+        currentLevelQuestions: nextExisting.currentLevelQuestions,
+        activeQuestionIndex: nextExisting.activeQuestionIndex
+      })
+    }
 
     if (
       shouldRebuildPlannerBranch({
         questionIndex: branchContext.questionIndex,
         totalQuestions: state.questionHistory.length,
         previousResolvedValue,
-        nextResolvedValue: typedOther
+        nextResolvedValue
       })
     ) {
       pruneFromIndex(branchContext.questionIndex)
-      await advanceDecisionTree(activeQuestion.id, typedOther, {
+      await advanceDecisionTree(activeQuestion.id, nextResolvedValue, {
         history: branchContext.keptHistory,
         currentLevelQuestions: branchContext.keptLevelQuestions,
         currentLevel: branchContext.activeLevel
@@ -487,7 +795,7 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       return
     }
 
-    await advanceDecisionTree(activeQuestion.id, typedOther)
+    await advanceDecisionTree(activeQuestion.id, nextResolvedValue)
   }
 
   async function generatePrompt() {
@@ -500,7 +808,9 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     })
     patch({
       isGeneratingPrompt: true,
-      promptReady: false
+      promptReady: false,
+      branchReadyToGenerate: false,
+      branchStatusMessage: null
     })
 
     const answers = buildNextPromptAnswers({
@@ -530,11 +840,15 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
     const { basePrompt, localFallback } = buildPromptModePromptPlan({
       sourcePrompt: state.sourcePrompt,
       planningGoal: state.planningGoal,
+      requestBrief: state.requestBrief,
       localAnalysis: effectiveLocalAnalysis,
       answeredPath,
       constraints: (state.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean),
+      importedContext: memory.importedContext ?? null,
+      settings: memory.settings ?? null,
       projectContext: memory.projectContext,
-      currentState: memory.currentState
+      currentState: memory.currentState,
+      structuredMemory: memory.structuredMemory ?? null
     })
 
     try {
@@ -549,9 +863,15 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       const promptContract = buildPromptModePromptContract({
         sourcePrompt: state.sourcePrompt,
         planningGoal: state.planningGoal,
+        requestBrief: state.requestBrief,
         refinedPrompt: result.improved_prompt,
         localAnalysis: effectiveLocalAnalysis,
         answeredPath,
+        importedContext: memory.importedContext ?? null,
+        settings: memory.settings ?? null,
+        projectContext: memory.projectContext,
+        currentState: memory.currentState,
+        structuredMemory: memory.structuredMemory ?? null,
         constraints: (state.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
       })
       const structuredPrompt = promptContract.renderedPrompt
@@ -562,7 +882,9 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         promptContract,
         promptDraft: structuredPrompt,
         promptReady: true,
-        isGeneratingPrompt: false
+        isGeneratingPrompt: false,
+        branchReadyToGenerate: false,
+        branchStatusMessage: null
       })
       console.debug("[reeva AI][ReviewPromptMode]", "prompt ready", {
         sessionKey: state.sessionKey,
@@ -573,9 +895,15 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
       const promptContract = buildPromptModePromptContract({
         sourcePrompt: state.sourcePrompt,
         planningGoal: state.planningGoal,
+        requestBrief: state.requestBrief,
         refinedPrompt: localFallback,
         localAnalysis: effectiveLocalAnalysis,
         answeredPath,
+        importedContext: memory.importedContext ?? null,
+        settings: memory.settings ?? null,
+        projectContext: memory.projectContext,
+        currentState: memory.currentState,
+        structuredMemory: memory.structuredMemory ?? null,
         constraints: (state.planningAttempt.intent.constraints ?? []).map((item) => item.trim()).filter(Boolean)
       })
       const structuredFallback = promptContract.renderedPrompt
@@ -584,7 +912,9 @@ export function createReviewPromptModeOrchestrator(input: CreateReviewPromptMode
         promptContract,
         promptDraft: structuredFallback,
         promptReady: true,
-        isGeneratingPrompt: false
+        isGeneratingPrompt: false,
+        branchReadyToGenerate: false,
+        branchStatusMessage: null
       })
       console.debug("[reeva AI][ReviewPromptMode]", "prompt ready from fallback", {
         sessionKey: state.sessionKey,

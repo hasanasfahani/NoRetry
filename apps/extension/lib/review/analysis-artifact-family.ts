@@ -22,6 +22,16 @@ function normalize(value: string) {
   return value.replace(/\s+/g, " ").trim().toLowerCase()
 }
 
+function looksLikePhaseExecutionCodingPrompt(prompt: string) {
+  return (
+    /\b(?:give me|provide|write|implement|build)\b[^.\n]{0,80}\bcode\b/i.test(prompt) &&
+    /\bphase\s+\d+\b/i.test(prompt)
+  ) ||
+    /\bstart with phase\s+\d+\b/i.test(prompt) ||
+    /\bdo not start phase\s+\d+\b/i.test(prompt) ||
+    /\bwait for my (?:approval|confirmation)\b/i.test(prompt)
+}
+
 function familyFromGoalContract(goalContract: GoalContract | null) {
   const deliverable = goalContract?.deliverableType?.toLowerCase() ?? ""
   if (deliverable === "recipe") return "recipe" as const
@@ -43,6 +53,10 @@ export function detectAnalysisArtifactFamily(params: {
   const familyFromGoal = familyFromGoalContract(params.goalContract ?? null)
   if (familyFromGoal) return familyFromGoal
 
+  if (looksLikePhaseExecutionCodingPrompt(prompt)) {
+    return "code"
+  }
+
   if (/\bwrite\b.+\bprompt\b|\bsend-ready coding prompt\b|\bprompt for (?:a )?coding tool\b/.test(prompt) && /\bcursor\b|\bclaude\b|\breplit\b|\bcoding tool\b|\bvibe coding\b/.test(prompt)) {
     return "prompt_for_coding_tool"
   }
@@ -51,14 +65,25 @@ export function detectAnalysisArtifactFamily(params: {
   if (params.taskFamily === "debug") return "bug_fix"
 
   const combined = `${prompt} ${response}`
-  const softwareSignals = /\breact\b|\bnext\.?js\b|\btypescript\b|\bjavascript\b|\bpython\b|\bapi\b|\bendpoint\b|\bcomponent\b|\bpage\b|\broute\b|\bcss\b|\bhtml\b|\bfile\b|\bfiles\b|\btest\b|\bprompt\b|\breplit\b|\bcursor\b|\bclaude\b|\bbolt\b/.test(combined)
+  const softwareSignals =
+    /\breact\b|\bnext\.?js\b|\btypescript\b|\bjavascript\b|\bpython\b|\bapi\b|\bendpoint\b|\bcomponent\b|\bpage\b|\broute\b|\bcss\b|\bhtml\b|\bfile\b|\bfiles\b|\btest\b|\bprompt\b|\breplit\b|\bcursor\b|\bclaude\b|\bbolt\b|\bweb app(?:lication)?\b|\bmobile app\b|\bapp\b|\bsettings\b|\bnotification(?:s)?\b|\bauth(?:entication)?\b|\blog(?:in|out)?\b|\bdatabase\b/.test(
+      combined
+    )
   if (/\bverify\b|\bvalidation\b|\bsmoke test\b|\bregression\b/.test(prompt) && softwareSignals) return "verification"
   if (/\bbug\b|\bfix\b|\berror\b|\bbroken\b|\bissue\b|\bnot working\b/.test(prompt) && softwareSignals) return "bug_fix"
-  if (/\bimplementation plan\b|\brollout plan\b|\bplan the implementation\b|\bphases?\b|\broadmap\b/.test(prompt) && softwareSignals) return "implementation_plan"
+  if (
+    /\bimplementation plan\b|\brollout plan\b|\bplan the implementation\b|\bphases?\b|\broadmap\b/.test(prompt) &&
+    softwareSignals &&
+    !looksLikePhaseExecutionCodingPrompt(prompt)
+  ) {
+    return "implementation_plan"
+  }
   if (/\bspec\b|\brequirements?\b|\bacceptance criteria\b|\bdefinition of complete\b/.test(prompt) && softwareSignals) return "spec"
   if (/\bprompt\b/.test(prompt) && /\bcursor\b|\bclaude\b|\breplit\b|\bvibe coding\b|\bcoding tool\b/.test(prompt)) return "prompt_for_coding_tool"
   if (/\bmodify\b|\bupdate\b|\bchange\b|\brefactor\b|\bonly change\b|\bdo not change\b/.test(prompt) && softwareSignals) return "code_change"
-  if (softwareSignals && /\bbuild\b|\bimplement\b|\bcreate\b|\bwrite\b|\bgenerate\b/.test(prompt)) return "prompt_for_coding_tool"
+  if (softwareSignals && /\bbuild\b|\bimplement\b|\bcreate\b|\bwrite\b|\bgenerate\b|\bcode\b/.test(prompt)) {
+    return "prompt_for_coding_tool"
+  }
   if (/\bsubject:\b|\bdear team\b|\bdear all\b|\bemail\b|\bmeeting\b/.test(combined)) return "email"
   if (/\brecipe\b|\bingredients\b|\bcalories\b|\bmacros?\b|\bserving\b|\blunch\b|\bdinner\b/.test(combined)) return "recipe"
   if (/\bhtml\b|\bcss\b|\bjavascript\b|<!doctype html>|<html\b|```(?:html|css|js|ts|tsx)/.test(combined)) return "code"

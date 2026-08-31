@@ -11,8 +11,13 @@ function renderSection(title: string, items: string[]) {
   return `${title}:\n${items.map((item) => `- ${item}`).join("\n")}`
 }
 
-export function buildPromptContractFromGoalContract(contract: GoalContract): PromptContract {
-  const plan = buildPromptRenderPlan(contract)
+export function buildPromptContractFromGoalContract(
+  contract: GoalContract,
+  options?: {
+    acceptanceCriteria?: string[]
+  }
+): PromptContract {
+  const plan = buildPromptRenderPlan(contract, options)
   return {
     goalContract: contract,
     sections: plan.sections,
@@ -20,6 +25,11 @@ export function buildPromptContractFromGoalContract(contract: GoalContract): Pro
   }
 }
 
-export function renderPromptFromGoalContract(contract: GoalContract) {
-  return buildPromptContractFromGoalContract(contract).renderedPrompt
+export function renderPromptFromGoalContract(
+  contract: GoalContract,
+  options?: {
+    acceptanceCriteria?: string[]
+  }
+) {
+  return buildPromptContractFromGoalContract(contract, options).renderedPrompt
 }

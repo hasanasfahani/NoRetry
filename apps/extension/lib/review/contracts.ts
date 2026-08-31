@@ -1,5 +1,11 @@
 import type { ReviewEvidenceSummary } from "./evidence-model"
 import type { FailureType } from "./failure-taxonomy"
+import type { AssistantNextStepSignal } from "./assistant-next-step-signal"
+import type { AssistantSignalFirstDecision } from "./next-move-decision"
+import type { ReviewPhaseProgress } from "./phase-progress"
+import type { SimpleNextPromptDecision } from "./simple-next-prompt-decision"
+import type { SimpleNextPromptRolloutMode } from "./simple-next-prompt-rollout"
+import type { ReviewWorkflowState } from "./workflow-state"
 
 export type ReviewRequirementPriority = "P1" | "P2" | "P3" | "P4"
 
@@ -37,6 +43,14 @@ export type ReviewAnalysisJudgment = {
   answerEvidence: ReviewAnalysisEvidenceSpan[]
 }
 
+export type ReviewFollowUpStrategyMode =
+  | "no_retry"
+  | "direct_revise"
+  | "clarify_scope"
+  | "validate_before_continue"
+  | "plan_first"
+  | "split_into_phases"
+
 export type ReviewAnalysisDebugPayload = {
   promptVersion: string
   selectedPath: "baseline" | "smart"
@@ -51,6 +65,22 @@ export type ReviewAnalysisDebugPayload = {
     working: string[]
     gaps: string[]
     nextMove: string
+    assistantSuggestedNextStep?: string | null
+    assistantNextStepSignal?: AssistantNextStepSignal | null
+    assistantNextStepSignalLocal?: AssistantNextStepSignal | null
+    assistantNextStepSignalAi?: AssistantNextStepSignal | null
+    assistantNextStepSignalSource?: "ai" | "local_heuristic" | "none"
+    assistantNextStepSignalAgreement?: "agree" | "disagree" | "ai_only" | "local_only" | "none"
+    assistantSignalDecision?: AssistantSignalFirstDecision | null
+    simpleNextPromptDecision?: SimpleNextPromptDecision | null
+    simpleNextPromptRolloutMode?: SimpleNextPromptRolloutMode
+    simpleNextPromptApplied?: boolean
+    workflowState: ReviewWorkflowState
+    phaseProgress?: ReviewPhaseProgress | null
+    strategy: {
+      mode: ReviewFollowUpStrategyMode
+      reason: string
+    }
     judgments: ReviewAnalysisJudgment[]
     judgeNotes: string[]
     validatorNotes: string[]
@@ -92,5 +122,6 @@ export type ReviewContract = {
   nextMoveShort: string
   feedbackPrompt: string
   retryStrategy?: string
+  phaseProgress?: ReviewPhaseProgress | null
   analysisDebug?: ReviewAnalysisDebugPayload | null
 }

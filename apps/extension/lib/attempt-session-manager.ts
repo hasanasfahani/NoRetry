@@ -28,6 +28,9 @@ export async function createAttempt(input: {
   raw_prompt: string
   optimized_prompt: string
   intent: AttemptIntent
+  analysis_input_size?: Attempt["analysis_input_size"]
+  analysis_mode?: Attempt["analysis_mode"]
+  analysis_input_signals?: Attempt["analysis_input_signals"]
 }) {
   const attempts = await getAttempts()
   const attempt: Attempt = {
@@ -59,7 +62,7 @@ export async function updateAttempt(attemptId: string, patch: Partial<Attempt>) 
 
 export async function markAttemptSubmitted(
   attemptId: string,
-  patch?: Partial<Pick<Attempt, "raw_prompt" | "optimized_prompt" | "intent">>
+  patch?: Partial<Pick<Attempt, "raw_prompt" | "optimized_prompt" | "intent" | "analysis_input_size" | "analysis_mode" | "analysis_input_signals">>
 ) {
   return updateAttempt(attemptId, {
     ...patch,

@@ -13,7 +13,8 @@ async function bundleModules(outdir) {
     entryPoints: [
       path.resolve(extensionRoot, "lib/review/services/review-target.ts"),
       path.resolve(extensionRoot, "lib/review/orchestrator/review-popup-orchestrator.ts"),
-      path.resolve(extensionRoot, "lib/core/after-orchestration.ts")
+      path.resolve(extensionRoot, "lib/core/after-orchestration.ts"),
+      path.resolve(extensionRoot, "lib/surfaces/replit/completion-state.ts")
     ],
     outdir,
     entryNames: "[name]",
@@ -55,9 +56,55 @@ async function main() {
     const targetMod = await import(pathToFileURL(path.join(outdir, "review-target.js")).href)
     const orchestratorMod = await import(pathToFileURL(path.join(outdir, "review-popup-orchestrator.js")).href)
     const afterMod = await import(pathToFileURL(path.join(outdir, "after-orchestration.js")).href)
+    const replitCompletionMod = await import(pathToFileURL(path.join(outdir, "completion-state.js")).href)
     const { createReviewTargetResolver } = targetMod
     const { createReviewPopupOrchestrator } = orchestratorMod
     const { buildAfterPlaceholder } = afterMod
+    const { resolveReplitAnswerCompletionState } = replitCompletionMod
+
+    const missingControlsState = {
+      isStreamingActive: false,
+      assistantControlsVisible: false,
+      reason: "assistant_present_without_controls"
+    }
+    assert.deepEqual(
+      resolveReplitAnswerCompletionState({
+        genericState: missingControlsState,
+        assistantExists: true,
+        submitButtonVisible: true,
+        submitButtonLabel: "Start"
+      }),
+      {
+        isStreamingActive: false,
+        assistantControlsVisible: true,
+        reason: "replit_idle_submit_visible"
+      },
+      "Replit's visible idle Start button settles a completed answer even when assistant controls are hidden"
+    )
+    assert.equal(
+      resolveReplitAnswerCompletionState({
+        genericState: {
+          isStreamingActive: true,
+          assistantControlsVisible: false,
+          reason: "streaming_indicator_visible"
+        },
+        assistantExists: true,
+        submitButtonVisible: true,
+        submitButtonLabel: "Start"
+      }).isStreamingActive,
+      true,
+      "An active streaming indicator cannot be overridden by Replit's Start control"
+    )
+    assert.equal(
+      resolveReplitAnswerCompletionState({
+        genericState: missingControlsState,
+        assistantExists: true,
+        submitButtonVisible: true,
+        submitButtonLabel: "Send"
+      }).reason,
+      "replit_idle_submit_visible",
+      "Replit's disabled idle Send button settles a completed answer"
+    )
 
     const olderAttempt = makeAttempt("attempt-old", "old prompt", "2026-04-15T09:00:00.000Z")
     const matchingAttempt = makeAttempt("attempt-new", "website code for a basic CV. css and html", "2026-04-15T09:01:00.000Z")
@@ -243,7 +290,7 @@ async function main() {
 
     await orchestrator.open()
     const finalState = states.at(-1)
-    assert.equal(resolveCalls, 3)
+    assert.equal(resolveCalls, 4, "target resolution retries three times and performs one post-analysis freshness check")
     assert.equal(finalState.controller.popupState, "deep_review")
     assert.equal(finalState.controller.errorReason, null)
 

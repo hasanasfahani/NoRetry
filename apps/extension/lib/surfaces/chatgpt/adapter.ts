@@ -5,6 +5,7 @@ import {
   createEmptyUserPromptSnapshot,
   createPanelMountContext,
   createThreadSnapshot,
+  getGenericAnswerCompletionState,
   type SurfaceAdapter
 } from "../adapter"
 import { findPromptInput, findSubmitButton, readPromptValue, writePromptValue } from "../../replit"
@@ -60,6 +61,12 @@ export const chatGptSurfaceAdapter: SurfaceAdapter = {
       identity: readMessageIdentity(node, text),
       node
     }
+  },
+  getAnswerCompletionState() {
+    return getGenericAnswerCompletionState({
+      assistantExists: this.getLatestAssistantResponse().exists,
+      submitButton: this.getDraftPrompt().submitButton
+    })
   },
   getLatestUserPrompt() {
     const node = findLatestChatGptUserMessage()

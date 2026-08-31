@@ -62,7 +62,7 @@ const styles = {
       fontWeight: 800,
       background:
         status === "verified"
-          ? "#dcfce7"
+          ? "#dbeafe"
           : status === "missing"
             ? "#fee2e2"
             : status === "blocked"
@@ -70,7 +70,7 @@ const styles = {
               : "#e2e8f0",
       color:
         status === "verified"
-          ? "#166534"
+          ? "#075fd6"
           : status === "missing"
             ? "#b91c1c"
             : status === "blocked"

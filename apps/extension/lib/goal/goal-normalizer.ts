@@ -79,6 +79,25 @@ function inferTaskFamily(promptText: string, suppliedTaskFamily?: string) {
 
 function inferDeliverableType(promptText: string) {
   const normalized = promptText.toLowerCase()
+  const multiChangeMatches =
+    normalized.match(/\b(add|change|update|fix|remove|edit|replace)\b/g)?.length ?? 0
+  const hasMultiChangeSeparators =
+    /,\s*(?:add|change|update|fix|remove|edit|replace)\b|\band\s+(?:add|change|update|fix|remove|edit|replace)\b/.test(normalized)
+
+  if (
+    multiChangeMatches >= 3 &&
+    hasMultiChangeSeparators &&
+    /\b(field|dropdown|input|button|form|flow|screen|page|component|step|section|background|wording|password)\b/.test(normalized)
+  ) {
+    return "multi_change"
+  }
+
+  if (
+    /\b(add|update|remove|change|edit|replace)\b/.test(normalized) &&
+    /\b(field|dropdown|input|button|form|flow|screen|page|component|step|section)\b/.test(normalized)
+  ) {
+    return "scoped_change"
+  }
   if (/\brecipe\b|\blunch\b|\bdinner\b|\bmeal\b/.test(normalized)) return "recipe"
   if (/\bfull html file\b|\bhtml\b/.test(normalized)) return "html_file"
   if (/\brewrite\b|\brephrase\b|\bpolish\b/.test(normalized)) return "rewrite"

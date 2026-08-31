@@ -1,5 +1,11 @@
 import type { AnalysisArtifactFamily } from "./analysis-artifact-family"
 import { detectAnalysisArtifactFamily } from "./analysis-artifact-family"
+import type { AssistantNextStepSignal } from "./assistant-next-step-signal"
+import {
+  buildAssistantNextStepSignalFromInterpretation,
+  extractAssistantNextStepSignal
+} from "./assistant-next-step-signal"
+import { runAssistantNextMoveLlmInterpreter } from "./assistant-next-move-llm"
 import type { AnalysisQuantitativeObservation } from "./analysis-semantics"
 import { buildAnalysisAnswerSlots, type AnalysisSlotValue } from "./analysis-slot-extractors"
 import {
@@ -43,6 +49,12 @@ export type AnalysisAnswerModel = {
   mentionedFiles: string[]
   hasVerificationSignals: boolean
   hasRootCauseSignals: boolean
+  suggestedNextStep: string | null
+  nextStepSignal: AssistantNextStepSignal | null
+  nextStepSignalLocal: AssistantNextStepSignal | null
+  nextStepSignalAi: AssistantNextStepSignal | null
+  nextStepSignalSource: "ai" | "local_heuristic" | "none"
+  nextStepSignalAgreement: "agree" | "disagree" | "ai_only" | "local_only" | "none"
   slots: AnalysisSlotValue[]
 }
 
@@ -152,6 +164,19 @@ function buildSyntheticObservations(params: {
   return observations
 }
 
+function compareNextStepSignals(left: AssistantNextStepSignal | null, right: AssistantNextStepSignal | null) {
+  if (!left && !right) return "none" as const
+  if (left && !right) return "local_only" as const
+  if (!left && right) return "ai_only" as const
+
+  const sameIntent =
+    left!.nextMoveType === right!.nextMoveType &&
+    left!.currentStepClaim === right!.currentStepClaim &&
+    (left!.targetPhaseNumber ?? null) === (right!.targetPhaseNumber ?? null)
+
+  return sameIntent ? ("agree" as const) : ("disagree" as const)
+}
+
 export function buildAnalysisAnswerModel(params: {
   responseText: string
   promptText: string
@@ -177,6 +202,7 @@ export function buildAnalysisAnswerModel(params: {
     budgetRange,
     mentionedFiles
   })
+  const nextStepSignal = extractAssistantNextStepSignal(rawAnswer, { promptText: params.promptText })
 
   const model: AnalysisAnswerModel = {
     artifactFamily: detectAnalysisArtifactFamily({
@@ -210,7 +236,52 @@ export function buildAnalysisAnswerModel(params: {
     mentionedFiles,
     hasVerificationSignals: /\btest\b|\bverify\b|\bverified\b|\bsmoke\b|\bregression\b|\bpassed\b/.test(normalized),
     hasRootCauseSignals: /\broot cause\b|\bcaused by\b|\bbecause\b|\bissue was\b|\bproblem was\b/.test(normalized),
+    suggestedNextStep: nextStepSignal?.rawPhrase ?? null,
+    nextStepSignal,
+    nextStepSignalLocal: nextStepSignal,
+    nextStepSignalAi: null,
+    nextStepSignalSource: nextStepSignal ? "local_heuristic" : "none",
+    nextStepSignalAgreement: nextStepSignal ? "local_only" : "none",
     slots: []
+  }
+
+  model.slots = buildAnalysisAnswerSlots(model)
+  return model
+}
+
+export async function buildAnalysisAnswerModelWithInterpreter(params: {
+  responseText: string
+  promptText: string
+  taskFamily: string
+  interpretPrompt?: (input: {
+    prompt: string
+    answers: Record<string, string>
+    taskType: string
+  }) => Promise<string | null>
+}): Promise<AnalysisAnswerModel> {
+  const fallbackModel = buildAnalysisAnswerModel(params)
+
+  if (!params.interpretPrompt) return fallbackModel
+
+  const aiInterpretation = await runAssistantNextMoveLlmInterpreter({
+    promptText: params.promptText,
+    responseText: params.responseText,
+    taskType: params.taskFamily,
+    interpretPrompt: params.interpretPrompt
+  })
+
+  if (!aiInterpretation) return fallbackModel
+
+  const aiSignal = buildAssistantNextStepSignalFromInterpretation(aiInterpretation)
+  const useAiSignal = aiInterpretation.confidenceLevel !== "low"
+  const nextStepSignal = useAiSignal ? aiSignal : fallbackModel.nextStepSignal
+  const model: AnalysisAnswerModel = {
+    ...fallbackModel,
+    suggestedNextStep: nextStepSignal?.rawPhrase ?? null,
+    nextStepSignal,
+    nextStepSignalAi: aiSignal,
+    nextStepSignalSource: nextStepSignal?.source ?? "none",
+    nextStepSignalAgreement: compareNextStepSignals(fallbackModel.nextStepSignalLocal, aiSignal)
   }
 
   model.slots = buildAnalysisAnswerSlots(model)

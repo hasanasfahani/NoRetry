@@ -237,20 +237,21 @@ export function buildSuggestedDirectionChips(
     .filter((item) => item.status !== "met")
     .filter((item) => !usedSuggestedDirectionChipIds.includes(item.label))
     .slice(0, 4)
-    .map((item) => ({
-      id: item.label,
-      label: `${
-        item.status === "missed" ? "Fix" : "Double-check"
-      } ${item.label.charAt(0).toLowerCase()}${item.label.slice(1)}`,
-      actionStyle: item.status === "missed" ? "fix" : "double-check"
-    }))
+    .map((item) => {
+      const actionStyle = item.status === "missed" ? "fix" : "double-check"
+      return {
+        id: item.label,
+        label: `${actionStyle === "fix" ? "Fix" : "Double-check"} ${item.label.charAt(0).toLowerCase()}${item.label.slice(1)}`,
+        actionStyle
+      }
+    })
 }
 
-export function prunePlannerBranch(params: {
+export function prunePlannerBranch<TAnswerState extends Record<string, string | string[]>>(params: {
   startIndex: number
   questionHistory: ClarificationQuestion[]
   questionLevels: Record<string, number>
-  answerState: Record<string, string>
+  answerState: TAnswerState
   otherAnswerState: Record<string, string>
 }) {
   const { startIndex, questionHistory, questionLevels, answerState, otherAnswerState } = params
@@ -267,7 +268,7 @@ export function prunePlannerBranch(params: {
     keptHistory,
     activeLevel,
     currentLevelQuestions: keptHistory.filter((question) => (questionLevels[question.id] ?? 1) === activeLevel),
-    answerState: Object.fromEntries(Object.entries(answerState).filter(([questionId]) => keepQuestionId(questionId))),
+    answerState: Object.fromEntries(Object.entries(answerState).filter(([questionId]) => keepQuestionId(questionId))) as TAnswerState,
     otherAnswerState: Object.fromEntries(
       Object.entries(otherAnswerState).filter(([questionId]) => keepQuestionId(questionId))
     ),
@@ -327,6 +328,27 @@ export function findNextUnansweredQuestionIndex(params: {
   })
 }
 
+export function findNextUnansweredQuestionIndexInHistory(params: {
+  questionHistory: ClarificationQuestion[]
+  startIndex: number
+  answerState: Record<string, string | string[]>
+  otherAnswerState: Record<string, string>
+  otherOption: string
+}) {
+  const { questionHistory, startIndex, answerState, otherAnswerState, otherOption } = params
+  for (let index = Math.max(0, startIndex + 1); index < questionHistory.length; index += 1) {
+    const question = questionHistory[index]
+    const rawValue = answerState[question.id]
+    const resolvedValue = resolvePlannerAnswer(rawValue, otherAnswerState[question.id], otherOption)
+    if (Array.isArray(rawValue)) {
+      if (rawValue.length === 0 || (rawValue.includes(otherOption) && !resolvedValue)) return index
+      continue
+    }
+    if (!rawValue || (rawValue === otherOption && !resolvedValue)) return index
+  }
+  return -1
+}
+
 export function normalizePlannerAnswers(params: {
   answerState: Record<string, string | string[]>
   otherAnswerState: Record<string, string>
@@ -354,7 +376,14 @@ export function buildOrderedAnsweredPath(params: {
     .map((question) => {
       const resolvedValue = resolvePlannerAnswer(answerState[question.id], otherAnswerState[question.id], otherOption)
       if (!resolvedValue) return ""
-      return `${question.label}: ${resolvedValue}`
+      if (
+        /\bwhat exact part of the change should the next prompt lock down first\b|\bwhat kind of result should the next prompt ask for\b|\bwhat should the next prompt lock down first\b|\bwhich current requirement is least negotiable\b/i.test(
+          question.label
+        )
+      ) {
+        return ""
+      }
+      return resolvedValue.trim()
     })
     .filter(Boolean)
 }

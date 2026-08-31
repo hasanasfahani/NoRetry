@@ -2,7 +2,8 @@ import type {
   AnalyzePromptResponse,
   DetectOutcomeRequest,
   PromptIntent,
-  SessionSummary
+  SessionSummary,
+  StrengthScore
 } from "@prompt-optimizer/shared/src/schemas"
 
 export type PendingPrompt = {
@@ -65,7 +66,7 @@ export function buildDetectOutcomePayload(params: {
   currentSession: SessionSummary
   pendingPrompt: PendingPrompt
   optimizedPrompt: string | null
-  strengthScore: SessionSummary["lastStrengthScore"] | null | undefined
+  strengthScore: StrengthScore | null | undefined
   outputSnippet: string
   errorSummary: string | null | undefined
   changedFiles: string[]
