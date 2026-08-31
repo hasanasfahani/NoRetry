@@ -27,6 +27,7 @@ import type {
 import { BEFORE_SYSTEM_PROMPT, EXTEND_QUESTIONS_SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT } from "@prompt-optimizer/shared"
 import { callDeepSeekJson } from "./deepseek"
 import { callKimiJson } from "./kimi"
+import { callOpenAiJson } from "./openai"
 import { runtimeFlags } from "./env"
 import { getPatternCache, setPatternCache } from "./repository"
 import { trimForBudget } from "./cost-control"
@@ -39,6 +40,7 @@ async function callStructuredJson<T>(
 ): Promise<T | null> {
   const trimmedPrompt = trimForBudget(userPrompt, 5000)
   const providers = [
+    () => callOpenAiJson(systemPrompt, trimmedPrompt, maxTokens),
     () => callKimiJson(systemPrompt, trimmedPrompt, maxTokens),
     () => callDeepSeekJson(systemPrompt, trimmedPrompt, maxTokens)
   ]

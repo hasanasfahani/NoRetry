@@ -81,7 +81,7 @@ async function main() {
   const deepSeekApiKey = process.env.DEEPSEEK_API_KEY ?? ""
   const deepSeekModel = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash"
   const kimiApiKey = process.env.KIMI_API_KEY || process.env.MOONSHOT_API_KEY || ""
-  const kimiModel = process.env.KIMI_MODEL || process.env.MOONSHOT_MODEL || "kimi-k2.6"
+  const kimiModel = process.env.KIMI_MODEL || process.env.MOONSHOT_MODEL || "kimi-k2.7-code-highspeed"
 
   const system =
     'Compare the user prompt with the assistant answer. Return JSON only: {"verdict":"success|partial|wrong|unclear","score":0,"issues":[],"missing":[],"next_prompt":""}. No markdown. next_prompt is required and must be non-empty.'

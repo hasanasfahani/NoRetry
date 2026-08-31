@@ -266,10 +266,50 @@ function buildAssumptions(input: RequestBriefInput, technical: boolean) {
 function buildRiskAssessment(input: RequestBriefInput, technical: boolean): { riskLevel: RequestBriefRiskLevel; riskReason: string } {
   const normalized = input.promptText.toLowerCase()
   const constraintCount = (input.hardConstraints ?? []).length + (input.outputRequirements ?? []).length
-  const highRiskPattern =
+  const existingHighRiskPattern =
     /\b(auth|authentication|billing|payment|database|schema|migration|security|permissions|deployment|infra|infrastructure|refactor|rewrite|delete|remove)\b/.test(
       normalized
     )
+  const productionAuthentication =
+    /\b(production|live)\b.{0,80}\b(auth|authentication|login|sessions?)\b/.test(normalized) ||
+    /\b(auth|authentication|login|sessions?)\b.{0,80}\b(production|live)\b/.test(normalized) ||
+    /\b(access control|authorization|rbac|role[- ]based access|session handling|session management|session rotation|user permissions?|account permissions?)\b/.test(
+      normalized
+    )
+  const paymentsOrFinancialCorrectness =
+    /\b(payments?|billing|checkout|subscriptions?|refunds?|invoices?|financial correctness|money movement|charge cards?|stripe webhooks?)\b/.test(
+      normalized
+    )
+  const destructiveMigration =
+    /\b(database|schema|migrations?|tables?|columns?|fields?)\b/.test(normalized) &&
+    /\b(delete(?:s|d|ing)?|drop(?:s|ped|ping)?|rename(?:s|d|ing)?|type changes?|change(?:s|d|ing)? (?:the )?type|alter(?:s|ed|ing)? (?:a |the )?column|backfill(?:s|ed|ing)?)\b/.test(
+      normalized
+    )
+  const exposedCredentials =
+    (/\b(exposed|leaked|committed|public|client[- ]side|hardcoded|compromised)\b.{0,80}\b(api keys?|credentials?|secrets?|tokens?|passwords?)\b/.test(
+      normalized
+    ) ||
+      /\b(api keys?|credentials?|secrets?|tokens?|passwords?)\b.{0,80}\b(exposed|leaked|committed|public|client[- ]side|hardcoded|compromised)\b/.test(
+        normalized
+      ))
+  const suspectedSecurityIncident =
+    /\b(security incident|suspected breach|data breach|account takeover|unauthorized access|credential leak|system compromised)\b/.test(normalized)
+  const sensitiveData =
+    /\b(sensitive (?:personal )?data|personally identifiable information|personal data|pii|phi|medical data|health data|patient data|regulated data|hipaa|pci[- ]dss|social security numbers?|passport data)\b/.test(
+      normalized
+    )
+  const broadCoreRewrite =
+    /\b(rewrite|refactor|replace|rebuild|overhaul)\b/.test(normalized) &&
+    /\b(entire|whole|all|across (?:the )?(?:core|main) modules?|core modules?|core architecture|multiple core modules?)\b/.test(normalized)
+  const highRiskPattern =
+    existingHighRiskPattern ||
+    productionAuthentication ||
+    paymentsOrFinancialCorrectness ||
+    destructiveMigration ||
+    exposedCredentials ||
+    suspectedSecurityIncident ||
+    sensitiveData ||
+    broadCoreRewrite
   const mediumRiskPattern =
     technical ||
     /\b(api|backend|frontend|state|integration|checkout|admin|dashboard|production|live)\b/.test(normalized) ||

@@ -34,12 +34,19 @@ const EnvSchema = z.object({
   DEEPSEEK_API_KEY: z.string().optional(),
   DEEPSEEK_MODEL: z.string().default("deepseek-v4-flash"),
   KIMI_API_KEY: z.string().optional(),
-  KIMI_MODEL: z.string().default("kimi-k2.6"),
+  KIMI_MODEL: z.string().default("kimi-k2.7-code-highspeed"),
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL: z.string().default("gpt-5.4-mini"),
+  OPENAI_PRD_MODEL: z.string().optional(),
+  GA4_MEASUREMENT_ID: z.string().optional(),
+  GA4_API_SECRET: z.string().optional(),
+  GA4_ANALYTICS_ENABLED: z.string().default("false"),
   PROJECT_PLANNING_PROVIDER: z.preprocess(
     (value) => (typeof value === "string" ? value.toLowerCase() : value),
-    z.enum(["kimi", "deepseek"]).default("kimi")
+    z.enum(["kimi", "deepseek", "openai"]).default("kimi")
   ),
   DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS: z.string().optional(),
+  DEEP_ANALYSIS_V2_DEEPSEEK_TIMEOUT_MS: z.string().optional(),
   DATABASE_URL: z.string().optional(),
   PROMPT_OPTIMIZER_USE_MOCKS: z.string().default("true"),
   PROMPT_OPTIMIZER_ENABLE_DB: z.string().default("false"),
@@ -59,8 +66,15 @@ export const env = EnvSchema.parse({
   DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL,
   KIMI_API_KEY: process.env.KIMI_API_KEY || process.env.MOONSHOT_API_KEY,
   KIMI_MODEL: process.env.KIMI_MODEL || process.env.MOONSHOT_MODEL,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  OPENAI_MODEL: process.env.OPENAI_MODEL || process.env.OPENAI_PRD_MODEL,
+  OPENAI_PRD_MODEL: process.env.OPENAI_PRD_MODEL,
+  GA4_MEASUREMENT_ID: process.env.GA4_MEASUREMENT_ID,
+  GA4_API_SECRET: process.env.GA4_API_SECRET,
+  GA4_ANALYTICS_ENABLED: process.env.GA4_ANALYTICS_ENABLED,
   PROJECT_PLANNING_PROVIDER: process.env.PROJECT_PLANNING_PROVIDER,
   DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS: process.env.DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS,
+  DEEP_ANALYSIS_V2_DEEPSEEK_TIMEOUT_MS: process.env.DEEP_ANALYSIS_V2_DEEPSEEK_TIMEOUT_MS,
   DATABASE_URL: process.env.DATABASE_URL,
   PROMPT_OPTIMIZER_USE_MOCKS: process.env.PROMPT_OPTIMIZER_USE_MOCKS,
   PROMPT_OPTIMIZER_ENABLE_DB: process.env.PROMPT_OPTIMIZER_ENABLE_DB,
@@ -76,10 +90,13 @@ export const env = EnvSchema.parse({
 })
 
 export const runtimeFlags = {
-  useMocks: env.PROMPT_OPTIMIZER_USE_MOCKS === "true" || (!env.DEEPSEEK_API_KEY && !env.KIMI_API_KEY),
+  useMocks:
+    env.PROMPT_OPTIMIZER_USE_MOCKS === "true" ||
+    (!env.DEEPSEEK_API_KEY && !env.KIMI_API_KEY && !env.OPENAI_API_KEY),
   enableDb: env.PROMPT_OPTIMIZER_ENABLE_DB === "true" && Boolean(env.DATABASE_URL),
   enableBilling: env.PROMPT_OPTIMIZER_ENABLE_BILLING === "true",
-  enableTeams: env.PROMPT_OPTIMIZER_ENABLE_TEAMS === "true"
+  enableTeams: env.PROMPT_OPTIMIZER_ENABLE_TEAMS === "true",
+  enableGa4Analytics: env.GA4_ANALYTICS_ENABLED === "true" && Boolean(env.GA4_MEASUREMENT_ID && env.GA4_API_SECRET)
 }
 
 export const billingEnv = {

@@ -14,11 +14,12 @@ import { trimForBudget } from "./cost-control"
 import { callDeepSeekJson } from "./deepseek"
 import { env, runtimeFlags } from "./env"
 import { callKimiJson } from "./kimi"
+import { callOpenAiJson } from "./openai"
 
 type DeepAnalysisV2ProviderStatus = "success" | "empty" | "invalid" | "failed" | "mocked"
 
 export type DeepAnalysisV2ProviderAttempt = {
-  provider: "deepseek" | "kimi"
+  provider: "openai" | "deepseek" | "kimi"
   status: DeepAnalysisV2ProviderStatus
 }
 
@@ -26,6 +27,7 @@ type RunDeepAnalysisV2Options = {
   callJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
   callKimiJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
   callDeepSeekJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
+  callOpenAiJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
   now?: () => number
   hardTimeoutMs?: number
   deepSeekFastFailureTimeoutMs?: number
@@ -33,15 +35,17 @@ type RunDeepAnalysisV2Options = {
 }
 
 const COMPLETION_CTA = "After you finish, confirm which requirements were completed and suggest the next step."
+const CONFIRMATION_NEXT_STEP_CTA = "After confirming, suggest what the next step should be."
 const ANALYSIS_UNAVAILABLE_PROMPT =
   "Review the previous answer against my original requirement. Check if it stayed within scope, avoided backend/storage work, confirmed completion, and suggested the next phase."
 const DEFAULT_DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS = 30_000
-const DEEP_ANALYSIS_V2_DEEPSEEK_FAST_FAILURE_TIMEOUT_MS = 30_000
+const DEEP_ANALYSIS_V2_DEEPSEEK_FAST_FAILURE_TIMEOUT_MS = 10_000
 const DEEP_ANALYSIS_V2_MAX_OUTPUT_TOKENS = 700
 const DEEP_ANALYSIS_V2_REPAIR_OUTPUT_TOKENS = 800
 const DEEP_ANALYSIS_V2_RETRY_DELAY_MIN_MS = 300
 const DEEP_ANALYSIS_V2_RETRY_DELAY_MAX_MS = 700
 const DEEP_ANALYSIS_V2_MIN_RETRY_BUDGET_MS = 500
+const DEEP_ANALYSIS_V2_MIN_REPAIR_BUDGET_MS = 6000
 type DeepAnalysisV2FallbackReason = NonNullable<DeepAnalysisV2ProviderMetadata["fallbackReason"]>
 type DeepAnalysisV2DeepSeekFailureReason = NonNullable<DeepAnalysisV2ProviderMetadata["deepSeekFailureReason"]>
 
@@ -152,6 +156,24 @@ function uniqueStrings(items: string[], max = 8) {
     if (output.length >= max) break
   }
   return output
+}
+
+function buildMissingRequirementsConfirmationPrompt(missingRequirements: string[]) {
+  const requirements = uniqueStrings(missingRequirements.map(normalize).filter(Boolean))
+
+  return [
+    "Before we move forward, confirm these requirements from my last prompt:",
+    "",
+    ...(requirements.length ? requirements : ["Match the submitted prompt requirements."]).map((item) => `- ${item}`),
+    "",
+    "For each one, answer:",
+    "- Completed, with evidence",
+    "- Not completed yet, with what remains",
+    "",
+    "Do not add new scope yet.",
+    "",
+    CONFIRMATION_NEXT_STEP_CTA
+  ].join("\n")
 }
 
 function isNextMoveV2Prompt(promptText: string) {
@@ -555,19 +577,7 @@ function buildFallbackGeneratedPrompt(input: DeepAnalysisV2Request, suggestedNex
     const requirements = extractFallbackRequirements(input.promptText)
     const matches = requirements.map((requirement) => matchFallbackRequirement(requirement, input.responseText))
     const missing = matches.filter((match) => match.status !== "pass").map((match) => match.requirementText)
-    return [
-      "Before we move forward, confirm these requirements from my last prompt:",
-      "",
-      ...missing.map((item) => `- ${item}`),
-      "",
-      "For each one, answer:",
-      "- Completed, with evidence",
-      "- Not completed yet, with what remains",
-      "",
-      "Do not add new scope yet.",
-      "",
-      "After confirming, suggest what the next step should be."
-    ].join("\n")
+    return buildMissingRequirementsConfirmationPrompt(missing)
   }
 
   if (isBookingPhaseOneUiFlow(input)) {
@@ -706,6 +716,15 @@ function configuredHardTimeoutMs() {
     : DEFAULT_DEEP_ANALYSIS_V2_HARD_TIMEOUT_MS
 }
 
+function configuredDeepSeekTimeoutMs(hardTimeoutMs: number) {
+  const raw = env.DEEP_ANALYSIS_V2_DEEPSEEK_TIMEOUT_MS
+  if (!raw) return Math.min(hardTimeoutMs, DEEP_ANALYSIS_V2_DEEPSEEK_FAST_FAILURE_TIMEOUT_MS)
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed >= 1_000
+    ? Math.min(parsed, hardTimeoutMs)
+    : Math.min(hardTimeoutMs, DEEP_ANALYSIS_V2_DEEPSEEK_FAST_FAILURE_TIMEOUT_MS)
+}
+
 function compactFailureMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "Unknown provider failure")
   return normalize(message).slice(0, 260)
@@ -717,6 +736,18 @@ function classifyProviderFailure(error: unknown): DeepAnalysisV2FallbackReason {
   const name = error && typeof error === "object" && "name" in error ? String((error as { name?: unknown }).name) : ""
   if (/zod/i.test(name)) return "invalid_json"
   return "provider_error"
+}
+
+function asDeepSeekFailureReason(
+  reason: DeepAnalysisV2FallbackReason
+): DeepAnalysisV2DeepSeekFailureReason {
+  return reason === "missing_key" ||
+    reason === "timeout" ||
+    reason === "empty_response" ||
+    reason === "invalid_json" ||
+    reason === "provider_error"
+    ? reason
+    : "unknown"
 }
 
 function isRecoverableProviderMessage(message: string) {
@@ -1100,21 +1131,9 @@ function repairGeneratedPrompt(result: DeepAnalysisV2Result): DeepAnalysisV2Resu
       const doNotLine = buildDoNotLine(blockedScope)
       if (doNotLine) generatedPrompt = `${generatedPrompt.trim()}\n\n${doNotLine}`
     }
-  } else if (promptIntent === "confirm_missing_requirements" && !generatedPrompt) {
+  } else if (promptIntent === "confirm_missing_requirements") {
     const missing = result.requirementMatches.filter((match) => match.status !== "pass").map((match) => match.requirementText)
-    generatedPrompt = [
-      "Before we move forward, confirm these requirements from my last prompt:",
-      "",
-      ...missing.map((item) => `- ${item}`),
-      "",
-      "For each one, answer:",
-      "- Completed, with evidence",
-      "- Not completed yet, with what remains",
-      "",
-      "Do not add new scope yet.",
-      "",
-      "After confirming, suggest what the next step should be."
-    ].join("\n")
+    generatedPrompt = buildMissingRequirementsConfirmationPrompt(missing)
   } else if (promptIntent === "ask_for_next_step") {
     if (!generatedPrompt || promptLooksLikeConfirmation(generatedPrompt) || promptLooksLikeReview(generatedPrompt)) {
       generatedPrompt = buildAskForNextStepPrompt(blockedScope)
@@ -1330,7 +1349,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-type DeepAnalysisV2ProviderName = "deepseek" | "kimi"
+type DeepAnalysisV2ProviderName = "openai" | "deepseek" | "kimi"
 
 type CompactDeepAnalysisVerdict = "success" | "partial" | "wrong" | "unclear"
 
@@ -1405,15 +1424,213 @@ type ProviderAttemptResult =
     }
 
 function parseJsonWithOneRepair(raw: string): unknown {
-  const cleaned = raw.trim().replace(/```(?:json)?|```/g, "").trim()
+  const cleaned = normalizeLooseJsonText(raw)
   try {
     return JSON.parse(cleaned)
   } catch {
-    const start = cleaned.indexOf("{")
-    const end = cleaned.lastIndexOf("}")
-    if (start === -1 || end <= start) throw new SyntaxError("Provider output did not contain a JSON object.")
-    return JSON.parse(cleaned.slice(start, end + 1))
+    for (const start of findJsonStartIndexes(cleaned)) {
+      const repaired = repairLooseJsonText(cleaned, start)
+      if (!repaired) continue
+      const parsed = tryParseLooseJsonCandidate(repaired)
+      if (parsed.ok) return parsed.value
+    }
+
+    for (const candidate of buildLooseJsonCandidates(cleaned)) {
+      const parsed = tryParseLooseJsonCandidate(candidate.text)
+      if (parsed.ok) return parsed.value
+    }
+
+    throw new SyntaxError("Provider output did not contain a valid JSON object.")
   }
+}
+
+function normalizeLooseJsonText(raw: string) {
+  return raw
+    .trim()
+    .replace(/^\uFEFF/, "")
+    .replace(/```(?:json|javascript|js)?/gi, "")
+    .replace(/```/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim()
+}
+
+function tryParseLooseJsonCandidate(raw: string): { ok: true; value: unknown } | { ok: false } {
+  for (const variant of buildRepairVariants(raw)) {
+    try {
+      const parsed = JSON.parse(variant)
+      if (typeof parsed === "string" && parsed.trim().startsWith("{")) {
+        return { ok: true, value: parseJsonWithOneRepair(parsed) }
+      }
+      return { ok: true, value: parsed }
+    } catch {
+      continue
+    }
+  }
+  return { ok: false }
+}
+
+function buildRepairVariants(raw: string) {
+  const normalized = normalizeLooseJsonText(raw)
+  const withoutTrailingCommas = normalized.replace(/,\s*([}\]])/g, "$1")
+  const withQuotedKeys = withoutTrailingCommas.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
+  const withoutLineComments = withQuotedKeys.replace(/(^|\n)\s*\/\/.*(?=\n|$)/g, "$1")
+  const withoutInlineLineComments = withQuotedKeys.replace(/\/\/[^\n\r]*/g, "")
+  const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "")
+  const withoutAllComments = withoutInlineLineComments.replace(/\/\*[\s\S]*?\*\//g, "")
+
+  return Array.from(new Set([
+    normalized,
+    withoutTrailingCommas,
+    withQuotedKeys,
+    withoutLineComments,
+    withoutInlineLineComments,
+    withoutBlockComments,
+    withoutAllComments
+  ].map((variant) => variant.trim()).filter(Boolean)))
+}
+
+function findJsonStartIndexes(raw: string) {
+  const indexes: number[] = []
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === "\\") escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+
+    if (character === '"') inString = true
+    else if (character === "{" || character === "[") indexes.push(index)
+  }
+
+  return indexes
+}
+
+function buildLooseJsonCandidates(raw: string) {
+  const candidates: Array<{ text: string; score: number }> = []
+  const stack: Array<{ character: "{" | "["; index: number }> = []
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === "\\") escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+
+    if (character === '"') {
+      inString = true
+      continue
+    }
+    if (character === "{" || character === "[") {
+      stack.push({ character, index })
+      continue
+    }
+    if (character !== "}" && character !== "]") continue
+
+    const expected = character === "}" ? "{" : "["
+    for (let stackIndex = stack.length - 1; stackIndex >= 0; stackIndex -= 1) {
+      const start = stack[stackIndex]
+      if (start.character !== expected) continue
+      const text = raw.slice(start.index, index + 1).trim()
+      candidates.push({ text, score: scoreJsonCandidate(text) })
+      stack.splice(stackIndex)
+      break
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score || b.text.length - a.text.length)
+}
+
+function scoreJsonCandidate(value: string) {
+  return [
+    "verdict",
+    "score",
+    "issues",
+    "missing",
+    "passed",
+    "item_results",
+    "prompt_intent",
+    "next_step_requirements",
+    "blocked_scope",
+    "next_prompt"
+  ].reduce((score, key) => score + (value.includes(key) ? 100 : 0), Math.min(value.length, 8000) / 100)
+}
+
+function repairLooseJsonText(raw: string, start: number) {
+  const candidate = raw.slice(start).trim()
+  if (!candidate) return null
+
+  const repaired = buildRepairVariants(candidate).at(-1) ?? ""
+  if (!repaired) return null
+
+  const closingTokens: string[] = []
+  let inString = false
+  let escaped = false
+
+  for (const character of repaired) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === "\\") escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+
+    if (character === '"') inString = true
+    else if (character === "{") closingTokens.push("}")
+    else if (character === "[") closingTokens.push("]")
+    else if (character === "}" || character === "]") {
+      const expected = closingTokens[closingTokens.length - 1]
+      if (character === expected) closingTokens.pop()
+    }
+  }
+
+  if (inString) return repaired
+  return `${repaired}${closingTokens.reverse().join("")}`
+}
+
+const COMPACT_DECISION_KEY_ALIASES: Record<string, string> = {
+  status: "verdict",
+  overallStatus: "verdict",
+  overall_status: "verdict",
+  confidence: "score",
+  passedItems: "passed",
+  passed_items: "passed",
+  missingItems: "missing",
+  missing_items: "missing",
+  ignoredExternalValidation: "ignored_external_validation",
+  external_validation_ignored: "ignored_external_validation",
+  itemResults: "item_results",
+  requirementMatches: "item_results",
+  requirement_matches: "item_results",
+  phaseCompletionClaimed: "phase_completion_claimed",
+  phase_completion: "phase_completion_claimed",
+  classificationAudit: "classification_audit",
+  promptIntent: "prompt_intent",
+  assistantSuggestedNextMove: "assistant_suggested_next_move",
+  nextStepRequirements: "next_step_requirements",
+  blockedScope: "blocked_scope",
+  nextPrompt: "next_prompt",
+  generatedPrompt: "next_prompt"
+}
+
+function normalizeCompactDecisionAliases(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value
+  const output: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = COMPACT_DECISION_KEY_ALIASES[key] ?? key
+    if (output[normalizedKey] === undefined) output[normalizedKey] = item
+  }
+  return output
 }
 
 function extractTaggedSection(raw: string, tag: "decision_json" | "next_prompt") {
@@ -1467,7 +1684,7 @@ function parseCompactProviderResult(raw: string): CompactDeepAnalysisResult {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new SyntaxError("Provider output was not a JSON object.")
   }
-  const record = parsed as Record<string, unknown>
+  const record = normalizeCompactDecisionAliases(parsed) as Record<string, unknown>
   const verdict = record.verdict
   const score = record.score
   const issues = toStringArray(record.issues, 6) ?? []
@@ -1615,6 +1832,15 @@ function extractRequirementLevelChecklist(promptText: string): DeepAnalysisV2Req
       text,
       source: "project_memory" as const
     }))
+  )
+}
+
+function isProjectTrackerReviewPrompt(promptText: string) {
+  return (
+    /\bproject tracker mode is on\b/i.test(promptText) &&
+    /\bCURRENT PHASE REQUIREMENTS\b/.test(promptText) &&
+    /\bREQUIREMENT-LEVEL CHECKLIST\b/.test(promptText) &&
+    /\bNEXT PHASE REQUIREMENTS\b/.test(promptText)
   )
 }
 
@@ -1912,6 +2138,7 @@ function compactResultToDeepAnalysis(input: {
   const compactIssues = sanitizeCompactIssues(input.compact.issues, input.request)
   const responseHasVerificationBlocker = answerHasVerificationBlocker(input.request.responseText)
   const phaseCompletionClaimed = input.compact.phase_completion_claimed || answerClaimsTaskCompletion(input.request.responseText)
+  const isProjectTrackerReview = isProjectTrackerReviewPrompt(input.request.promptText)
   const hasFalseCodeDoubt =
     responseLooksLikeNoCodeCompletionSummary(input.request) && compactLooksLikeFalseCodeDoubt(input.compact)
   let status = responseHasVerificationBlocker
@@ -2034,6 +2261,7 @@ function compactResultToDeepAnalysis(input: {
     status = "pass"
   }
   const hasActionableCarryover =
+    isProjectTrackerReview &&
     phaseCompletionClaimed &&
     status !== "fail" &&
     !responseHasVerificationBlocker &&
@@ -2123,7 +2351,7 @@ function buildDeepAnalysisV2Unavailable(input: {
   request: DeepAnalysisV2Request
   latencyMs: number
   timedOut: boolean
-  providerAttempted: "deepseek" | "kimi" | "none"
+  providerAttempted: DeepAnalysisV2ProviderName | "none"
   fallbackReason: DeepAnalysisV2FallbackReason
   failureMessage: string
   kimiLatencyMs?: number
@@ -2245,6 +2473,9 @@ async function runSingleProviderAttempt(input: {
         validatedCompact = parseCompactProviderResult(output)
       } catch (parseError) {
         const remainingTimeoutMs = Math.max(1, input.timeoutMs - input.latencyMs())
+        if (remainingTimeoutMs < DEEP_ANALYSIS_V2_MIN_REPAIR_BUDGET_MS || input.signal.aborted) {
+          throw parseError
+        }
         const repairPrompt = buildCompactJsonRepairPrompt({
           request: input.request,
           originalJson: output,
@@ -2273,6 +2504,13 @@ async function runSingleProviderAttempt(input: {
         const compactBeforeItemRepair = validatedCompact
         const outputBeforeItemRepair = validatedOutput
         const remainingTimeoutMs = Math.max(1, input.timeoutMs - input.latencyMs())
+        if (remainingTimeoutMs < DEEP_ANALYSIS_V2_MIN_REPAIR_BUDGET_MS || input.signal.aborted) {
+          if (!canSalvageCompactWithoutItemResults(compactBeforeItemRepair)) {
+            throw validationError
+          }
+          validatedCompact = compactBeforeItemRepair
+          validatedOutput = outputBeforeItemRepair
+        } else {
         const repairPrompt = buildItemResultsRepairPrompt({
           request: input.request,
           originalJson: output
@@ -2300,6 +2538,7 @@ async function runSingleProviderAttempt(input: {
           }
           validatedCompact = compactBeforeItemRepair
           validatedOutput = outputBeforeItemRepair
+        }
         }
       }
       const finalLatencyMs = input.latencyMs()
@@ -2494,14 +2733,14 @@ export async function runDeepAnalysisV2(
   const unavailable = (params: Omit<Parameters<typeof buildDeepAnalysisV2Unavailable>[0], "latencyMs" | "request">) =>
     buildDeepAnalysisV2Unavailable({ ...params, request: input, latencyMs: elapsed() })
 
-  if (runtimeFlags.useMocks && !options.callJson && !options.callKimiJson && !options.callDeepSeekJson) {
+  if (runtimeFlags.useMocks && !options.callJson && !options.callKimiJson && !options.callDeepSeekJson && !options.callOpenAiJson) {
     return unavailable({
       timedOut: false,
       providerAttempted: "none",
-      fallbackReason: env.DEEPSEEK_API_KEY || env.KIMI_API_KEY ? "mocks_enabled" : "missing_key",
-      failureMessage: env.DEEPSEEK_API_KEY || env.KIMI_API_KEY
+      fallbackReason: env.DEEPSEEK_API_KEY || env.KIMI_API_KEY || env.OPENAI_API_KEY ? "mocks_enabled" : "missing_key",
+      failureMessage: env.DEEPSEEK_API_KEY || env.KIMI_API_KEY || env.OPENAI_API_KEY
         ? "PROMPT_OPTIMIZER_USE_MOCKS is enabled, so Deep Analysis v2 did not call an LLM."
-        : "No DeepSeek or Kimi API key is loaded."
+        : "No OpenAI, DeepSeek, or Kimi API key is loaded."
     })
   }
 
@@ -2511,10 +2750,10 @@ export async function runDeepAnalysisV2(
       : buildCompactDeepAnalysisV2UserPrompt(input)
   const promptTokenEstimate = estimateTokens(DEEP_ANALYSIS_V2_SYSTEM_PROMPT, userPrompt)
   const hardTimeoutMs = options.hardTimeoutMs ?? configuredHardTimeoutMs()
-  const providerTimeoutMs = Math.min(
-    hardTimeoutMs,
-    options.deepSeekFastFailureTimeoutMs ?? DEEP_ANALYSIS_V2_DEEPSEEK_FAST_FAILURE_TIMEOUT_MS
-  )
+  const deepSeekTimeoutMs = options.deepSeekFastFailureTimeoutMs === undefined
+    ? configuredDeepSeekTimeoutMs(hardTimeoutMs)
+    : Math.min(hardTimeoutMs, options.deepSeekFastFailureTimeoutMs)
+  const openAiCall = options.callOpenAiJson ?? callOpenAiJson
   const kimiCall = options.callKimiJson ?? callKimiJson
   const deepSeekCall = options.callJson ?? options.callDeepSeekJson ?? callDeepSeekJson
 
@@ -2523,37 +2762,46 @@ export async function runDeepAnalysisV2(
     controller: AbortController
     promise: Promise<ProviderAttemptResult>
   }> = []
+  const completedAttempts: ProviderAttemptResult[] = []
 
   const addAttempt = (
     provider: DeepAnalysisV2ProviderName,
     model: string,
-    call: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
+    call: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>,
+    timeoutMs: number
   ) => {
     const controller = new AbortController()
+    const promise = runProviderAttempt({
+      provider,
+      model,
+      call,
+      request: input,
+      systemPrompt: DEEP_ANALYSIS_V2_SYSTEM_PROMPT,
+      userPrompt,
+      promptTokenEstimate,
+      timeoutMs,
+      signal: controller.signal,
+      now: options.now,
+      retryDelayMs: options.retryDelayMs
+    }).then((result) => {
+      completedAttempts.push(result)
+      return result
+    })
     attempts.push({
       provider,
       controller,
-      promise: runProviderAttempt({
-        provider,
-        model,
-        call,
-        request: input,
-        systemPrompt: DEEP_ANALYSIS_V2_SYSTEM_PROMPT,
-        userPrompt,
-        promptTokenEstimate,
-        timeoutMs: providerTimeoutMs,
-        signal: controller.signal,
-        now: options.now,
-        retryDelayMs: options.retryDelayMs
-      })
+      promise
     })
   }
 
+  if (!options.callJson && (options.callOpenAiJson || env.OPENAI_API_KEY)) {
+    addAttempt("openai", env.OPENAI_MODEL, openAiCall, hardTimeoutMs)
+  }
   if (options.callJson || options.callDeepSeekJson || env.DEEPSEEK_API_KEY) {
-    addAttempt("deepseek", env.DEEPSEEK_MODEL, deepSeekCall)
+    addAttempt("deepseek", env.DEEPSEEK_MODEL, deepSeekCall, deepSeekTimeoutMs)
   }
   if (!options.callJson && (options.callKimiJson || env.KIMI_API_KEY)) {
-    addAttempt("kimi", env.KIMI_MODEL, kimiCall)
+    addAttempt("kimi", env.KIMI_MODEL, kimiCall, hardTimeoutMs)
   }
 
   if (!attempts.length) {
@@ -2561,7 +2809,7 @@ export async function runDeepAnalysisV2(
       timedOut: false,
       providerAttempted: "none",
       fallbackReason: "missing_key",
-      failureMessage: "No DeepSeek or Kimi API key is loaded."
+      failureMessage: "No OpenAI, DeepSeek, or Kimi API key is loaded."
     })
   }
 
@@ -2575,17 +2823,57 @@ export async function runDeepAnalysisV2(
   } catch (error) {
     for (const attempt of attempts) attempt.controller.abort()
     const message = compactFailureMessage(error)
+    const deepSeekResult = completedAttempts.find((attempt) => attempt.provider === "deepseek")
+    const kimiResult = completedAttempts.find((attempt) => attempt.provider === "kimi")
+    const providerSummary = attempts.map((attempt) => {
+      const result = completedAttempts.find((completed) => completed.provider === attempt.provider)
+      if (!result) return `${attempt.provider}: timed out after ${elapsed()}ms`
+      return result.status === "failed"
+        ? `${result.provider}: ${result.message}`
+        : `${result.provider}: completed without winning`
+    }).join(" | ")
     logDeepAnalysisV2ProviderEvent({
       event: "provider_race_timeout",
       latencyMs: elapsed(),
       promptTokenEstimate,
-      message
+      message,
+      attempts: attempts.map((attempt) => {
+        const result = completedAttempts.find((completed) => completed.provider === attempt.provider)
+        return result
+          ? {
+              provider: result.provider,
+              status: result.status,
+              latencyMs: result.latencyMs,
+              timedOut: result.status === "failed" ? result.timedOut : false,
+              reason: result.status === "failed" ? result.reason : undefined
+            }
+          : {
+              provider: attempt.provider,
+              status: "timeout",
+              latencyMs: elapsed(),
+              timedOut: true,
+              reason: "timeout"
+            }
+      })
     })
     return unavailable({
       timedOut: true,
       providerAttempted: attempts[0]?.provider ?? "none",
       fallbackReason: "timeout",
-      failureMessage: message
+      failureMessage: `${message}. ${providerSummary}`.slice(0, 700),
+      kimiLatencyMs: attempts.some((attempt) => attempt.provider === "kimi")
+        ? kimiResult?.latencyMs ?? elapsed()
+        : undefined,
+      deepSeekAttempted: attempts.some((attempt) => attempt.provider === "deepseek"),
+      deepSeekLatencyMs: attempts.some((attempt) => attempt.provider === "deepseek")
+        ? deepSeekResult?.latencyMs ?? elapsed()
+        : undefined,
+      deepSeekFailureReason:
+        deepSeekResult?.status === "failed"
+          ? asDeepSeekFailureReason(deepSeekResult.reason)
+          : attempts.some((attempt) => attempt.provider === "deepseek")
+            ? "timeout"
+            : undefined
     })
   }
 
@@ -2594,9 +2882,10 @@ export async function runDeepAnalysisV2(
   const failedAttempts = raceResult.failures.filter(
     (failure): failure is Extract<ProviderAttemptResult, { status: "failed" }> => failure.status === "failed"
   )
+  const openAiFailure = failedAttempts.find((item) => item.provider === "openai")
   const deepSeekFailure = failedAttempts.find((item) => item.provider === "deepseek")
   const kimiFailure = failedAttempts.find((item) => item.provider === "kimi")
-  const primaryFailure = deepSeekFailure ?? kimiFailure
+  const primaryFailure = openAiFailure ?? deepSeekFailure ?? kimiFailure
   logDeepAnalysisV2ProviderEvent({
     event: "provider_race_failed",
     latencyMs: elapsed(),
@@ -2632,75 +2921,153 @@ export async function runDeepAnalysisV2(
 
 export async function checkDeepAnalysisV2ProviderHealth(options: {
   timeoutMs?: number
-  callJson?: (systemPrompt: string, userPrompt: string, maxTokens: number) => Promise<string | null>
+  callJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
+  callKimiJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
+  callOpenAiJson?: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
   now?: () => number
 } = {}) {
   const start = options.now?.() ?? Date.now()
   const elapsed = () => Math.max(0, (options.now?.() ?? Date.now()) - start)
   const timeoutMs = options.timeoutMs ?? 8_000
-
-  if (runtimeFlags.useMocks && !options.callJson) {
-    return {
-      ok: false,
-      provider: "fallback" as const,
-      model: env.DEEPSEEK_MODEL,
-      latencyMs: elapsed(),
-      reason: env.DEEPSEEK_API_KEY ? "mocks_enabled" : "missing_key",
-      message: env.DEEPSEEK_API_KEY
-        ? "PROMPT_OPTIMIZER_USE_MOCKS is enabled."
-        : "No DeepSeek API key is loaded."
+  const healthUserPrompt = JSON.stringify({
+    schema: {
+      verdict: "success|partial|wrong|unclear",
+      score: 0,
+      issues: [],
+      passed: [],
+      missing: [],
+      ignored_external_validation: [],
+      item_results: [],
+      phase_completion_claimed: false,
+      classification_audit: [],
+      prompt_intent: "implement_next_step|ask_for_next_step|confirm_missing_requirements|review_before_advancing",
+      assistant_suggested_next_move: "",
+      next_step_requirements: [],
+      blocked_scope: []
+    },
+    response_contract: [
+      "Return exactly <decision_json>{...}</decision_json> and <next_prompt>...</next_prompt>.",
+      `The next prompt must end with: ${COMPLETION_CTA}`
+    ],
+    input: {
+      userPrompt: "Build the water logging screen only. Do not add reminders yet.",
+      assistantAnswer: "Completed the water logging screen. Reminders were not added.",
+      checklistItems: []
     }
-  }
+  })
 
-  if (!env.DEEPSEEK_API_KEY && !options.callJson) {
-    return {
-      ok: false,
-      provider: "deepseek" as const,
-      model: env.DEEPSEEK_MODEL,
-      latencyMs: elapsed(),
-      reason: "missing_key",
-      message: "No DeepSeek API key is loaded."
-    }
-  }
-
-  try {
-    const output = await withTimeout(
-      (options.callJson ?? callDeepSeekJson)(
-        "Return one JSON object only. No markdown.",
-        JSON.stringify({ task: "health_check", expected: { ok: true } }),
-        80
-      ),
-      timeoutMs,
-      "DeepSeek health check"
-    )
-    if (!output) {
+  const checkProvider = async (
+    provider: DeepAnalysisV2ProviderName,
+    model: string,
+    configured: boolean,
+    call: (systemPrompt: string, userPrompt: string, maxTokens: number, signal?: AbortSignal) => Promise<string | null>
+  ) => {
+    const providerStartedAt = options.now?.() ?? Date.now()
+    const providerElapsed = () => Math.max(0, (options.now?.() ?? Date.now()) - providerStartedAt)
+    if (!configured) {
       return {
         ok: false,
-        provider: "deepseek" as const,
-        model: env.DEEPSEEK_MODEL,
-        latencyMs: elapsed(),
-        reason: "empty_response",
-        message: "DeepSeek returned an empty response."
+        provider,
+        model,
+        latencyMs: providerElapsed(),
+        reason: "missing_key",
+        message: `No ${
+          provider === "openai" ? "OpenAI" : provider === "deepseek" ? "DeepSeek" : "Kimi"
+        } API key is loaded.`
       }
     }
 
-    JSON.parse(output)
-    return {
-      ok: true,
-      provider: "deepseek" as const,
-      model: env.DEEPSEEK_MODEL,
-      latencyMs: elapsed(),
-      reason: null,
-      message: "DeepSeek returned valid JSON."
+    const controller = new AbortController()
+    try {
+      const output = await withTimeout(
+        call(DEEP_ANALYSIS_V2_SYSTEM_PROMPT, healthUserPrompt, 420, controller.signal),
+        timeoutMs,
+        `${provider} Deep Analysis health check`
+      )
+      if (!output?.trim()) {
+        throw new Error(`${provider} returned an empty response.`)
+      }
+      parseCompactProviderResult(output)
+      return {
+        ok: true,
+        provider,
+        model,
+        latencyMs: providerElapsed(),
+        reason: null,
+        message: `${provider} returned a valid Deep Analysis result.`
+      }
+    } catch (error) {
+      controller.abort()
+      const message = compactFailureMessage(error)
+      return {
+        ok: false,
+        provider,
+        model,
+        latencyMs: providerElapsed(),
+        reason: /empty response/i.test(message)
+          ? "empty_response"
+          : provider === "deepseek"
+            ? classifyDeepSeekFailure(error)
+            : classifyProviderFailure(error),
+        message
+      }
     }
-  } catch (error) {
+  }
+
+  if (runtimeFlags.useMocks && !options.callJson && !options.callKimiJson && !options.callOpenAiJson) {
+    const providers = [
+      await checkProvider("openai", env.OPENAI_MODEL, false, callOpenAiJson),
+      await checkProvider("deepseek", env.DEEPSEEK_MODEL, false, callDeepSeekJson),
+      await checkProvider("kimi", env.KIMI_MODEL, false, callKimiJson)
+    ]
     return {
       ok: false,
-      provider: "deepseek" as const,
-      model: env.DEEPSEEK_MODEL,
+      provider: "none" as const,
+      model: null,
       latencyMs: elapsed(),
-      reason: classifyDeepSeekFailure(error),
-      message: compactFailureMessage(error)
+      reason: "mocks_enabled",
+      message: "PROMPT_OPTIMIZER_USE_MOCKS is enabled.",
+      providers
     }
+  }
+
+  const providers = await Promise.all([
+    checkProvider(
+      "openai",
+      env.OPENAI_MODEL,
+      Boolean(options.callOpenAiJson || (!options.callJson && env.OPENAI_API_KEY)),
+      options.callOpenAiJson ?? callOpenAiJson
+    ),
+    checkProvider(
+      "deepseek",
+      env.DEEPSEEK_MODEL,
+      Boolean(options.callJson || (!options.callKimiJson && !options.callOpenAiJson && env.DEEPSEEK_API_KEY)),
+      options.callJson ?? callDeepSeekJson
+    ),
+    checkProvider(
+      "kimi",
+      env.KIMI_MODEL,
+      Boolean(options.callKimiJson || (!options.callJson && !options.callOpenAiJson && env.KIMI_API_KEY)),
+      options.callKimiJson ?? callKimiJson
+    )
+  ])
+  const winner = providers.find((provider) => provider.ok)
+
+  return {
+    ok: Boolean(winner),
+    provider: winner?.provider ?? "none",
+    model: winner?.model ?? null,
+    latencyMs: elapsed(),
+    reason: winner
+      ? null
+      : providers.some((provider) => provider.reason === "timeout")
+        ? "timeout"
+        : providers.every((provider) => provider.reason === "missing_key")
+          ? "missing_key"
+          : "provider_error",
+    message: winner
+      ? `${winner.provider} passed the realistic Deep Analysis health check.`
+      : providers.map((provider) => `${provider.provider}: ${provider.message}`).join(" | "),
+    providers
   }
 }

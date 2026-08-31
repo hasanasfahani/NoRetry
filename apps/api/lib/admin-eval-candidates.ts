@@ -67,10 +67,10 @@ const DeepAnalysisV2DecisionSnapshotSchema = z
     completedAt: z.string().optional(),
     rolloutMode: z.enum(["off", "shadow", "on"]).optional(),
     applied: z.boolean().optional(),
-    provider: z.enum(["kimi", "deepseek", "fallback", "none"]),
+    provider: z.enum(["openai", "kimi", "deepseek", "fallback", "none"]),
     model: z.string().optional(),
     latencyMs: z.number().int().nonnegative().optional(),
-    providerAttempted: z.enum(["kimi", "deepseek", "none"]).optional(),
+    providerAttempted: z.enum(["openai", "kimi", "deepseek", "none"]).optional(),
     fallbackReason: z.string().optional(),
     failureMessage: z.string().optional(),
     kimiLatencyMs: z.number().int().nonnegative().optional(),
@@ -99,7 +99,7 @@ const DeepAnalysisV2ComparisonSnapshotSchema = z
     v1Decision: z.string().nullable().default(null),
     v2Decision: z.string(),
     agreement: z.enum(["agree", "disagree", "unknown"]),
-    provider: z.enum(["kimi", "deepseek", "fallback", "none"]),
+    provider: z.enum(["openai", "kimi", "deepseek", "fallback", "none"]),
     latencyMs: z.number().int().nonnegative().optional(),
     generatedPrompt: z.string().default("")
   })

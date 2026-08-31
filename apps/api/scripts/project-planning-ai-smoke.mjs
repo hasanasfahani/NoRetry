@@ -5,8 +5,11 @@ import {
   PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS,
   PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS,
   PROJECT_PLANNING_PROVIDER_TIMEOUT_MS,
+  ProjectPlanningIntakeFieldsSchema,
   ProjectPlanningQuestionSchema,
-  ProjectPlanningDiagnosticsSchema
+  ProjectPlanningDiagnosticsSchema,
+  buildProjectPlanningNfrSectionBody,
+  deriveProjectPlanningNfrProfile
 } from "../../../packages/shared/src/project-planning.ts"
 import { projectPlanningAiTestInternals } from "../lib/project-planning-ai.ts"
 
@@ -17,6 +20,7 @@ const {
   buildCoverageFromPrdSnapshot,
   buildCompactDraftContext,
   buildDraftFromCompactPrd,
+  buildProjectPlanningRaceProviders,
   buildPrdFieldsFromCompactDraft,
   buildProjectPlanningDraftResponseFromCompactData,
   buildPrdSnapshotFromCompactSections,
@@ -24,6 +28,7 @@ const {
   buildQuestionsFromCompactTuples,
   buildResolvedDraftInputs,
   createPlanningDiagnostics,
+  parseLooseJson,
   runProjectPlanningAnalysisProviderRace,
   runProjectPlanningDraftProviderRace,
   selectProjectPlanningProvider,
@@ -34,6 +39,13 @@ const {
 
 const waterDescription = "water intake app"
 const compactPromptDescription = "A compact water intake app with quick-add logging, hydration reminders, daily progress, unit selection, daily reset, notification permission, and edit/delete intake entries."
+
+const restoredLegacyIntake = ProjectPlanningIntakeFieldsSchema.parse({
+  appIdea: "legacy project",
+  targetUsers: "Existing users"
+})
+assert.equal(restoredLegacyIntake.accessAndRoles, "")
+assert.equal(restoredLegacyIntake.dataAndSensitivity, "")
 
 assert.ok(
   PROJECT_PLANNING_PROVIDER_TIMEOUT_MS >= 12_000 && PROJECT_PLANNING_PROVIDER_TIMEOUT_MS <= 15_000,
@@ -46,19 +58,20 @@ assert.ok(
 )
 
 assert.ok(
-  PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS <= 30_000,
-  "Expected Build PRD Draft provider timeout to keep waits under 30 seconds."
+  PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS === 50_000,
+  "Expected Build PRD Draft provider timeout to allow the full PRD attempt up to 50 seconds."
 )
 
 assert.ok(
-  PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS >= PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS + 3_000,
-  "Expected Build PRD Draft client timeout to leave room for provider completion."
+  PROJECT_PLANNING_DRAFT_CLIENT_TIMEOUT_MS >= PROJECT_PLANNING_DRAFT_PROVIDER_TIMEOUT_MS + 35_000,
+  "Expected Build PRD Draft client timeout to leave room for the compact LLM retry."
 )
 
 const selectedKimiProvider = selectProjectPlanningProvider({
   provider: "kimi",
   hasKimiApiKey: true,
   hasDeepSeekApiKey: true,
+  hasOpenAiApiKey: true,
   systemPrompt: "system",
   userPrompt: "user",
   maxTokens: 100
@@ -71,6 +84,7 @@ const selectedDeepSeekProvider = selectProjectPlanningProvider({
   provider: "deepseek",
   hasKimiApiKey: true,
   hasDeepSeekApiKey: true,
+  hasOpenAiApiKey: true,
   systemPrompt: "system",
   userPrompt: "user",
   maxTokens: 100
@@ -79,10 +93,24 @@ const selectedDeepSeekProvider = selectProjectPlanningProvider({
 assert.equal(selectedDeepSeekProvider.name, "DeepSeek")
 assert.equal(selectedDeepSeekProvider.configured, true)
 
+const selectedOpenAiProvider = selectProjectPlanningProvider({
+  provider: "openai",
+  hasKimiApiKey: true,
+  hasDeepSeekApiKey: true,
+  hasOpenAiApiKey: true,
+  systemPrompt: "system",
+  userPrompt: "user",
+  maxTokens: 100
+})
+
+assert.equal(selectedOpenAiProvider.name, "OpenAI")
+assert.equal(selectedOpenAiProvider.configured, true)
+
 const missingSelectedProvider = selectProjectPlanningProvider({
   provider: "kimi",
   hasKimiApiKey: false,
   hasDeepSeekApiKey: true,
+  hasOpenAiApiKey: true,
   systemPrompt: "system",
   userPrompt: "user",
   maxTokens: 100
@@ -93,6 +121,21 @@ assert.equal(
   missingSelectedProvider.configured,
   false,
   "Expected Project Planning to avoid hidden fallback when the selected provider is missing."
+)
+
+const defaultRaceProviders = buildProjectPlanningRaceProviders({
+  hasKimiApiKey: true,
+  hasDeepSeekApiKey: true,
+  hasOpenAiApiKey: true,
+  systemPrompt: "system",
+  userPrompt: "user",
+  maxTokens: 100
+})
+
+assert.deepEqual(
+  defaultRaceProviders.map((provider) => provider.name),
+  ["OpenAI", "Kimi", "DeepSeek"],
+  "Expected Project Planning races to include OpenAI alongside Kimi and DeepSeek."
 )
 
 const analysisPromptInput = buildProjectPlanningAnalysisPromptInput({
@@ -579,10 +622,47 @@ const draftInput = {
 }
 
 const resolvedDraftInputs = buildResolvedDraftInputs(draftInput)
+assert.deepEqual(
+  parseLooseJson('```json\n{"d":["water"],"r":["log"]'),
+  { d: ["water"], r: ["log"] },
+  "Expected local JSON recovery to close truncated arrays and objects."
+)
+assert.deepEqual(
+  parseLooseJson([
+    "Here is the JSON:",
+    "```json",
+    '{ title: "Shopping List", "requirements": ["share list",], // remove comment',
+    ' "phases": [{"name":"List Sharing","deliverables":["shared list"],"acceptance":["partner can see updates",],}], }',
+    "```"
+  ].join("\n")),
+  {
+    title: "Shopping List",
+    requirements: ["share list"],
+    phases: [
+      {
+        name: "List Sharing",
+        deliverables: ["shared list"],
+        acceptance: ["partner can see updates"]
+      }
+    ]
+  },
+  "Expected tolerant JSON recovery to extract fenced JSON, quote bare keys, remove trailing commas, and ignore comments."
+)
+
 const compactDraftContext = buildCompactDraftContext(resolvedDraftInputs, waterPrdSnapshot)
 const draftPromptInput = buildProjectPlanningDraftPromptInput({
   projectLabel: draftInput.projectLabel,
   compactDraftContext
+})
+const retryDraftPromptInput = buildProjectPlanningDraftPromptInput({
+  projectLabel: draftInput.projectLabel,
+  compactDraftContext,
+  generationAttempt: 1
+})
+const compactRetryDraftPromptInput = buildProjectPlanningDraftPromptInput({
+  projectLabel: draftInput.projectLabel,
+  compactDraftContext,
+  mode: "compact_retry"
 })
 const draftPromptContext = JSON.parse(draftPromptInput.userPrompt.split("\n")[0])
 
@@ -609,6 +689,17 @@ assert.match(
   "Expected Build PRD Draft to keep external validation out of implementation phase fields."
 )
 assert.match(draftPromptInput.userPrompt, /under 14 words/i)
+assert.match(retryDraftPromptInput.userPrompt, /previous response failed JSON validation/i)
+assert.doesNotMatch(draftPromptInput.userPrompt, /previous response failed JSON validation/i)
+assert.ok(
+  compactRetryDraftPromptInput.maxTokens < draftPromptInput.maxTokens,
+  "Expected compact PRD retry to use a smaller output budget than the full PRD attempt."
+)
+assert.match(compactRetryDraftPromptInput.userPrompt, /"d":\["title","overview","problem","targetUser","goal","scope"\]/)
+assert.match(compactRetryDraftPromptInput.userPrompt, /p has exactly 3 phases/i)
+assert.match(compactRetryDraftPromptInput.userPrompt, /Phase list fields are arrays/i)
+assert.match(compactRetryDraftPromptInput.userPrompt, /validation proof=1/i)
+assert.doesNotMatch(compactRetryDraftPromptInput.userPrompt, /previous response failed JSON validation/i)
 assert.equal(
   resolvedDraftInputs.intakeFields.firstVersion,
   "Set a daily goal, log water, edit entries, see progress, and receive reminders.",
@@ -819,6 +910,37 @@ const validWaterDraftFlatArrayJson = JSON.stringify({
 
 const compactPrdDraft = buildDraftFromCompactPrd(validWaterDraftPayload)
 
+assert.equal(
+  compactPrdDraft.sections.find((section) => section.id === "non-functional-requirements")?.body,
+  "Not yet specified",
+  "Expected old or blank intake records to receive a non-blocking NFR fallback."
+)
+
+const highRiskNfrFields = ProjectPlanningIntakeFieldsSchema.parse({
+  appIdea: "A booking app that takes card payments.",
+  accessAndRoles: "Customers sign in; staff and admins can change booking status.",
+  dataAndSensitivity: "Save customer names, email addresses, bookings, and payment references.",
+  deploymentAndServices: "Run on Replit and connect to Stripe and an email service.",
+  qualityPriorities: "Accessibility and easy maintenance matter most."
+})
+assert.equal(deriveProjectPlanningNfrProfile(highRiskNfrFields).riskLevel, "high")
+assert.match(
+  buildProjectPlanningNfrSectionBody(highRiskNfrFields),
+  /High-risk — Phase 4 must require experienced-engineer review/i
+)
+
+const highRiskFallbackDraft = buildDraftFromCompactPrd(validWaterDraftPayload, highRiskNfrFields)
+assert.equal(
+  highRiskFallbackDraft.sections.filter((section) => section.id === "non-functional-requirements").length,
+  1,
+  "Expected exactly one generic NFR section."
+)
+assert.match(
+  highRiskFallbackDraft.sections.find((section) => section.id === "non-functional-requirements")?.body ?? "",
+  /Customers sign in; staff and admins can change booking status/i,
+  "Expected omitted model NFR output to fall back to the raw intake answers."
+)
+
 assert.equal(compactPrdDraft.sections.find((section) => section.id === "problem")?.body.includes("Users forget"), true)
 assert.equal(compactPrdDraft.implementationPhases[0].deliverables[0], "Daily hydration goal state")
 assert.equal(compactPrdDraft.implementationPhases[0].buildScope[0], "Store daily hydration goal")
@@ -864,6 +986,13 @@ assert.ok(
 
 const keyedPrdFields = buildPrdFieldsFromCompactDraft({
   ...validWaterDraftPayload,
+  nfr: [
+    "Require signed-in users for private screens.",
+    "Keep each user's saved hydration entries private.",
+    "Validate entries and preserve input when saving fails.",
+    "Use the existing Replit deployment and email service.",
+    "Prioritize accessibility and maintainable code."
+  ],
   d: {
     title: "Water Intake App MVP PRD",
     overview: "A focused water intake app for hydration goals and daily progress.",
@@ -876,6 +1005,7 @@ const keyedPrdFields = buildPrdFieldsFromCompactDraft({
 
 assert.equal(keyedPrdFields.problem, "Users forget how much water they drank during the day.")
 assert.equal(keyedPrdFields.goal, "Help users log water and meet a daily hydration goal.")
+assert.equal(keyedPrdFields.nonFunctionalRequirements.length, 5)
 
 assert.throws(
   () => buildProjectPlanningDraftResponseFromCompactData({
@@ -1073,6 +1203,66 @@ assert.deepEqual(
   "Expected string acceptance criteria to be normalized into an array."
 )
 
+const aliasObjectDraft = await runProjectPlanningDraftProviderRace({
+  description: waterDescription,
+  resolvedDraftInputs,
+  systemPrompt: "system",
+  userPrompt: "user",
+  maxTokens: 100,
+  timeoutMs: 500,
+  metadata: waterDraftMetadata,
+  providers: [
+    {
+      name: "Kimi",
+      configured: true,
+      call: async () => [
+        "Here is the PRD JSON:",
+        JSON.stringify({
+          productName: "Hydrate Together MVP PRD",
+          summary: "A lightweight app that helps partners share hydration goals and progress.",
+          problem: "Users forget hydration goals and need quick progress visibility.",
+          targetUsers: "Busy partners who want shared reminders.",
+          primaryGoal: "Keep both partners aware of water intake progress.",
+          mvpScope: "Shared goal setup, quick logging, and progress visibility.",
+          features: ["Create a shared hydration list", "Log water intake", "Show shared progress"],
+          outOfScope: ["Wearable integrations"],
+          successMetrics: ["A partner can see progress updates", "A user can log water quickly"],
+          risks: ["Reminder timing may need tuning"],
+          implementationPlan: [
+            {
+              name: "Shared List Foundation",
+              objective: "Build the shared hydration state and first screen.",
+              tasks: ["Create shared list state", "Render partner progress"],
+              exclusions: ["No accounts"],
+              outputs: ["Shared hydration screen"],
+              acceptance: ["Partner progress is visible"]
+            },
+            {
+              name: "Logging and Progress",
+              objective: "Let users add water and see progress update.",
+              tasks: ["Add quick log action", "Update progress total"],
+              outputs: ["Quick log control"],
+              acceptance: ["A log updates the progress display"]
+            }
+          ]
+        }),
+        "Done."
+      ].join("\n")
+    }
+  ]
+})
+
+assert.equal(aliasObjectDraft.diagnostics.providerName, "Kimi")
+assert.equal(aliasObjectDraft.diagnostics.malformedJson, true)
+assert.equal(aliasObjectDraft.diagnostics.repairSucceeded, true)
+assert.match(aliasObjectDraft.draft.title, /Hydrate Together/i)
+assert.equal(aliasObjectDraft.draft.implementationPhases.length, 2)
+assert.deepEqual(
+  aliasObjectDraft.draft.implementationPhases[0].acceptanceCriteria,
+  ["Partner progress is visible"],
+  "Expected schema aliases to normalize provider PRD shape before validation."
+)
+
 const invalidThenValidDraft = await runProjectPlanningDraftProviderRace({
   description: waterDescription,
   resolvedDraftInputs,
@@ -1106,6 +1296,32 @@ assert.equal(
   true,
   "Expected a PRD draft without phases not to win the provider race."
 )
+
+let schemaRepairPrompt = ""
+const schemaRepairedDraft = await runProjectPlanningDraftProviderRace({
+  description: waterDescription,
+  resolvedDraftInputs,
+  systemPrompt: "system",
+  userPrompt: "user",
+  maxTokens: 100,
+  timeoutMs: 2500,
+  providers: [
+    {
+      name: "Kimi",
+      configured: true,
+      call: async () => JSON.stringify({ title: "Incomplete PRD" }),
+      repairJson: async ({ schemaDescription }) => {
+        schemaRepairPrompt = schemaDescription
+        return validWaterDraftJson
+      }
+    }
+  ]
+})
+
+assert.equal(schemaRepairedDraft.diagnostics.repairAttempted, true)
+assert.equal(schemaRepairedDraft.diagnostics.repairSucceeded, true)
+assert.match(schemaRepairPrompt, /Validation failure:/)
+assert.equal(schemaRepairedDraft.draft.implementationPhases.length, 3)
 
 const blankPhaseTitleThenValidDraft = await runProjectPlanningDraftProviderRace({
   description: waterDescription,
