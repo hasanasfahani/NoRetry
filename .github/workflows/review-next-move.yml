@@ -1,0 +1,63 @@
+name: Review Next Move Eval
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/review-next-move.yml"
+      - "apps/extension/lib/review/**"
+      - "apps/extension/scripts/next-move-*.mjs"
+      - "apps/extension/package.json"
+      - "package-lock.json"
+      - "package.json"
+      - "packages/shared/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/review-next-move.yml"
+      - "apps/extension/lib/review/**"
+      - "apps/extension/scripts/next-move-*.mjs"
+      - "apps/extension/package.json"
+      - "package-lock.json"
+      - "package.json"
+      - "packages/shared/**"
+  workflow_dispatch:
+
+jobs:
+  review-next-move:
+    name: Review next-move quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      NEXT_MOVE_EVAL_MODE: replay
+      NEXT_MOVE_EVAL_REPORT_PATH: .tmp/next-move-eval-report.json
+      NEXT_MOVE_EVAL_MIN_OVERALL: "1"
+      NEXT_MOVE_EVAL_MIN_INTERPRETER: "1"
+      NEXT_MOVE_EVAL_MIN_AI_DECISION: "1"
+      NEXT_MOVE_EVAL_MIN_HARD_GATE: "1"
+      NEXT_MOVE_EVAL_MIN_RUBRIC: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run next-move review gate
+        run: npm run test:review-next-move:ci
+
+      - name: Upload next-move eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-move-eval-report
+          path: apps/extension/.tmp/next-move-eval-report.json
+          if-no-files-found: warn
